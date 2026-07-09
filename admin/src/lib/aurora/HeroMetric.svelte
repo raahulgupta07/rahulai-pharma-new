@@ -1,5 +1,7 @@
 <script>
-  // Hero metric card: big number + inline bar sparkline + side stats.
+  // Hero metric panel: filled accent surface, big number, bar sparkline, side stats.
+  // Everything on it uses text-on-accent, which flips in dark mode where the
+  // accent itself becomes light.
   let {
     value = '—',
     suffix = '',
@@ -11,34 +13,36 @@
 </script>
 
 <div
-  class="elev grid grid-cols-1 items-center gap-6 rounded-2xl border-[0.5px] border-line bg-surface p-6 lg:grid-cols-[1.1fr_1.5fr_0.8fr]"
+  class="flex flex-wrap items-center gap-[26px] rounded-[18px] bg-accent p-[26px] text-on-accent"
 >
-  <div>
-    <div class="text-[52px] font-bold leading-none tracking-tight tnum text-ink">
-      {value}<span class="text-[24px] text-ink-3">{suffix}</span>
+  <div class="min-w-[180px]">
+    <div class="page-title text-[44px] leading-none tnum">
+      {value}<span class="text-[24px] opacity-70">{suffix}</span>
     </div>
-    {#if caption}<div class="mt-2 max-w-[210px] text-[13.5px] text-ink-2">{caption}</div>{/if}
+    {#if caption}
+      <div class="mt-1.5 max-w-[220px] text-[13px] opacity-85">{caption}</div>
+    {/if}
     {#if live}
-      <div class="mt-2 flex items-center gap-2 text-[12.5px] font-semibold text-success">
-        <span class="h-2 w-2 rounded-full bg-success"></span>{live}
+      <div class="mt-2.5 flex items-center gap-1.5 text-[11.5px] opacity-70">
+        <span class="h-1.5 w-1.5 rounded-full bg-success-soft"></span>{live}
       </div>
     {/if}
   </div>
 
-  <div class="flex h-[78px] items-end gap-[5px]">
+  <div class="flex h-[60px] min-w-[160px] flex-1 items-end gap-1">
     {#each bars as h}
       <div
-        class="flex-1 rounded-t-[5px] transition-transform hover:scale-y-[1.04]"
-        style="height:{Math.max(5, h)}%; background:linear-gradient(180deg,var(--color-accent),var(--color-accent-hover)); opacity:.9"
+        class="flex-1 rounded-t-[3px] bg-current transition-opacity hover:opacity-90"
+        style="height:{Math.max(5, h)}%; opacity:.55"
       ></div>
     {/each}
   </div>
 
-  <div>
+  <div class="flex flex-wrap gap-[22px]">
     {#each stats as s}
-      <div class="py-1.5 text-right">
-        <div class="text-[21px] font-bold tnum text-ink">{s.value}</div>
-        <div class="mt-0.5 text-[11.5px] text-ink-3">{s.label}</div>
+      <div>
+        <div class="page-title text-[19px] tnum">{s.value}</div>
+        <div class="text-[11px] opacity-80">{s.label}</div>
       </div>
     {/each}
   </div>

@@ -2,6 +2,7 @@
   import '../app.css';
   import { page } from '$app/stores';
   import { base } from '$app/paths';
+  import { goto } from '$app/navigation';
   import { browser } from '$app/environment';
   import {
     LayoutDashboard,
@@ -12,10 +13,10 @@
     Store,
     Bot,
     FlaskConical,
-    Settings,
+    SlidersHorizontal,
     Search,
     MessageCircle,
-    Lock,
+    LogOut,
     Users,
     Code2,
     Sun,
@@ -24,8 +25,6 @@
     Menu,
     Bell,
     Pill,
-    Boxes,
-    MessageSquare,
     Brain
   } from '@lucide/svelte';
   import ToastHost from '$lib/aurora/ToastHost.svelte';
@@ -119,135 +118,127 @@
 
   let menuOpen = $state(false);
 
-  // ---- two-level nav: top product tabs + grouped left sub-nav ----
-  const TABS = [
+  // ---- single-level grouped nav ----
+  const SECTIONS = [
+    { label: 'Overview', items: [{ href: '/', label: 'Overview', icon: LayoutDashboard }] },
     {
-      id: 'chat',
-      label: 'Chat',
-      icon: MessageCircle,
-      groups: [
-        { label: 'Assistant', items: [{ href: '/chat', label: 'Chat tester', icon: MessageCircle }] }
+      label: 'Assistant',
+      items: [
+        { href: '/chat', label: 'Chat tester', icon: MessageCircle },
+        { href: '/conversations', label: 'Conversations', icon: MessagesSquare }
       ]
     },
     {
-      id: 'workspace',
-      label: 'Workspace',
-      icon: LayoutDashboard,
-      groups: [
-        {
-          label: 'Insights',
-          items: [
-            { href: '/', label: 'Overview', icon: LayoutDashboard },
-            { href: '/conversations', label: 'Conversations', icon: MessagesSquare },
-            { href: '/eval', label: 'Evaluation', icon: FlaskConical },
-            { href: '/graph', label: 'Knowledge graph', icon: Share2 },
-            { href: '/learning', label: 'Learning', icon: Brain },
-            { href: '/stores', label: 'Stores', icon: Store }
-          ]
-        }
-      ]
-    },
-    {
-      id: 'data',
       label: 'Data',
-      icon: Database,
-      groups: [
-        {
-          label: 'Data',
-          items: [
-            { href: '/data', label: 'Catalog & inventory', icon: Database },
-            { href: '/ftp', label: 'SFTP uploads', icon: Server }
-          ]
-        }
+      items: [
+        { href: '/data', label: 'Catalog & inventory', icon: Database },
+        { href: '/ftp', label: 'SFTP uploads', icon: Server }
       ]
     },
     {
-      id: 'settings',
-      label: 'Settings',
-      icon: Settings,
-      groups: [
-        {
-          label: 'Config',
-          items: [
-            { href: '/settings', label: 'Answer behaviour', icon: MessageSquare },
-            { href: '/agent', label: 'Agent', icon: Bot },
-            { href: '/users', label: 'Users', icon: Users },
-            { href: '/tenants', label: 'Tenants', icon: Building2 },
-            { href: '/embed', label: 'Embed widget', icon: Code2 }
-          ]
-        }
+      label: 'Intelligence',
+      items: [
+        { href: '/graph', label: 'Knowledge graph', icon: Share2 },
+        { href: '/eval', label: 'Evaluation', icon: FlaskConical },
+        { href: '/learning', label: 'Learning', icon: Brain }
+      ]
+    },
+    {
+      label: 'Organization',
+      items: [
+        { href: '/stores', label: 'Stores', icon: Store },
+        { href: '/tenants', label: 'Tenants', icon: Building2 },
+        { href: '/users', label: 'Users', icon: Users }
+      ]
+    },
+    {
+      label: 'Configuration',
+      items: [
+        { href: '/settings', label: 'Answer behaviour', icon: SlidersHorizontal },
+        { href: '/agent', label: 'Agent', icon: Bot },
+        { href: '/embed', label: 'Embed widget', icon: Code2 }
       ]
     }
   ];
 
-  function tabOfPath(path) {
-    for (const tab of TABS) {
-      for (const g of tab.groups) {
-        for (const it of g.items) {
-          if (it.href === '/' ? path === '/' : path === it.href || path.startsWith(it.href + '/')) {
-            return tab.id;
-          }
-        }
-      }
-    }
-    return 'workspace';
-  }
+  const ALL_PAGES = SECTIONS.flatMap((s) => s.items.map((i) => ({ ...i, section: s.label })));
 
   // Path relative to the SvelteKit base (e.g. '/admin'), so route matching works
   // whether the app is served at root (dev) or under /admin (docker).
   let relPath = $derived($page.url.pathname.slice(base.length) || '/');
 
-  let activeTab = $derived(tabOfPath(relPath));
-  let activeTabObj = $derived(TABS.find((t) => t.id === activeTab) ?? TABS[1]);
-
   // Chat renders full-bleed with its own history sidebar (Claude-style),
-  // so we hide the app's grouped sub-nav and drop the centered padding.
+  // so we hide the sidebar and drop the centered padding.
   let fullBleed = $derived(relPath.startsWith('/chat'));
 
   function isActive(href) {
-    const path = relPath;
-    if (href === '/') return path === '/';
-    return path === href || path.startsWith(href + '/');
+    if (href === '/') return relPath === '/';
+    return relPath === href || relPath.startsWith(href + '/');
   }
-  function activeLabel() {
-    for (const g of activeTabObj.groups)
-      for (const it of g.items) if (isActive(it.href)) return it.label;
-    return activeTabObj.label;
+
+  // ---- command search over pages ("/" focuses it) ----
+  let searchEl = $state(null);
+  let searchQuery = $state('');
+  let searchOpen = $state(false);
+
+  let searchResults = $derived(
+    searchQuery.trim()
+      ? ALL_PAGES.filter((p) => p.label.toLowerCase().includes(searchQuery.trim().toLowerCase()))
+      : []
+  );
+
+  function onGlobalKey(e) {
+    if (e.key === '/' && e.target === document.body) {
+      e.preventDefault();
+      searchEl?.focus();
+    }
+    if (e.key === 'Escape') searchOpen = false;
+  }
+  function openPage(href) {
+    searchQuery = '';
+    searchOpen = false;
+    menuOpen = false;
+    goto(base + href);
+  }
+  function onSearchKey(e) {
+    if (e.key === 'Enter' && searchResults.length) openPage(searchResults[0].href);
   }
 </script>
 
+<svelte:window onkeydown={onGlobalKey} />
+
 {#if !authToken}
-  <div class="flex h-screen items-center justify-center bg-page">
-    <div class="w-[380px] rounded-xl border-[0.5px] border-line bg-surface p-7">
-      <div class="mb-5 flex items-center gap-2.5">
+  <div class="flex min-h-screen items-center justify-center bg-page">
+    <div class="elev w-[380px] max-w-[92vw] rounded-[18px] border border-line bg-surface p-8">
+      <div class="mb-[22px] flex items-center gap-3">
         <span
-          class="flex h-9 w-9 items-center justify-center rounded-[10px] bg-gradient-to-br from-accent to-accent-hover text-white shadow-[0_2px_8px_rgba(201,99,66,.35)]"
+          class="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-[11px] bg-accent text-on-accent"
         >
-          <Pill size={18} />
+          <Pill size={21} />
         </span>
         <div>
           <div class="page-title text-[18px] text-ink">City Pharma admin</div>
-          <div class="text-[12px] text-ink-2">Sign in to continue</div>
+          <div class="text-[12.5px] text-ink-2">Sign in to continue</div>
         </div>
       </div>
 
-      <label class="mb-1 block text-[12px] text-ink-2" for="email">Email</label>
+      <label class="mb-1.5 block text-[12px] text-ink-2" for="email">Email</label>
       <input
         id="email"
         type="email"
         bind:value={email}
         onkeydown={(e) => e.key === 'Enter' && signIn()}
-        placeholder="you@company.com"
-        class="mb-3 w-full rounded-lg border border-line bg-surface px-3.5 py-2.5 text-[14px] text-ink placeholder:text-ink-3 focus:border-accent"
+        placeholder="you@citypharma.mm"
+        class="mb-3.5 w-full rounded-[10px] border border-line bg-surface px-3.5 py-2.5 text-[14px] text-ink placeholder:text-ink-3 focus:border-accent"
       />
-      <label class="mb-1 block text-[12px] text-ink-2" for="pw">Password</label>
+      <label class="mb-1.5 block text-[12px] text-ink-2" for="pw">Password</label>
       <input
         id="pw"
         type="password"
         bind:value={password}
         onkeydown={(e) => e.key === 'Enter' && signIn()}
         placeholder="••••••••"
-        class="w-full rounded-lg border border-line bg-surface px-3.5 py-2.5 text-[14px] text-ink placeholder:text-ink-3 focus:border-accent"
+        class="w-full rounded-[10px] border border-line bg-surface px-3.5 py-2.5 text-[14px] text-ink placeholder:text-ink-3 focus:border-accent"
       />
 
       {#if loginErr}
@@ -256,7 +247,7 @@
 
       <button
         onclick={signIn}
-        class="mt-4 w-full rounded-lg bg-accent px-4 py-2.5 text-[14px] font-medium text-white transition-colors hover:bg-accent-hover"
+        class="mt-4 w-full rounded-[10px] bg-accent px-4 py-2.5 text-[14px] font-semibold text-on-accent transition-colors hover:bg-accent-hover"
       >
         Sign in
       </button>
@@ -264,7 +255,7 @@
       {#if ssoEnabled}
         <button
           onclick={ssoLogin}
-          class="mt-2 w-full rounded-lg border border-line bg-surface px-4 py-2.5 text-[14px] font-medium text-ink transition-colors hover:bg-surface-2"
+          class="mt-2 w-full rounded-[10px] border border-line bg-surface px-4 py-2.5 text-[14px] font-medium text-ink transition-colors hover:bg-surface-2"
         >
           Sign in with {ssoName}
         </button>
@@ -276,107 +267,141 @@
     </div>
   </div>
 {:else}
-  <div class="flex h-screen flex-col overflow-hidden">
-    <!-- TOP PRODUCT TAB BAR -->
+  <div class="relative flex h-screen flex-col overflow-hidden bg-page">
     <header
-      class="z-40 flex flex-shrink-0 items-center gap-1.5 border-b border-line bg-surface px-4 py-2.5"
+      class="relative z-50 flex h-[60px] flex-shrink-0 items-center gap-2.5 border-b border-line bg-surface px-[18px]"
     >
       <button
         onclick={() => (menuOpen = !menuOpen)}
         aria-label="Toggle menu"
         class="flex h-9 w-9 items-center justify-center rounded-lg text-ink-2 hover:bg-surface-2 lg:hidden"
       >
-        <Menu size={18} />
+        <Menu size={22} />
       </button>
 
-      <div class="mr-2 flex items-center gap-2.5 pr-2">
+      <a href={base + '/'} class="flex items-center gap-2.5">
         <span
-          class="flex h-8 w-8 items-center justify-center rounded-[10px] bg-gradient-to-br from-accent to-accent-hover text-white shadow-[0_2px_8px_rgba(201,99,66,.35)]"
+          class="flex h-[34px] w-[34px] flex-shrink-0 items-center justify-center rounded-[9px] bg-accent text-on-accent"
         >
-          <Pill size={17} />
+          <Pill size={19} />
         </span>
-        <div class="leading-none">
-          <div class="text-[15px] font-bold tracking-tight text-ink">City Pharma</div>
-          <div class="mt-0.5 text-[9px] font-semibold tracking-[0.18em] text-ink-3">PHARMA</div>
+        <div class="leading-[1.15]">
+          <div class="page-title text-[15px] text-ink">City Pharma</div>
+          <div class="text-[9.5px] font-semibold uppercase tracking-[0.14em] text-ink-3">
+            Admin console
+          </div>
         </div>
-      </div>
+      </a>
 
-      <nav class="hidden items-center gap-1 sm:flex">
-        {#each TABS as tab}
-          {@const on = activeTab === tab.id}
-          <a
-            href={base + tab.groups[0].items[0].href}
-            class="flex items-center gap-2 rounded-[10px] px-3 py-1.5 text-[13.5px] transition-colors
-              {on ? 'bg-surface-2 font-semibold text-ink' : 'font-medium text-ink-2 hover:bg-surface-2 hover:text-ink'}"
+      <div class="relative ml-[18px] hidden md:block">
+        <div
+          class="flex w-[260px] items-center gap-2 rounded-[10px] border border-line bg-surface-2 px-3 py-2
+            focus-within:border-accent focus-within:bg-surface"
+        >
+          <Search size={18} class="text-ink-3" />
+          <input
+            bind:this={searchEl}
+            bind:value={searchQuery}
+            onfocus={() => (searchOpen = true)}
+            onkeydown={onSearchKey}
+            aria-label="Search pages"
+            placeholder="Search pages…"
+            class="min-w-0 flex-1 border-0 bg-transparent text-[13.5px] text-ink outline-none placeholder:text-ink-3"
+          />
+          <span
+            class="rounded-[5px] border border-line px-1.5 text-[10.5px] text-ink-3"
+            style="font-family:var(--font-mono)">/</span
           >
-            <tab.icon size={16} />
-            <span>{tab.label}</span>
-          </a>
-        {/each}
-      </nav>
+        </div>
+
+        {#if searchOpen && searchQuery.trim()}
+          <button
+            class="fixed inset-0 z-[54] cursor-default"
+            aria-label="Close search"
+            onclick={() => (searchOpen = false)}
+          ></button>
+          <div
+            class="absolute left-0 top-[46px] z-[55] w-[320px] overflow-hidden rounded-xl border border-line bg-surface"
+            style="box-shadow:var(--shadow-pop)"
+          >
+            {#if searchResults.length === 0}
+              <div class="p-4 text-center text-[12.5px] text-ink-3">
+                No matches for "{searchQuery}"
+              </div>
+            {:else}
+              {#each searchResults as r (r.href)}
+                <button
+                  onclick={() => openPage(r.href)}
+                  class="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left hover:bg-surface-2"
+                >
+                  <r.icon size={17} class="text-ink-3" />
+                  <div class="min-w-0 flex-1">
+                    <div class="text-[13px] font-semibold text-ink">{r.label}</div>
+                    <div class="text-[11px] text-ink-3">{r.section}</div>
+                  </div>
+                </button>
+              {/each}
+            {/if}
+          </div>
+        {/if}
+      </div>
 
       <div class="ml-auto flex items-center gap-1">
         <button
-          aria-label="Search"
-          class="flex h-9 w-9 items-center justify-center rounded-lg text-ink-3 hover:bg-surface-2 hover:text-ink"
-        >
-          <Search size={18} />
-        </button>
-        <button
           aria-label="Notifications"
-          class="relative flex h-9 w-9 items-center justify-center rounded-lg text-ink-3 hover:bg-surface-2 hover:text-ink"
+          class="flex h-9 w-9 items-center justify-center rounded-[9px] text-ink-3 hover:bg-surface-2 hover:text-ink"
         >
-          <Bell size={18} />
+          <Bell size={20} />
         </button>
         <button
           onclick={toggleTheme}
           aria-label="Toggle theme"
-          class="flex h-9 w-9 items-center justify-center rounded-lg text-ink-3 hover:bg-surface-2 hover:text-ink"
+          class="flex h-9 w-9 items-center justify-center rounded-[9px] text-ink-3 hover:bg-surface-2 hover:text-ink"
         >
           {#if dark}<Sun size={18} />{:else}<Moon size={18} />{/if}
         </button>
-        <div class="ml-1 flex items-center gap-2 pl-1">
+        <div class="ml-1.5 flex items-center gap-2 border-l border-line pl-3">
           <span
-            class="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-accent to-accent-hover text-[12px] font-bold text-white"
+            class="page-title flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-accent-2 text-[12px] text-on-accent"
             >AD</span
           >
           <div class="hidden leading-tight sm:block">
-            <div class="text-[13px] font-semibold text-ink">admin</div>
-            <div class="text-[10px] tracking-[0.05em] text-ink-3">SUPER ADMIN</div>
+            <div class="text-[12.5px] font-semibold text-ink">admin</div>
+            <div class="text-[10px] tracking-[0.03em] text-ink-3">SUPER ADMIN</div>
           </div>
           <button
             onclick={signOut}
             aria-label="Sign out"
-            class="flex h-9 w-9 items-center justify-center rounded-lg text-ink-3 hover:bg-surface-2 hover:text-ink"
+            class="flex h-8 w-8 items-center justify-center rounded-lg text-ink-3 hover:bg-surface-2 hover:text-ink"
           >
-            <Lock size={16} />
+            <LogOut size={18} />
           </button>
         </div>
       </div>
     </header>
 
-    <div class="flex min-h-0 flex-1 overflow-hidden">
-      <!-- Mobile backdrop -->
+    <div class="relative flex min-h-0 flex-1">
       {#if menuOpen}
-        <div
-          class="fixed inset-0 top-[57px] z-30 bg-black/40 lg:hidden"
+        <button
+          class="fixed inset-x-0 bottom-0 top-[60px] z-[39] cursor-default bg-black/40 lg:hidden"
+          aria-label="Close menu"
           onclick={() => (menuOpen = false)}
-          aria-hidden="true"
-        ></div>
+        ></button>
       {/if}
 
-      <!-- GROUPED LEFT SUB-NAV (hidden on full-bleed chat) -->
       <aside
-        class="fixed top-[57px] bottom-0 z-40 w-[212px] flex-shrink-0 overflow-y-auto border-r border-line bg-surface
-          px-2.5 py-3 transition-transform duration-200 lg:static lg:top-0 lg:z-auto lg:translate-x-0
+        class="fixed bottom-0 top-[60px] z-40 w-[228px] flex-shrink-0 overflow-y-auto border-r border-line
+          bg-surface px-2.5 pb-4 transition-transform duration-200 lg:static lg:top-0 lg:z-auto lg:translate-x-0
           {fullBleed ? 'lg:hidden' : ''}
           {menuOpen ? 'translate-x-0' : '-translate-x-full'}"
       >
-        {#each activeTabObj.groups as g}
-          <div class="px-2.5 pb-1.5 pt-3.5 text-[10px] font-bold uppercase tracking-[0.1em] text-ink-3">
-            {g.label}
+        {#each SECTIONS as section (section.label)}
+          <div
+            class="px-2.5 pb-1.5 pt-4 text-[10px] font-bold uppercase tracking-[0.1em] text-ink-3"
+          >
+            {section.label}
           </div>
-          {#each g.items as item}
+          {#each section.items as item (item.href)}
             {@const active = isActive(item.href)}
             <a
               href={base + item.href}
@@ -386,14 +411,13 @@
                 ? 'bg-accent-soft font-semibold text-accent'
                 : 'font-medium text-ink-2 hover:bg-surface-2 hover:text-ink'}"
             >
-              <item.icon size={17} strokeWidth={active ? 2 : 1.75} />
+              <item.icon size={19} strokeWidth={active ? 2 : 1.75} />
               <span>{item.label}</span>
             </a>
           {/each}
         {/each}
       </aside>
 
-      <!-- MAIN -->
       {#if fullBleed}
         <main class="min-w-0 flex-1 overflow-hidden">
           {@render children()}

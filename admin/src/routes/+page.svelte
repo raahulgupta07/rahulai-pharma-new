@@ -161,7 +161,7 @@
   <div
     class="elev flex items-center gap-2.5 rounded-[13px] border-[0.5px] border-line bg-surface px-[15px] py-[11px]"
   >
-    <Sparkles size={18} class="text-accent" />
+    <Sparkles size={19} class="text-accent-2" />
     <input
       bind:value={askText}
       onkeydown={(e) => e.key === 'Enter' && ask()}
@@ -171,7 +171,7 @@
     />
     <button
       onclick={ask}
-      class="rounded-[11px] bg-accent px-4 py-2 text-[13px] font-semibold text-white hover:bg-accent-hover"
+      class="rounded-[10px] bg-accent px-4 py-2.5 text-[13px] font-semibold text-on-accent hover:bg-accent-hover"
     >
       Ask
     </button>
@@ -224,19 +224,19 @@
   <!-- stat row -->
   <div class="my-3.5 grid grid-cols-2 gap-3.5 lg:grid-cols-4">
     <div class="elev rounded-2xl border-[0.5px] border-line bg-surface p-4">
-      <div class="text-[25px] font-bold tracking-tight tnum text-ink">{fmt(catalogRows)}</div>
+      <div class="page-title text-[24px] tnum text-ink">{fmt(catalogRows)}</div>
       <div class="mt-1 text-[12.5px] text-ink-2">Catalog SKUs</div>
     </div>
     <div class="elev rounded-2xl border-[0.5px] border-line bg-surface p-4">
-      <div class="text-[25px] font-bold tracking-tight tnum text-ink">{fmt(inventoryRows)}</div>
+      <div class="page-title text-[24px] tnum text-ink">{fmt(inventoryRows)}</div>
       <div class="mt-1 text-[12.5px] text-ink-2">Inventory rows</div>
     </div>
     <div class="elev rounded-2xl border-[0.5px] border-line bg-surface p-4">
-      <div class="text-[25px] font-bold tracking-tight tnum text-ink">{fmt(requests)}</div>
+      <div class="page-title text-[24px] tnum text-ink">{fmt(requests)}</div>
       <div class="mt-1 text-[12.5px] text-ink-2">Questions answered</div>
     </div>
     <div class="elev rounded-2xl border-[0.5px] border-line bg-surface p-4">
-      <div class="text-[25px] font-bold tracking-tight tnum text-ink">
+      <div class="page-title text-[24px] tnum text-ink">
         ${(((llmCalls ?? 0) * 0.0002).toFixed(2))}
       </div>
       <div class="mt-1 text-[12.5px] text-ink-2">LLM cost · est</div>
