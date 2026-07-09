@@ -59,7 +59,7 @@ is wrong on this stack. The lever that remains is a **cheaper model per call**.
 ## Status
 
 **Demo / UAT ready.** Runs end-to-end on real data (5,292 catalog · 111,654
-inventory · 53 sites). **81 tests pass, 4 skipped.**
+inventory · 53 sites). The full suite passes offline — `pytest -q` for the count.
 
 Measured latency (`evals/bench.py`, n=20, real data, both stacks):
 
