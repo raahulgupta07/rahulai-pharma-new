@@ -93,7 +93,7 @@
     <button
       onclick={ingestNow}
       disabled={ingesting}
-      class="inline-flex items-center gap-2 rounded-lg bg-accent px-3.5 py-2 text-[13px] font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-60"
+      class="inline-flex items-center gap-2 rounded-lg bg-accent px-3.5 py-2 text-[13px] font-medium text-on-accent transition-colors hover:bg-accent-hover disabled:opacity-60"
     >
       <RefreshCw size={15} class={ingesting ? 'animate-spin' : ''} />
       {ingesting ? 'Ingesting' : 'Ingest now'}

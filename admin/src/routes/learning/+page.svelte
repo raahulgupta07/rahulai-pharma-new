@@ -169,8 +169,8 @@
 <!-- KPI strip -->
 <div class="my-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
   {#each [['Total memories', fmt(lStats?.total), Brain], ['Users learned about', fmt(lStats?.users), Users], ['Positive feedback', fmt(fStats?.up), ThumbsUp], ['Negative feedback', fmt(fStats?.down), ThumbsDown]] as [k, v, Icon]}
-    <div class="elev rounded-2xl border-[0.5px] border-line bg-surface p-3.5">
-      <div class="text-[23px] font-bold tracking-tight tnum text-ink">{v}</div>
+    <div class="elev rounded-[14px] border-[0.5px] border-line bg-surface p-3.5">
+      <div class="page-title text-[23px] tnum text-ink">{v}</div>
       <div class="mt-0.5 flex items-center gap-1.5 text-[12px] text-ink-2"><Icon size={13} /> {k}</div>
     </div>
   {/each}
@@ -198,7 +198,7 @@
 
 {#if view === 'memories'}
   <!-- MEMORIES table -->
-  <div class="my-3.5 elev overflow-hidden rounded-2xl border-[0.5px] border-line bg-surface">
+  <div class="my-3.5 elev overflow-hidden rounded-[18px] border-[0.5px] border-line bg-surface">
     <div class="max-h-[calc(100vh-360px)] overflow-auto">
       <table class="tbl">
         <thead>
@@ -262,7 +262,7 @@
   </div>
 
   <!-- FEEDBACK table -->
-  <div class="elev overflow-hidden rounded-2xl border-[0.5px] border-line bg-surface">
+  <div class="elev overflow-hidden rounded-[18px] border-[0.5px] border-line bg-surface">
     <div class="max-h-[calc(100vh-360px)] overflow-auto">
       <table class="tbl">
         <thead>

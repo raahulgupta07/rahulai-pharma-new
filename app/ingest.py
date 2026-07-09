@@ -149,11 +149,13 @@ def parse_inventory(path: str) -> List[Tuple]:
         try:
             qty = int(float(r.get("stock_qty")))
         except (TypeError, ValueError):
-            qty = 0
+            qty = None
         try:
             price = float(r.get("weighted_cost_price"))
+            if math.isnan(price):
+                price = None
         except (TypeError, ValueError):
-            price = 0.0
+            price = None
         records.append((code, site, None, qty, price, "MMK"))
     return records
 

@@ -204,7 +204,7 @@
 
 <button
   onclick={save}
-  class="mt-5 inline-flex items-center gap-2 rounded-[11px] bg-accent px-4 py-2.5 text-[13px] font-semibold text-white hover:bg-accent-hover"
+  class="mt-5 inline-flex items-center gap-2 rounded-[11px] bg-accent px-4 py-2.5 text-[13px] font-semibold text-on-accent hover:bg-accent-hover"
 >
   <Check size={15} /> Save changes
 </button>

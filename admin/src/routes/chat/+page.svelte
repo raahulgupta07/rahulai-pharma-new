@@ -497,7 +497,7 @@
 
       <div class="flex items-center gap-2.5 border-t border-line px-3 py-2.5">
         <span
-          class="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-accent to-accent-hover text-[12px] font-bold text-white"
+          class="flex h-8 w-8 items-center justify-center rounded-full bg-accent-2 text-[12px] font-bold text-on-accent"
           >AD</span
         >
         <div class="flex-1 leading-tight">
@@ -531,7 +531,7 @@
           onclick={() => (modelOpen = !modelOpen)}
           class="flex items-center gap-1.5 rounded-lg border border-line bg-surface px-2.5 py-1.5 text-[12.5px] font-medium text-ink hover:bg-surface-2"
         >
-          <Sparkles size={13} class="text-accent" />
+          <Sparkles size={13} class="text-accent-2" />
           {curModel?.name ?? 'Model'}
           <ChevronDown size={13} class="text-ink-3" />
         </button>
@@ -603,7 +603,7 @@
             {:else}
               <div class="group my-6 flex gap-3.5">
                 <div
-                  class="mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-accent to-accent-hover text-white"
+                  class="mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg bg-accent text-on-accent"
                 >
                   <Pill size={15} />
                 </div>
@@ -659,7 +659,7 @@
                                               <button
                                                 type="button"
                                                 onclick={() => openSource(String(v))}
-                                                class="rounded bg-accent-soft px-1.5 font-mono text-[11px] font-semibold text-accent hover:bg-accent hover:text-white"
+                                                class="rounded bg-accent-soft px-1.5 font-mono text-[11px] font-semibold text-accent hover:bg-accent hover:text-on-accent"
                                                 >{v}</button
                                               >
                                             {:else}
@@ -698,7 +698,7 @@
                           <span class="flex items-center gap-1"><Wrench size={12} />{m.toolCount} tool{m.toolCount > 1 ? 's' : ''}</span>
                         {/if}
                         {#if m.modelName}
-                          <span class="flex items-center gap-1"><Sparkles size={12} class="text-accent" />{m.modelName}</span>
+                          <span class="flex items-center gap-1"><Sparkles size={12} class="text-accent-2" />{m.modelName}</span>
                         {/if}
                       </div>
                       <div class="ml-auto flex gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
@@ -749,7 +749,7 @@
                             onclick={() => submitCorrection(m)}
                             disabled={!(m.correctionText ?? '').trim()}
                             aria-label="Save correction"
-                            class="flex h-9 w-9 flex-shrink-0 cursor-pointer items-center justify-center rounded-[10px] bg-accent text-white transition-colors duration-200 hover:bg-accent-hover focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-default disabled:bg-line-2"
+                            class="flex h-9 w-9 flex-shrink-0 cursor-pointer items-center justify-center rounded-[10px] bg-accent text-on-accent transition-colors duration-200 hover:bg-accent-hover focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-default disabled:bg-line-2"
                           >
                             <Check size={16} />
                           </button>
@@ -820,7 +820,7 @@
             onclick={() => send()}
             disabled={busy || !token || !input.trim()}
             aria-label="Send"
-            class="ml-auto flex h-9 w-9 items-center justify-center rounded-[11px] bg-accent text-white transition-colors hover:bg-accent-hover disabled:cursor-default disabled:bg-line-2"
+            class="ml-auto flex h-9 w-9 items-center justify-center rounded-[11px] bg-accent text-on-accent transition-colors hover:bg-accent-hover disabled:cursor-default disabled:bg-line-2"
           >
             <ArrowUp size={18} />
           </button>

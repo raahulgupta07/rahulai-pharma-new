@@ -374,7 +374,7 @@
       <button
         onclick={() => reloadGraph(lim)}
         disabled={loadingGraph}
-        class="cursor-pointer rounded-md px-2 py-1 text-[12px] transition-colors disabled:opacity-50 {nodeLimit === lim ? 'bg-accent text-white' : 'bg-surface-2 text-ink-2 hover:bg-surface-3'}"
+        class="cursor-pointer rounded-md px-2 py-1 text-[12px] transition-colors disabled:opacity-50 {nodeLimit === lim ? 'bg-accent text-on-accent' : 'bg-surface-2 text-ink-2 hover:bg-surface'}"
       >{lim}</button>
     {/each}
     {#if loadingGraph}<span class="text-[12px] text-ink-3">loading…</span>{/if}

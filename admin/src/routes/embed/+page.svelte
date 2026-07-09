@@ -9,7 +9,7 @@
   data-public-key="web"
   data-title="CityCare Agent"
   data-greeting="Ask about stock, prices, or substitutes."
-  data-accent="#c96342"
+  data-accent="#006869"
   data-stream="true" async><\/script>`;
 
   const scopedSnippet = `<script src="${base}/api/embed/widget.js"
@@ -58,7 +58,7 @@ $signature = hash_hmac('sha256', $canonical, config('services.cityagent.secret_k
     <button
       onclick={loadPreview}
       disabled={previewLoaded}
-      class="inline-flex items-center gap-2 rounded-lg bg-accent px-3.5 py-2 text-[13px] font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-60"
+      class="inline-flex items-center gap-2 rounded-lg bg-accent px-3.5 py-2 text-[13px] font-medium text-on-accent transition-colors hover:bg-accent-hover disabled:opacity-60"
     >
       <Play size={15} />
       {previewLoaded ? 'Preview loaded' : 'Load live preview'}
@@ -78,7 +78,7 @@ $signature = hash_hmac('sha256', $canonical, config('services.cityagent.secret_k
       </button>
     </div>
     {#if note}<p class="mb-2 text-[13px] text-ink-2">{note}</p>{/if}
-    <pre class="overflow-x-auto rounded-xl border border-line bg-surface-2 p-4 text-[12.5px] leading-relaxed text-ink"><code>{code}</code></pre>
+    <pre class="overflow-x-auto rounded-[14px] border border-line bg-surface-2 p-4 text-[12.5px] leading-relaxed text-ink"><code>{code}</code></pre>
   </section>
 {/snippet}
 
@@ -88,7 +88,7 @@ $signature = hash_hmac('sha256', $canonical, config('services.cityagent.secret_k
 
 {@render block('php', 'Server-side signing (Laravel / PHP)', phpSnippet, 'CITYAGENT_SECRET_KEY must equal the backend SECRET_KEY. Canonical = sorted keys, no spaces, unescaped.')}
 
-<div class="rounded-xl border border-line bg-surface p-4 text-[13px] text-ink-2">
+<div class="rounded-[14px] border border-line bg-surface p-4 text-[13px] text-ink-2">
   <span class="font-medium text-ink">Endpoints:</span>
   <span class="font-mono">{base}/api/embed/widget.js</span> ·
   <span class="font-mono">/session/create</span> ·

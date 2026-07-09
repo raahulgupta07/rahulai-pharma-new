@@ -46,8 +46,8 @@ CREATE TABLE inventory (
     article_code TEXT NOT NULL,           -- joins catalog.article_code
     site_code    TEXT NOT NULL,           -- branch / outlet code
     site_name    TEXT,                    -- optional human-readable branch name
-    stock_qty    INTEGER NOT NULL DEFAULT 0,
-    price        NUMERIC(14,2) NOT NULL DEFAULT 0,  -- weighted cost price
+    stock_qty    INTEGER,               -- NULL = unknown (blank in export), not 0
+    price        NUMERIC(14,2),         -- weighted cost price; NULL = unknown
     uom          TEXT DEFAULT 'MMK',
     PRIMARY KEY (article_code, site_code)
 );

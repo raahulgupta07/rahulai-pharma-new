@@ -95,7 +95,7 @@
   <!-- Runtime settings (read-only, from .env) -->
   <div class="mb-4 grid grid-cols-2 gap-3">
     {#each envRows as row}
-      <div class="rounded-xl border border-line bg-surface p-3.5">
+      <div class="rounded-[14px] border border-line bg-surface p-3.5">
         <div class="mb-1 text-[12px] text-ink-2">
           {row.label} <span class="text-ink-3">· .env</span>
         </div>
@@ -105,7 +105,7 @@
   </div>
 
   <!-- System prompt (editable) -->
-  <div class="rounded-xl border border-line bg-surface p-4">
+  <div class="rounded-[14px] border border-line bg-surface p-4">
     <div class="mb-2.5 flex items-center gap-2">
       <span class="text-[14px] font-medium">System prompt</span>
       {#if promptOverridden}
@@ -124,7 +124,7 @@
       <button
         onclick={savePrompt}
         disabled={saving}
-        class="rounded-lg bg-accent px-3.5 py-2 text-[13px] font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-60"
+        class="rounded-lg bg-accent px-3.5 py-2 text-[13px] font-medium text-on-accent transition-colors hover:bg-accent-hover disabled:opacity-60"
       >
         {saving ? 'Saving' : 'Save prompt'}
       </button>

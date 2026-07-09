@@ -89,6 +89,27 @@ def test_parse_inventory_csv(tmp_path):
     rec = {(r[0], r[1]): r for r in records}
     assert rec[("A001", "S1")][3] == 10
     assert rec[("A001", "S1")][4] == 1500.5
-    assert rec[("A002", "S1")][3] == 0  # bad qty coerces to 0
-    assert rec[("A003", "S2")][4] == 0.0  # non-numeric price coerces to 0.0
+    assert rec[("A002", "S1")][3] is None  # unparseable qty -> unknown, not 0
+    assert rec[("A003", "S2")][4] is None  # non-numeric price -> unknown, not 0.0
     assert all(r[5] == "MMK" for r in records)
+
+
+def test_parse_inventory_blank_cells_are_null(tmp_path):
+    """A blank/garbage stock or price cell round-trips as NULL, never 0."""
+
+    path = tmp_path / "balance_stock_blanks.csv"
+    pd.DataFrame(
+        {
+            "article_code": ["A001", "A002"],
+            "site_code": ["S1", "S2"],
+            "stock_qty": ["", "garbage"],
+            "weighted_cost_price": [None, ""],
+        }
+    ).to_csv(path, index=False, encoding="utf-8-sig")
+
+    records = parse_inventory(str(path))
+    rec = {(r[0], r[1]): r for r in records}
+    assert rec[("A001", "S1")][3] is None  # blank qty -> unknown
+    assert rec[("A001", "S1")][4] is None  # missing price -> unknown
+    assert rec[("A002", "S2")][3] is None  # garbage qty -> unknown
+    assert rec[("A002", "S2")][4] is None  # blank price -> unknown

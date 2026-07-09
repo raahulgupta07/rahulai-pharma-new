@@ -239,7 +239,7 @@ async def get_stock(code: str, site: str = "") -> List[Dict]:
               FROM inventory
              WHERE article_code = $1
                AND """ + _site_clause("site_code", "$2") + """
-             ORDER BY stock_qty DESC
+             ORDER BY stock_qty DESC NULLS LAST
             """,
             code,
             site,
@@ -252,7 +252,7 @@ async def get_stock(code: str, site: str = "") -> List[Dict]:
                    stock_qty
               FROM inventory
              WHERE article_code = $1
-             ORDER BY stock_qty DESC
+             ORDER BY stock_qty DESC NULLS LAST
             """,
             code,
         )
@@ -281,7 +281,7 @@ async def top_by_stock(site: str, n: int = 5) -> List[Dict]:
           FROM inventory i
           JOIN catalog c USING (article_code)
          WHERE """ + _site_clause("i.site_code", "$1") + """
-         ORDER BY i.stock_qty DESC
+         ORDER BY i.stock_qty DESC NULLS LAST
          LIMIT $2
         """,
         site,

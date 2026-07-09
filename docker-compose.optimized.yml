@@ -1,0 +1,34 @@
+# Side-by-side stack for testing feature/optimize against the baseline.
+#
+# Overlays docker-compose.yml with a second set of host ports so both stacks run
+# at once. Compose namespaces volumes by project name, so `-p pharmacy-opt` gets
+# its own pgdata and never touches the baseline's.
+#
+# `!override` is required: Compose MERGES sequences like `ports` by appending,
+# so without it each service would try to publish the baseline port as well as
+# this one and fail with "port is already allocated".
+#
+#   docker compose -p pharmacy-opt -f docker-compose.yml -f docker-compose.optimized.yml up -d --build
+#
+#   baseline   api :8088  postgres :5433  redis :6380  sftp :2222
+#   optimized  api :8091  postgres :5434  redis :6381  sftp :2223
+#
+# Tear down (removes its volumes, leaves the baseline alone):
+#   docker compose -p pharmacy-opt -f docker-compose.yml -f docker-compose.optimized.yml down -v
+
+services:
+  api:
+    ports: !override
+      - "8091:8000"
+
+  postgres:
+    ports: !override
+      - "5434:5432"
+
+  redis:
+    ports: !override
+      - "6381:6379"
+
+  sftp:
+    ports: !override
+      - "2223:22"

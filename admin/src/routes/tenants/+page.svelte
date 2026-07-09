@@ -109,7 +109,7 @@
   </div>
 {:else}
   <!-- Add credential -->
-  <div class="mb-4 rounded-xl border border-line bg-surface p-4">
+  <div class="mb-4 rounded-[14px] border border-line bg-surface p-4">
     <div class="mb-2.5 text-[13px] font-medium text-ink">Add credential</div>
     <form onsubmit={add} class="flex flex-col gap-2.5 sm:flex-row sm:items-center">
       <input
@@ -127,7 +127,7 @@
       <button
         type="submit"
         disabled={adding}
-        class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-lg bg-accent px-3.5 py-2 text-[13px] font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-60"
+        class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-lg bg-accent px-3.5 py-2 text-[13px] font-medium text-on-accent transition-colors hover:bg-accent-hover disabled:opacity-60"
       >
         <Plus size={15} />
         {adding ? 'Adding' : 'Add'}
@@ -139,7 +139,7 @@
   </div>
 
   <!-- Credentials table -->
-  <div class="overflow-hidden rounded-xl border border-line bg-surface">
+  <div class="overflow-hidden rounded-[14px] border border-line bg-surface">
     {#if creds.length === 0}
       <div class="px-6 py-10 text-center text-[14px] text-ink-2">
         No credentials yet. Add one above to start gating embed access.

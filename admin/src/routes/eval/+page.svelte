@@ -45,7 +45,7 @@
     <button
       onclick={runEval}
       disabled={running}
-      class="inline-flex items-center gap-2 rounded-lg bg-accent px-4 py-2.5 text-[14px] font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-60"
+      class="inline-flex items-center gap-2 rounded-lg bg-accent px-4 py-2.5 text-[14px] font-medium text-on-accent transition-colors hover:bg-accent-hover disabled:opacity-60"
     >
       {#if running}
         <Loader size={15} class="animate-spin" />
@@ -82,7 +82,7 @@
   <!-- Summary -->
   <div class="mb-4 flex items-center gap-4 rounded-xl border border-line bg-surface p-4.5">
     <div
-      class="text-[34px] font-medium leading-none {allPass ? 'text-success' : 'text-danger'}"
+      class="page-title text-[34px] leading-none tnum {allPass ? 'text-success' : 'text-danger'}"
     >
       {passed}/{total}
     </div>

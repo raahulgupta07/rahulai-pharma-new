@@ -54,7 +54,7 @@
         </button>
         <button
           onclick={confirm}
-          class="rounded-[11px] px-4 py-2 text-[13px] font-semibold text-white"
+          class="rounded-[11px] px-4 py-2 text-[13px] font-semibold text-on-accent"
           style="background:{tone === 'danger' ? 'var(--color-danger)' : 'var(--color-accent)'}"
         >
           {confirmLabel}

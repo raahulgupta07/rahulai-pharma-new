@@ -196,7 +196,7 @@
     <button class="flex items-center gap-1.5 rounded-[11px] border border-line bg-surface px-3 py-2 text-[13px] font-semibold text-ink hover:bg-surface-2">
       <Download size={15} /> Export
     </button>
-    <button onclick={onReload} disabled={reloading} class="flex items-center gap-1.5 rounded-[11px] bg-accent px-3 py-2 text-[13px] font-semibold text-white hover:bg-accent-hover disabled:opacity-60">
+    <button onclick={onReload} disabled={reloading} class="flex items-center gap-1.5 rounded-[11px] bg-accent px-3 py-2 text-[13px] font-semibold text-on-accent hover:bg-accent-hover disabled:opacity-60">
       <RefreshCw size={15} class={reloading ? 'animate-spin' : ''} /> Reload
     </button>
   </div>
@@ -205,8 +205,8 @@
 <!-- KPI strip -->
 <div class="my-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
   {#each [['Catalog SKUs', fmt(catTotal), Package], ['Inventory rows', fmt(num(ready.inventory_rows)), Boxes], ['Sites', fmt(num(ready.sites) ?? 53), Store], ['Categories', fmt(cats.length || null), Tag]] as [k, v, Icon]}
-    <div class="elev rounded-2xl border-[0.5px] border-line bg-surface p-3.5">
-      <div class="text-[23px] font-bold tracking-tight tnum text-ink">{v}</div>
+    <div class="elev rounded-[14px] border-[0.5px] border-line bg-surface p-3.5">
+      <div class="page-title text-[23px] tnum text-ink">{v}</div>
       <div class="mt-0.5 flex items-center gap-1.5 text-[12px] text-ink-2"><Icon size={13} /> {k}</div>
     </div>
   {/each}
@@ -257,7 +257,7 @@
   </div>
 
   <!-- catalog table -->
-  <div class="elev overflow-hidden rounded-2xl border-[0.5px] border-line bg-surface">
+  <div class="elev overflow-hidden rounded-[18px] border-[0.5px] border-line bg-surface">
     <div class="max-h-[calc(100vh-360px)] overflow-auto">
       <table class="tbl">
         <thead>
@@ -330,7 +330,7 @@
   </div>
 
   <!-- inventory table -->
-  <div class="elev overflow-hidden rounded-2xl border-[0.5px] border-line bg-surface">
+  <div class="elev overflow-hidden rounded-[18px] border-[0.5px] border-line bg-surface">
     <div class="max-h-[calc(100vh-360px)] overflow-auto">
       <table class="tbl">
         <thead>
@@ -423,7 +423,7 @@
           </div>
         {/each}
       {/if}
-      <button onclick={() => goto(appBase + '/graph')} class="mt-4 flex w-full items-center justify-center gap-2 rounded-[11px] bg-accent px-4 py-2.5 text-[13px] font-semibold text-white hover:bg-accent-hover">
+      <button onclick={() => goto(appBase + '/graph')} class="mt-4 flex w-full items-center justify-center gap-2 rounded-[11px] bg-accent px-4 py-2.5 text-[13px] font-semibold text-on-accent hover:bg-accent-hover">
         <Share2 size={15} /> View in knowledge graph
       </button>
     {:else}
