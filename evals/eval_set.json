@@ -1,0 +1,85 @@
+{
+  "_comment": "Accuracy eval — the real CityCare Agent questions from the UI screenshots, mapped to OUR loaded data. Expected values computed live from Postgres (4892 catalog / 111654 inventory). Anchor article 1000000024029 = PARACAP PARACETAMOL 10`S (Paracetamol): 53 sites, 14963 total units, weighted avg 1600 MMK; top site 20059-CCGMPMTN = 2589. Store CCBHSC = site 20060-CCBHSC (top stock article 1000000008752 SILOXOGENE). Each case: question, expect_contains (all substrings must appear), optional expect_script ('my'=Burmese reply).",
+  "cases": [
+    {
+      "id": "en_full_info",
+      "question": "show me full information for this article code 1000000024029",
+      "expect_contains": ["PARACAP", "Paracetamol"]
+    },
+    {
+      "id": "en_total_stock_all_sites",
+      "question": "What is the total balance stock of article 1000000024029 across all sites?",
+      "expect_contains": ["14963"]
+    },
+    {
+      "id": "en_site_count",
+      "question": "At how many sites is article 1000000024029 stocked?",
+      "expect_contains": ["53"]
+    },
+    {
+      "id": "en_stock_top_site",
+      "question": "What is the stock of article 1000000024029 at site 20059-CCGMPMTN?",
+      "expect_contains": ["2589"]
+    },
+    {
+      "id": "en_top5_ccbhsc",
+      "question": "show me the top 5 articles with the highest balance stock quantity from store CCBHSC",
+      "expect_contains": ["1000000008752"]
+    },
+    {
+      "id": "en_price_over_30000",
+      "question": "show me article code, branch name, price for balance stock where price is over 30000",
+      "expect_contains": ["980000"]
+    },
+    {
+      "id": "en_search_para",
+      "question": "show me medicines whose name contains para",
+      "expect_contains": ["PARACAP"]
+    },
+    {
+      "id": "en_substitutes",
+      "question": "Find substitutes for article 1000000024029",
+      "expect_contains": ["1000000384200"]
+    },
+    {
+      "id": "my_full_info",
+      "question": "article code 1000000024029 ရဲ့ အချက်အလက်အပြည့်အစုံ ပြပါ",
+      "expect_contains": ["PARACAP"],
+      "expect_script": "my"
+    },
+    {
+      "id": "my_total_stock",
+      "question": "article 1000000024029 ရဲ့ site အားလုံးပေါင်း လက်ကျန် stock စုစုပေါင်း ဘယ်လောက်ရှိလဲ",
+      "expect_contains": ["14963"],
+      "expect_script": "my"
+    },
+    {
+      "id": "my_indication",
+      "question": "article 1000000024029 ကို ဘာအတွက် သုံးတာလဲ",
+      "expect_contains": [],
+      "expect_script": "my"
+    },
+    {
+      "id": "my_para_search",
+      "question": "\"para\" ပါသော ဆေးများ ဖော်ပြပါ",
+      "expect_contains": ["PARACAP"],
+      "expect_script": "my"
+    },
+    {
+      "id": "en_combine_safety",
+      "question": "Can I take PARACAP (article 1000000024029) together with another paracetamol product? Is it safe?",
+      "expect_contains": ["Paracetamol"]
+    },
+    {
+      "id": "my_semantic_fever",
+      "question": "ဖျားနာ ကိုယ်ပူ အတွက် ဘာဆေး ရှိလဲ",
+      "expect_contains": [],
+      "expect_script": "my"
+    },
+    {
+      "id": "en_semantic_diabetes",
+      "question": "what medicine do you have for diabetes / blood sugar?",
+      "expect_contains": []
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+# Virtual environments
+venv/
+.venv/
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Environment
+.env
+
+# Test cache
+.pytest_cache/
+
+# Databases
+*.db
+
+# Data files (keep the directory placeholder)
+data/*.xlsx
+!data/.gitkeep
+
+# macOS
+.DS_Store
+
+# Packaging
+*.egg-info/
+dist/
+build/

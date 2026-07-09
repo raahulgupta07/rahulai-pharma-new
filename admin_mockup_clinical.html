@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CitCare Pharmacy Agent — clinical mockup</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fira+Sans:wght@300;400;500;600&family=Fira+Code:wght@400;500&family=Noto+Sans+Myanmar:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lucide@latest"></script>
+<style>
+  :root{
+    --primary:#1E40AF; --primary-d:#1B3899; --secondary:#3B82F6; --accent:#F59E0B; --accent-d:#B45309;
+    --bg:#F8FAFC; --surface:#fff; --surface2:#EFF4FB; --soft:#E0ECFB;
+    --ink:#1E293B; --ink2:#64748B; --ink3:#94A3B8; --line:#E2E8F0; --line2:#CBD5E1;
+    --green:#15803D; --green-s:#DCFCE7; --amber-s:#FEF3C7; --red:#B91C1C; --red-s:#FEE2E2; --blue-s:#DBEAFE;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:'Fira Sans',-apple-system,sans-serif;font-size:14px}
+  .my{font-family:'Noto Sans Myanmar','Fira Sans',sans-serif}
+  .mono{font-family:'Fira Code',monospace}
+  h1{font-size:26px;font-weight:600;margin:0;letter-spacing:-.01em}
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:12px}
+  .kpi{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:14px}
+  .navlink{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:9px;font-size:14px;color:var(--ink2);cursor:pointer;transition:.15s}
+  .navlink:hover{background:var(--surface2);color:var(--ink)}
+  .navlink.active{background:var(--soft);color:var(--primary);font-weight:500}
+  .btn{display:inline-flex;align-items:center;gap:7px;border-radius:9px;padding:8px 14px;font-size:13px;font-weight:500;cursor:pointer;border:1px solid var(--line);background:var(--surface);color:var(--ink);transition:.15s}
+  .btn:hover{background:var(--surface2)}
+  .btn-pri{background:var(--primary);color:#fff;border-color:var(--primary)}
+  .btn-pri:hover{background:var(--primary-d)}
+  .btn-cta{background:var(--accent);color:#fff;border-color:var(--accent)}
+  .btn-cta:hover{background:var(--accent-d)}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--ink2);padding:9px 16px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--surface)}
+  td{padding:10px 16px;border-top:1px solid var(--line)}
+  tbody tr:hover{background:var(--surface2)}
+  .num{text-align:right;font-variant-numeric:tabular-nums}
+  .badge{font-size:11px;padding:2px 8px;border-radius:6px;font-weight:500}
+  .b-pri{background:var(--blue-s);color:var(--primary)} .b-amber{background:var(--amber-s);color:var(--accent-d)}
+  .b-ok{background:var(--green-s);color:var(--green)} .b-red{background:var(--red-s);color:var(--red)}
+  .input{background:var(--surface);border:1px solid var(--line2);border-radius:9px;padding:8px 12px;font-size:14px;color:var(--ink);outline:none;width:100%;font-family:inherit}
+  .input:focus{border-color:var(--secondary);box-shadow:0 0 0 3px var(--soft)}
+  .page{display:none} .page.active{display:block}
+  .bar{height:6px;border-radius:4px;background:var(--soft);overflow:hidden}.bar>span{display:block;height:100%;background:var(--secondary)}
+  .scroll{max-height:340px;overflow-y:auto}
+  ::-webkit-scrollbar{width:9px;height:9px}::-webkit-scrollbar-thumb{background:var(--line2);border-radius:6px}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+const NAV=[['dashboard','Dashboard','layout-dashboard'],['chat','Chat tester','message-circle'],
+['data','Data','database'],['ftp','SFTP uploads','server'],['embed','Embed widget','code-2'],
+['conversations','Conversations','messages-square'],['tenants','Tenants','building-2'],
+['stores','Stores','store'],['agent','Agent config','bot'],['eval','Evaluation','flask-conical'],
+['users','Users','users'],['settings','Settings','settings']];
+
+let authed=false, current='dashboard';
+
+function shell(inner,label){
+  return `<div style="display:flex;height:100vh;overflow:hidden">
+    <aside style="width:214px;flex-shrink:0;background:var(--surface);border-right:1px solid var(--line);padding:16px 12px;overflow-y:auto">
+      <div style="display:flex;align-items:center;gap:9px;padding:6px 10px 18px">
+        <span style="width:26px;height:26px;border-radius:7px;background:var(--primary);color:#fff;display:flex;align-items:center;justify-content:center"><i data-lucide="pill" style="width:15px"></i></span>
+        <span style="font-size:15px;font-weight:600">CitCare</span>
+      </div>
+      <nav>${NAV.map(n=>`<div class="navlink ${n[0]===current?'active':''}" onclick="go('${n[0]}')"><i data-lucide="${n[2]}" style="width:17px"></i>${n[1]}</div>`).join('')}</nav>
+    </aside>
+    <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+      <div style="display:flex;align-items:center;gap:12px;padding:11px 22px;border-bottom:1px solid var(--line);background:var(--surface)">
+        <span style="font-size:13px;color:var(--ink3)">Admin</span><i data-lucide="chevron-right" style="width:14px;color:var(--ink3)"></i>
+        <span style="font-size:14px;font-weight:500">${label}</span>
+        <div style="margin-left:auto;display:flex;align-items:center;gap:10px">
+          <div style="display:flex;align-items:center;gap:7px;background:var(--surface2);border-radius:9px;padding:7px 11px;width:200px"><i data-lucide="search" style="width:15px;color:var(--ink3)"></i><span style="font-size:13px;color:var(--ink3)">Search…</span></div>
+          <span class="badge b-ok">live</span>
+          <span style="width:28px;height:28px;border-radius:50%;background:var(--soft);color:var(--primary);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600">AD</span>
+          <i data-lucide="log-out" style="width:16px;color:var(--ink3);cursor:pointer" onclick="logout()"></i>
+        </div>
+      </div>
+      <main style="flex:1;overflow-y:auto;padding:24px 28px"><div style="max-width:1040px;margin:0 auto">${inner}</div></main>
+    </div>
+  </div>`;
+}
+
+const P={};
+P.dashboard=()=>`<h1>Dashboard</h1><div style="margin:8px 0 18px"><span class="badge" style="background:var(--surface2);color:var(--ink2)">data v18 · refreshed 14:32</span></div>
+<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:14px">
+${kpi('Cache hit rate','95.6%','var(--green)')}${kpi('p95 latency','20 ms')}${kpi('Requests today','2,161')}${kpi('Errors','0','var(--green)')}</div>
+<div style="display:grid;grid-template-columns:1.6fr 1fr;gap:12px;margin-bottom:14px">
+<div class="card" style="padding:16px"><div style="display:flex;margin-bottom:12px"><b style="font-weight:600">Requests · last 12h</b><span style="margin-left:auto;font-size:12px;color:var(--ink2)">cache vs llm</span></div>
+<svg viewBox="0 0 560 110" style="width:100%;height:110px"><polyline points="0,90 46,74 93,78 140,56 186,62 233,38 280,46 326,28 373,34 420,22 466,28 513,16 560,20" fill="none" stroke="var(--secondary)" stroke-width="2.5"/><polyline points="0,100 46,98 93,99 140,93 186,95 233,88 280,90 326,86 373,88 420,84 466,86 513,82 560,83" fill="none" stroke="var(--line2)" stroke-width="1.5"/></svg></div>
+<div class="card" style="padding:16px"><b style="font-weight:600">Data status</b><table style="margin-top:8px"><tbody>
+${['Catalog 4,892','Inventory 111,654','Sites 53','Embedded 4,880'].map(r=>{const[a,b]=r.split(' ');return `<tr><td style="border:0;color:var(--ink2);padding:5px 0">${a}</td><td style="border:0;text-align:right" class="num">${b}</td></tr>`}).join('')}</tbody></table></div></div>
+<div class="card"><div style="padding:13px 16px;border-bottom:1px solid var(--line)"><b style="font-weight:600">Top articles by stock</b><span style="margin-left:auto;font-size:12px;color:var(--accent-d);float:right">via materialized view</span></div>
+<table><thead><tr><th>Code</th><th>Brand</th><th class="num">Total stock</th><th class="num">Avg price</th><th class="num">Sites</th></tr></thead><tbody>
+${[['1000000015837','ROYAL-D 25G','37,605','800','53'],['1000000323607','RED CROSS ORS 20.5G','19,611','850','53'],['1000000394376','ALMACID SUSP','18,621','2,500','53']].map(r=>`<tr><td class="mono">${r[0]}</td><td>${r[1]}</td><td class="num">${r[2]}</td><td class="num">${r[3]} MMK</td><td class="num">${r[4]}</td></tr>`).join('')}</tbody></table></div>`;
+
+P.chat=()=>`<h1>Chat tester</h1><p style="color:var(--ink2);margin:8px 0 16px">Talk to the live agent (Gemini) — English or Burmese.</p>
+<div class="card" style="overflow:hidden;height:62vh;display:flex;flex-direction:column">
+<div style="padding:13px 16px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px"><span style="width:8px;height:8px;border-radius:50%;background:var(--green)"></span><b style="font-weight:600">CityCare Agent</b><span style="margin-left:auto;font-size:12px;color:var(--ink3)">online</span></div>
+<div style="flex:1;overflow-y:auto;padding:18px;display:flex;flex-direction:column;gap:12px;background:var(--bg)">
+${bub('a','Hi! Ask about stock, prices, substitutes, or indications — in English or Burmese.')}
+${bub('u','total stock of article 1000000024029?')}
+${bub('a','The total balance stock of article <b>1000000024029</b> across all sites is <b>14,963</b>.<br><br>Please consult a licensed pharmacist before use.')}
+${bub('u','<span class="my">ဖျားနာ အတွက် ဘာဆေးရှိလဲ</span>')}
+${bub('a','<span class="my">ဖျားနာအတွက် PARACAP PARACETAMOL၊ BIOGESIC 500MG စသည့် Paracetamol ဆေးများ ရရှိနိုင်ပါသည်။</span>')}</div>
+<div style="padding:12px 16px;border-top:1px solid var(--line);display:flex;gap:10px"><input class="input" placeholder="Message…"><button class="btn btn-pri">Send</button></div></div>`;
+
+P.data=()=>`<div style="display:flex;align-items:center;margin-bottom:14px"><h1>Data</h1><div style="margin-left:auto;display:flex;gap:8px"><button class="btn"><i data-lucide="upload" style="width:15px"></i>Upload xlsx</button><button class="btn btn-pri"><i data-lucide="refresh-cw" style="width:15px"></i>Reload</button></div></div>
+<b style="font-weight:600">Catalog</b><div style="max-width:360px;margin:8px 0 10px"><input class="input" placeholder="Search brand, generic or code…"></div>
+<div class="card" style="overflow:hidden;margin-bottom:8px"><div class="scroll" style="max-height:200px"><table><thead><tr><th>Code</th><th>Brand</th><th>Generic</th></tr></thead><tbody>
+${[['1000000024029','PARACAP PARACETAMOL 10\\'S','Paracetamol'],['1000000384200','YSI PARA-TAB 500MG','Paracetamol'],['1000000009840','ALAXAN 10\\'S','Para & Ibuprofen'],['1000000015837','ROYAL-D 25G','Electrolyte'],['1000000131948','BIOGESIC 500MG','Paracetamol']].map(r=>`<tr><td class="mono">${r[0]}</td><td>${r[1]}</td><td style="color:var(--ink2)">${r[2]}</td></tr>`).join('')}</tbody></table></div><div style="padding:7px 16px;border-top:1px solid var(--line);font-size:11px;color:var(--ink3)">showing 50 · scroll for more, search to filter</div></div>
+<b style="font-weight:600">Inventory</b><div style="display:flex;gap:8px;margin:8px 0 10px"><input class="input" style="width:150px" placeholder="Site code"><input class="input" style="width:220px" placeholder="Article code…"></div>
+<div class="card" style="overflow:hidden"><div class="scroll" style="max-height:220px"><table><thead><tr><th>Code</th><th>Brand</th><th>Site</th><th class="num">Stock</th><th class="num">Price</th></tr></thead><tbody>
+${[['1000000015837','ROYAL-D 25G','20052-CCTLKK','4,154','800'],['1000000024029','PARACAP','20059-CCGMPMTN','2,589','1,600'],['1000000369323','RELYTE ORS','20026-CC19','6,533','700']].map(r=>`<tr><td class="mono">${r[0]}</td><td>${r[1]}</td><td style="color:var(--ink2)">${r[2]}</td><td class="num">${r[3]}</td><td class="num">${r[4]} MMK</td></tr>`).join('')}</tbody></table></div><div style="padding:7px 16px;border-top:1px solid var(--line);font-size:11px;color:var(--ink3)">showing 100 · scroll for more</div></div>`;
+
+P.ftp=()=>`<div style="display:flex;align-items:center;margin-bottom:6px"><h1>SFTP uploads</h1><div style="margin-left:auto;display:flex;gap:8px"><button class="btn"><i data-lucide="upload" style="width:15px"></i>Upload xlsx</button><button class="btn btn-pri"><i data-lucide="refresh-cw" style="width:15px"></i>Ingest now</button></div></div>
+<p style="color:var(--ink2);margin:0 0 16px">Drop article/balance xlsx over SFTP, or upload manually. Auto-ingests + busts cache.</p>
+<div class="card" style="padding:16px;margin-bottom:16px"><b style="font-weight:600"><i data-lucide="server" style="width:15px;vertical-align:-2px"></i> Connection</b>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 32px;font-size:13px;margin-top:10px">
+<div style="display:flex;justify-content:space-between"><span style="color:var(--ink2)">Host</span><span>pharmacy.citcare.mm</span></div><div style="display:flex;justify-content:space-between"><span style="color:var(--ink2)">Port</span><span class="mono">2222</span></div><div style="display:flex;justify-content:space-between"><span style="color:var(--ink2)">User</span><span>pharma</span></div><div style="display:flex;justify-content:space-between"><span style="color:var(--ink2)">Path</span><span>upload/</span></div></div>
+<p class="mono" style="font-size:12px;color:var(--ink2);border-top:1px solid var(--line);margin:12px 0 0;padding-top:12px">sftp -P 2222 pharma@pharmacy.citcare.mm</p></div>
+${ftpT('Archived','check',[['1782115277_articles-export.xlsx','628 KB','today 14:30'],['1782107161_balance_stock.xlsx','3.5 MB','today 14:22']])}${ftpT('Pending','clock',[])}${ftpT('Failed','alert-triangle',[])}`;
+
+P.embed=()=>`<div style="display:flex;align-items:center;margin-bottom:6px"><h1>Embed widget</h1><button class="btn btn-cta" style="margin-left:auto"><i data-lucide="play" style="width:15px"></i>Load live preview</button></div>
+<p style="color:var(--ink2);margin:0 0 16px">Drop the chat widget on any site. Signed store_id locks answers to that branch — data by store.</p>
+${codeC('Public widget (all stores)','&lt;script src="https://API/api/embed/widget.js"\n  data-embed-id="web" data-public-key="web"\n  data-title="CityCare Agent" data-stream="true" async&gt;&lt;/script&gt;')}
+${codeC('Store-scoped widget (data by store)','&lt;script src="https://API/api/embed/widget.js"\n  data-embed-id="{{ $embedId }}" data-public-key="{{ $publicKey }}"\n  data-user=\\'@json($user)\\' data-user-sig="{{ $signature }}"\n  data-stream="true" async&gt;&lt;/script&gt;')}
+${codeC('Server-side signing (PHP)','ksort($user);\n$c = json_encode($user, JSON_UNESCAPED_SLASHES|JSON_UNESCAPED_UNICODE);\n$sig = hash_hmac(\\'sha256\\', $c, $secret);')}`;
+
+P.conversations=()=>`<h1>Conversations</h1><div style="display:flex;gap:10px;margin:14px 0">${['All langs','Store filter','50'].map((x,i)=>i==0||i==2?`<select class="input" style="width:${i==2?'90':'130'}px"><option>${x}</option></select>`:`<input class="input" style="width:160px" placeholder="${x}">`).join('')}</div>
+${conv('EN','top 5 articles by stock at CCBHSC','Top 5 at CCBHSC: SILOXOGENE 208, TERUMO SYRINGE 180, ELECTRAL FORTE ORS 167…','20060-CCBHSC',1,'6 ms')}
+${conv('MY','<span class="my">ဖျားနာ အတွက် ဘာဆေး ရှိလဲ</span>','<span class="my">PARACAP၊ BIOGESIC စသည့် Paracetamol ဆေးများ ရရှိနိုင်ပါသည်။</span>','all',0,'1.2 s')}
+${conv('EN','total stock of article 1000000024029','Total balance stock across all sites is 14,963.','all',0,'8.7 s')}`;
+
+P.tenants=()=>`<h1>Tenants</h1><p style="color:var(--ink2);margin:8px 0 16px">Embed credentials for client sites.</p>
+<div class="card" style="padding:14px 16px;margin-bottom:16px"><b style="font-weight:600">Add credential</b><div style="display:flex;gap:10px;margin-top:10px"><input class="input" placeholder="embed_id"><input class="input" placeholder="public_key"><button class="btn btn-pri" style="white-space:nowrap"><i data-lucide="plus" style="width:15px"></i>Add</button></div></div>
+<div class="card" style="overflow:hidden"><table><thead><tr><th>embed_id</th><th>public_key</th><th class="num">Actions</th></tr></thead><tbody>
+${[['citcare-web','pk_live_8f3a…'],['citcare-pos','pk_live_2b7c…']].map(r=>`<tr><td>${r[0]}</td><td class="mono" style="color:var(--ink2)">${r[1]}</td><td class="num"><i data-lucide="trash-2" style="width:15px;color:var(--ink3);cursor:pointer"></i></td></tr>`).join('')}</tbody></table></div>`;
+
+const ST=[['20043-CCSJ',2292,58128,574],['20015-CCGV',2126,38131,440],['20026-CC19',2410,61204,398],['20052-CCTLKK',1980,29844,221],['20060-CCBHSC',2661,33120,198]];
+P.stores=()=>`<h1>Stores</h1><div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:16px 0">${kpi('Sites','53')}${kpi('Total units','2.1M')}${kpi('Stock value','14.2B MMK')}</div>
+<div class="card" style="overflow:hidden"><div class="scroll"><table><thead><tr><th>Site</th><th class="num">SKUs</th><th class="num">Units</th><th style="width:180px">Stock value</th></tr></thead><tbody>
+${ST.map(s=>`<tr><td>${s[0]}</td><td class="num">${s[1].toLocaleString()}</td><td class="num">${s[2].toLocaleString()}</td><td><div style="display:flex;align-items:center;gap:10px"><div class="bar" style="flex:1"><span style="width:${Math.round(s[3]/574*100)}%"></span></div><span class="num" style="font-size:12px;color:var(--ink2);white-space:nowrap">${s[3]}M</span></div></td></tr>`).join('')}</tbody></table></div></div>`;
+
+P.agent=()=>`<h1>Agent config</h1><div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:16px 0">${cfg('Model','google/gemini-3.5-flash')}${cfg('Embedding','google/gemini-embedding-2')}${cfg('Rate limit','30 / min')}${cfg('Cache TTL','600 s')}</div>
+<div class="card" style="padding:16px"><div style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><b style="font-weight:600">System prompt</b><span class="badge b-amber">custom active</span></div>
+<textarea class="input mono" style="height:140px;font-size:12.5px;resize:vertical">You are the CitCare Pharmacy Assistant, bilingual (English / Burmese).
+Detect the user's language and reply in the same language.
+Never translate article codes, prices, or units. Use tools for every number.</textarea>
+<div style="margin-top:10px"><button class="btn btn-pri">Save prompt</button> <span style="font-size:12px;color:var(--ink3)">applied on next restart</span></div></div>`;
+
+P.eval=()=>`<div style="display:flex;align-items:center;margin-bottom:16px"><h1>Evaluation</h1><button class="btn btn-cta" style="margin-left:auto"><i data-lucide="play" style="width:15px"></i>Run eval</button></div>
+<div class="card" style="padding:18px;margin-bottom:16px;display:flex;align-items:center;gap:18px"><div style="font-size:34px;font-weight:600;color:var(--green)">13/13</div><div><b style="font-weight:600">All passing</b><div style="font-size:13px;color:var(--ink2)">100% · last run 2m ago · ~38s</div></div></div>
+${ev('en_full_info','full information for article 1000000024029','PARACAP PARACETAMOL, Paracetamol, 53 sites, 14,963 units…')}${ev('my_total_stock','<span class="my">article 1000000024029 ရဲ့ stock စုစုပေါင်း</span>','<span class="my">စုစုပေါင်းလက်ကျန် 14,963 ဖြစ်ပါသည်…</span>')}${ev('en_top5_ccbhsc','top 5 by stock at CCBHSC','SILOXOGENE 1000000008752 — 208 units…')}`;
+
+P.users=()=>`<h1>Users</h1><p style="color:var(--ink2);margin:8px 0 16px">Create + manage accounts. No self-signup. Email = identity; LDAP/SSO merge by email.</p>
+<div class="card" style="padding:14px 16px;margin-bottom:16px"><b style="font-weight:600">Create user</b><div style="display:flex;gap:10px;margin-top:10px"><input class="input" placeholder="email"><input class="input" placeholder="name"><input class="input" type="password" placeholder="password"><select class="input" style="width:130px"><option>user</option><option>admin</option><option>super_admin</option></select><button class="btn btn-pri" style="white-space:nowrap"><i data-lucide="plus" style="width:15px"></i>Create</button></div></div>
+<div class="card" style="overflow:hidden"><table><thead><tr><th>Email</th><th>Name</th><th>Role</th><th>Sources</th><th>Active</th><th class="num">Actions</th></tr></thead><tbody>
+${[['admin@citcare.local','Super Admin','super_admin','b-amber','local',1],['pharma.ops@citcare.local','Ops Lead','admin','b-pri','oidc',1],['branch20060@citcare.local','Branch 20060','user','b-pri','ldap',1]].map(r=>`<tr><td>${r[0]}</td><td>${r[1]}</td><td><span class="badge ${r[3]}">${r[2]}</span></td><td style="color:var(--ink2)">${r[4]}</td><td><span class="badge b-ok">active</span></td><td class="num"><i data-lucide="trash-2" style="width:15px;color:${r[2]==='super_admin'?'var(--line2)':'var(--ink3)'};cursor:pointer"></i></td></tr>`).join('')}</tbody></table></div>`;
+
+P.settings=()=>`<h1>Settings</h1><div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:16px 0">
+<div class="card" style="padding:14px"><b style="font-weight:600">Models</b><div style="font-size:13px;color:var(--ink2);line-height:1.9;margin-top:6px">gemini-3.5-flash<br>gemini-embedding-2</div></div>
+<div class="card" style="padding:14px"><b style="font-weight:600">Auth</b><div style="font-size:13px;color:var(--ink2);line-height:1.9;margin-top:6px">local · LDAP · Keycloak SSO<br>merge by email</div></div>
+<div class="card" style="padding:14px"><b style="font-weight:600">Data</b><div style="font-size:13px;color:var(--ink2);line-height:1.9;margin-top:6px">4,892 catalog · 111,654 inv · v18</div></div></div>
+<div class="card" style="padding:16px;border-color:var(--accent)"><div style="display:flex;align-items:center;gap:8px;color:var(--accent-d);font-weight:600;margin-bottom:10px"><i data-lucide="shield-alert" style="width:16px"></i>Security</div><ul style="font-size:13px;color:var(--ink2);margin:0;padding-left:18px;line-height:1.9"><li>Rotate the OpenRouter API key</li><li>32-byte SECRET_KEY matching Laravel</li><li>SFTP key-auth only in production</li><li>Tighten CORS before public deploy</li></ul></div>`;
+
+function kpi(l,v,c){return `<div class="kpi"><div style="font-size:12px;color:var(--ink2);margin-bottom:6px">${l}</div><div style="font-size:24px;font-weight:600;${c?'color:'+c:''}" class="num" >${v}</div></div>`}
+function cfg(k,v){return `<div class="card" style="padding:14px"><div style="font-size:12px;color:var(--ink2);margin-bottom:4px">${k} <span style="color:var(--ink3)">· .env</span></div><div style="font-size:15px;font-weight:500">${v}</div></div>`}
+function bub(r,t){return `<div style="display:flex;${r==='u'?'justify-content:flex-end':''}"><div style="max-width:78%;padding:10px 14px;border-radius:14px;font-size:14px;line-height:1.5;${r==='u'?'background:var(--primary);color:#fff;border-bottom-right-radius:4px':'background:var(--surface);border:1px solid var(--line);border-bottom-left-radius:4px'}">${t}</div></div>`}
+function conv(l,q,a,s,c,lat){return `<div class="card" style="padding:14px 16px;margin-bottom:10px"><div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><span class="badge ${l==='MY'?'b-amber':'b-pri'}">${l}</span><b style="font-weight:600">${q}</b>${c?'<span class="badge b-ok">cached</span>':''}</div><p style="font-size:13px;color:var(--ink2);margin:0 0 8px">${a}</p><div style="font-size:12px;color:var(--ink3);display:flex;gap:14px"><span>store: ${s}</span><span>${lat}</span></div></div>`}
+function ftpT(t,ic,rows){const b=rows.length?rows.map(r=>`<tr><td><i data-lucide="file-spreadsheet" style="width:14px;color:var(--ink3);vertical-align:-2px;margin-right:6px"></i>${r[0]}</td><td class="num" style="color:var(--ink2)">${r[1]}</td><td class="num" style="color:var(--ink2)">${r[2]}</td></tr>`).join(''):`<tr><td colspan="3" style="color:var(--ink3)">None.</td></tr>`;return `<div style="margin-bottom:16px"><div style="display:flex;align-items:center;gap:8px;font-weight:600;margin-bottom:8px"><i data-lucide="${ic}" style="width:15px"></i>${t} <span class="badge" style="background:var(--surface2);color:var(--ink2)">${rows.length}</span></div><div class="card" style="overflow:hidden"><table><thead><tr><th>File</th><th class="num">Size</th><th class="num">Modified</th></tr></thead><tbody>${b}</tbody></table></div></div>`}
+function codeC(l,code){return `<div style="margin-bottom:16px"><div style="display:flex;margin-bottom:8px"><b style="font-weight:600">${l}</b><span class="btn" style="margin-left:auto;padding:4px 10px;font-size:12px"><i data-lucide="copy" style="width:13px"></i>Copy</span></div><pre class="mono" style="background:var(--surface2);border:1px solid var(--line);border-radius:10px;padding:14px;font-size:12.5px;overflow-x:auto;margin:0">${code}</pre></div>`}
+function ev(id,q,a){return `<div class="card" style="padding:12px 14px;margin-bottom:8px"><div style="display:flex;align-items:center;gap:9px"><i data-lucide="check" style="width:16px;color:var(--green)"></i><span class="mono" style="font-size:12px;color:var(--ink3)">${id}</span><b style="font-weight:600">${q}</b></div><p style="font-size:12.5px;color:var(--ink2);margin:6px 0 0 25px">${a}</p></div>`}
+
+function login(){return `<div style="display:flex;height:100vh;align-items:center;justify-content:center">
+  <div class="card" style="width:380px;padding:28px">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:18px"><span style="width:34px;height:34px;border-radius:9px;background:var(--primary);color:#fff;display:flex;align-items:center;justify-content:center"><i data-lucide="pill" style="width:18px"></i></span><div><div style="font-size:18px;font-weight:600">CitCare admin</div><div style="font-size:12px;color:var(--ink2)">Sign in to continue</div></div></div>
+    <label style="font-size:12px;color:var(--ink2)">Email</label><input class="input" value="admin@citcare.local" style="margin:4px 0 12px">
+    <label style="font-size:12px;color:var(--ink2)">Password</label><input class="input" type="password" value="Admin123!" style="margin:4px 0 4px">
+    <button class="btn btn-pri" style="width:100%;justify-content:center;margin-top:14px" onclick="authed=true;render()">Sign in</button>
+    <button class="btn" style="width:100%;justify-content:center;margin-top:8px">Sign in with Keycloak</button>
+    <p style="font-size:11px;color:var(--ink3);margin-top:14px">No self-signup — accounts are created by an administrator.</p>
+  </div></div>`}
+
+function go(id){current=id;render()}
+function logout(){authed=false;render()}
+function render(){
+  const label=(NAV.find(n=>n[0]===current)||[,'Dashboard'])[1];
+  document.getElementById('app').innerHTML = authed ? shell(P[current](),label) : login();
+  if(window.lucide)lucide.createIcons();
+}
+render();
+</script>
+</body>
+</html>

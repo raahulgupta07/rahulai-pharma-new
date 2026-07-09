@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CitCare — Chat</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Noto+Sans+Myanmar:wght@400;500&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lucide@latest"></script>
+<style>
+  :root{
+    --bg:#faf9f7;--surface:#fff;--s2:#f4f2ee;--s3:#efece6;
+    --sidebar:#f5f3ef;
+    --ink:#1f1e1c;--ink2:#5f5e58;--ink3:#8a877f;
+    --accent:#c96342;--accent-h:#b5512f;--accent-soft:#f4e7e1;
+    --line:#e7e3dc;--line2:#dcd7ce;
+    --green:#3f8f5f;--blue:#3573b5;--blue-s:#e6eff7;
+    --user-bub:#f0ea6300;--user-bg:#f3ede4;
+    --shadow:0 1px 2px rgba(20,20,18,.04),0 4px 14px rgba(20,20,18,.05);
+    --shadow-lg:0 12px 44px rgba(20,20,18,.13);
+  }
+  html.dark{
+    --bg:#1f1e1c;--surface:#262521;--s2:#2e2c28;--s3:#35332e;
+    --sidebar:#1a1917;
+    --ink:#f2efe9;--ink2:#b0 aca3;--ink2:#aca99f;--ink3:#7a766d;
+    --accent:#e07a55;--accent-h:#ec8a66;--accent-soft:#3a2a23;
+    --line:#34322d;--line2:#423f39;--user-bg:#32302b;
+    --blue:#73a9e8;--blue-s:#1a2740;
+    --shadow:0 1px 2px rgba(0,0,0,.3),0 4px 16px rgba(0,0,0,.35);--shadow-lg:0 14px 50px rgba(0,0,0,.55);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:'Inter','Noto Sans Myanmar',-apple-system,sans-serif;font-size:15px;-webkit-font-smoothing:antialiased}
+  .serif{font-family:'Fraunces','Noto Sans Myanmar',serif;font-weight:600;letter-spacing:-.015em}
+  .my{font-family:'Noto Sans Myanmar','Inter',sans-serif}
+  .mono{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}
+  .scroll::-webkit-scrollbar{width:8px}.scroll::-webkit-scrollbar-thumb{background:var(--line2);border-radius:5px}.scroll::-webkit-scrollbar-track{background:transparent}
+
+  .app{display:flex;height:100vh;overflow:hidden}
+
+  /* ---------- SIDEBAR (history) ---------- */
+  .side{width:268px;flex-shrink:0;background:var(--sidebar);border-right:1px solid var(--line);display:flex;flex-direction:column;transition:margin-left .25s}
+  .side.collapsed{margin-left:-268px}
+  .side-top{padding:14px 12px 8px}
+  .brand{display:flex;align-items:center;gap:9px;padding:4px 8px 14px}
+  .brand .mark{width:28px;height:28px;border-radius:9px;background:linear-gradient(145deg,var(--accent),var(--accent-h));color:#fff;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(201,99,66,.3)}
+  .brand b{font-size:15px;font-weight:700;letter-spacing:-.01em}
+  .newbtn{display:flex;align-items:center;gap:9px;width:100%;padding:10px 12px;border-radius:11px;border:1px solid var(--line2);background:var(--surface);color:var(--ink);font-size:14px;font-weight:600;cursor:pointer;transition:.15s}
+  .newbtn:hover{background:var(--s2);box-shadow:var(--shadow)}
+  .search{display:flex;align-items:center;gap:8px;margin-top:8px;padding:9px 12px;border-radius:11px;background:var(--surface);border:1px solid var(--line);color:var(--ink3);font-size:13.5px;cursor:text}
+  .recents{flex:1;overflow-y:auto;padding:8px 8px 12px}
+  .grp{font-size:11px;font-weight:700;letter-spacing:.04em;color:var(--ink3);text-transform:uppercase;padding:14px 10px 6px}
+  .chat{display:flex;align-items:center;gap:9px;padding:9px 10px;border-radius:9px;font-size:13.5px;color:var(--ink2);cursor:pointer;transition:.13s;position:relative;white-space:nowrap;overflow:hidden}
+  .chat:hover{background:var(--s2);color:var(--ink)}
+  .chat.on{background:var(--accent-soft);color:var(--ink);font-weight:500}
+  .chat .t{flex:1;overflow:hidden;text-overflow:ellipsis}
+  .chat .star{color:var(--accent);flex-shrink:0}
+  .side-foot{border-top:1px solid var(--line);padding:10px 12px;display:flex;align-items:center;gap:10px;cursor:pointer}
+  .side-foot:hover{background:var(--s2)}
+  .ava{width:30px;height:30px;border-radius:50%;background:linear-gradient(145deg,var(--accent),var(--accent-h));color:#fff;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0}
+
+  /* ---------- MAIN ---------- */
+  .main{flex:1;display:flex;flex-direction:column;min-width:0}
+  .topbar{display:flex;align-items:center;gap:10px;padding:11px 18px;border-bottom:1px solid transparent}
+  .icobtn{width:34px;height:34px;display:flex;align-items:center;justify-content:center;border-radius:9px;color:var(--ink3);cursor:pointer;transition:.15s}
+  .icobtn:hover{background:var(--s2);color:var(--ink)}
+  .modelchip{display:flex;align-items:center;gap:7px;padding:6px 11px;border-radius:9px;font-size:13.5px;font-weight:500;color:var(--ink2);cursor:pointer}
+  .modelchip:hover{background:var(--s2)}
+  .pill-badge{font-size:11px;font-weight:600;padding:2px 8px;border-radius:7px;background:var(--accent-soft);color:var(--accent-h)}
+
+  .stream{flex:1;overflow-y:auto}
+  .thread{max-width:740px;margin:0 auto;padding:18px 24px 40px}
+
+  /* message rows */
+  .row{display:flex;gap:14px;margin:22px 0}
+  .row.user{justify-content:flex-end}
+  .msg-ava{width:28px;height:28px;border-radius:8px;flex-shrink:0;display:flex;align-items:center;justify-content:center;margin-top:2px}
+  .msg-ava.ai{background:linear-gradient(145deg,var(--accent),var(--accent-h));color:#fff}
+  .bub-user{max-width:78%;background:var(--user-bg);border:1px solid var(--line);border-radius:16px;border-bottom-right-radius:6px;padding:12px 16px;font-size:15px;line-height:1.6}
+  .ai-body{max-width:calc(100% - 42px);font-size:15.5px;line-height:1.72;color:var(--ink)}
+  .ai-body p{margin:0 0 12px}
+  .ai-body b{font-weight:600}
+  .ai-name{font-size:13px;font-weight:600;color:var(--ink2);margin-bottom:6px}
+  .coin{display:inline-flex;align-items:center;font-size:11px;font-weight:600;color:var(--accent);background:var(--accent-soft);border:1px solid color-mix(in srgb,var(--accent) 28%,transparent);border-radius:6px;padding:0 6px;margin:0 2px;cursor:pointer;vertical-align:1px}
+  .src-row{display:flex;gap:7px;flex-wrap:wrap;margin-top:6px}
+  .actions{display:flex;gap:3px;margin-top:10px;opacity:0;transition:.15s}
+  .row:hover .actions{opacity:1}
+  .act{width:30px;height:30px;display:flex;align-items:center;justify-content:center;border-radius:8px;color:var(--ink3);cursor:pointer}
+  .act:hover{background:var(--s2);color:var(--ink)}
+  .disc{font-size:12.5px;color:var(--ink3);border-top:1px dashed var(--line2);margin-top:14px;padding-top:10px}
+
+  /* empty greeting */
+  .empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:0 24px;text-align:center}
+  .empty .hi{font-size:32px}
+  .empty .sub{color:var(--ink2);margin-top:10px;font-size:15px}
+  .sugs{display:grid;grid-template-columns:1fr 1fr;gap:11px;max-width:560px;width:100%;margin-top:28px}
+  .sug{text-align:left;border:1px solid var(--line);background:var(--surface);border-radius:13px;padding:14px 16px;cursor:pointer;transition:.15s;box-shadow:var(--shadow)}
+  .sug:hover{border-color:var(--accent);transform:translateY(-1px)}
+  .sug .st{font-size:14px;font-weight:600}
+  .sug .sd{font-size:12.5px;color:var(--ink3);margin-top:3px}
+
+  /* composer */
+  .composer-wrap{padding:0 24px 22px}
+  .composer{max-width:740px;margin:0 auto;background:var(--surface);border:1px solid var(--line2);border-radius:22px;box-shadow:var(--shadow-lg);padding:8px 8px 8px 6px;transition:.15s}
+  .composer:focus-within{border-color:color-mix(in srgb,var(--accent) 45%,var(--line2))}
+  .composer textarea{width:100%;border:0;background:none;outline:none;resize:none;font-family:inherit;font-size:15.5px;color:var(--ink);line-height:1.6;padding:11px 12px 4px;max-height:200px}
+  .composer textarea::placeholder{color:var(--ink3)}
+  .comp-bar{display:flex;align-items:center;gap:6px;padding:2px 6px 4px}
+  .tool{display:flex;align-items:center;gap:6px;padding:7px 11px;border-radius:10px;font-size:13px;color:var(--ink2);cursor:pointer;border:1px solid transparent;transition:.15s}
+  .tool:hover{background:var(--s2)}
+  .send{margin-left:auto;width:36px;height:36px;border-radius:11px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:.15s;border:0}
+  .send:hover{background:var(--accent-h)}
+  .send:disabled{background:var(--line2);cursor:default}
+  .foot-note{max-width:740px;margin:9px auto 0;text-align:center;font-size:11.5px;color:var(--ink3)}
+  .typing span{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--ink3);margin-right:3px;animation:bl 1.2s infinite}
+  .typing span:nth-child(2){animation-delay:.2s}.typing span:nth-child(3){animation-delay:.4s}
+  @keyframes bl{0%,60%,100%{opacity:.25}30%{opacity:1}}
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+  @media(max-width:760px){.side{position:absolute;z-index:20;height:100%}.sugs{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- SIDEBAR -->
+  <aside class="side" id="side">
+    <div class="side-top">
+      <div class="brand"><span class="mark"><i data-lucide="pill" style="width:16px"></i></span><b>CitCare</b></div>
+      <button class="newbtn" onclick="newChat()"><i data-lucide="plus" style="width:17px"></i>New chat</button>
+      <div class="search" onclick="void 0"><i data-lucide="search" style="width:15px"></i>Search chats…</div>
+    </div>
+    <div class="recents scroll" id="recents"></div>
+    <div class="side-foot">
+      <span class="ava">AD</span>
+      <div style="flex:1;line-height:1.25"><div style="font-size:13.5px;font-weight:600">admin</div><div style="font-size:11px;color:var(--ink3)">Super admin · Pro</div></div>
+      <i data-lucide="settings-2" style="width:16px;color:var(--ink3)"></i>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <div class="main">
+    <div class="topbar">
+      <div class="icobtn" onclick="toggleSide()"><i data-lucide="panel-left" style="width:19px"></i></div>
+      <div class="modelchip">CitCare Agent <span class="pill-badge">Claude Sonnet 4.5</span><i data-lucide="chevron-down" style="width:15px;color:var(--ink3)"></i></div>
+      <div style="margin-left:auto;display:flex;gap:2px">
+        <div class="icobtn" onclick="toggleTheme()" id="themeBtn"><i data-lucide="moon" style="width:18px"></i></div>
+        <div class="icobtn"><i data-lucide="share-2" style="width:18px"></i></div>
+      </div>
+    </div>
+
+    <div class="stream scroll" id="stream"></div>
+
+    <div class="composer-wrap">
+      <div class="composer">
+        <textarea id="ta" rows="1" placeholder="Ask about stock, prices, substitutes — English or မြန်မာ…" oninput="grow(this)" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send()}"></textarea>
+        <div class="comp-bar">
+          <div class="tool"><i data-lucide="paperclip" style="width:16px"></i></div>
+          <div class="tool"><i data-lucide="store" style="width:16px"></i>All stores</div>
+          <div class="tool"><i data-lucide="languages" style="width:16px"></i>Auto</div>
+          <button class="send" id="sendBtn" onclick="send()"><i data-lucide="arrow-up" style="width:18px"></i></button>
+        </div>
+      </div>
+      <div class="foot-note">CitCare can make mistakes. Verify stock & dosage with a licensed pharmacist.</div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $=s=>document.querySelector(s);
+let theme='light';
+function toggleTheme(){theme=theme==='light'?'dark':'light';document.documentElement.classList.toggle('dark',theme==='dark');$('#themeBtn').innerHTML=`<i data-lucide="${theme==='dark'?'sun':'moon'}" style="width:18px"></i>`;lucide.createIcons();}
+function toggleSide(){$('#side').classList.toggle('collapsed')}
+function grow(t){t.style.height='auto';t.style.height=Math.min(t.scrollHeight,200)+'px';$('#sendBtn').disabled=!t.value.trim();}
+
+const HISTORY={
+  'Today':[['c1','Stock of PARACAP across sites',1],['c2','ဖျားနာ အတွက် ဘာဆေး ရှိလဲ',0]],
+  'Yesterday':[['c3','Substitutes for ALAXAN',0],['c4','Top 5 sellers at CCBHSC',0]],
+  'Previous 7 days':[['c5','Cheapest paracetamol brands',0],['c6','Diabetes meds in stock',0],['c7','ELECTRAL price check',0]]
+};
+let active='c1';
+function renderRecents(){
+  $('#recents').innerHTML=Object.entries(HISTORY).map(([g,items])=>`<div class="grp">${g}</div>`+items.map(([id,t,star])=>`<div class="chat ${id===active?'on':''}" onclick="openChat('${id}')"><i data-lucide="message-square" style="width:15px;flex-shrink:0;opacity:.6"></i><span class="t">${t}</span>${star?'<i data-lucide="star" class="star" style="width:13px" fill="currentColor"></i>':''}</div>`).join('')).join('');
+  lucide.createIcons();
+}
+
+// canned conversation for the active demo chat
+const THREAD=[
+  {r:'user',html:'total stock of PARACAP PARACETAMOL 10`S across all sites?'},
+  {r:'ai',html:`<p><b>PARACAP PARACETAMOL 10\`S</b> has <b>14,963 units</b> in stock across all 53 sites <span class="coin">inventory</span>.</p>
+   <p>It's available at every branch — the largest holdings are at <b>20060-CCBHSC</b> (1,204), <b>20043-CCSJ</b> (988) and <b>20026-CC19</b> (911) <span class="coin">balance_stock</span>. Average price is <b>1,600 MMK</b> <span class="coin">catalog</span>.</p>`,
+   src:['1 · inventory balance','2 · catalog'],disc:true},
+  {r:'user',html:'<span class="my">အဲ့ဒါနဲ့ တူတဲ့ ဆေး ဘာရှိလဲ</span>'},
+  {r:'ai',html:`<p class="my">PARACAP နဲ့ generic တူတဲ့ (paracetamol) ဆေးတွေက —</p>
+   <p><b>BIOGESIC 500MG</b>၊ <b>PANADOL</b>၊ <b>YSI PARA-TAB 500MG</b> ရရှိနိုင်ပါတယ် <span class="coin">catalog</span>။ အားလုံး stock ထဲမှာ ရှိပါတယ်။</p>`,
+   src:['1 · catalog · same generic'],disc:true}
+];
+
+function bubble(m){
+  if(m.r==='user') return `<div class="row user"><div class="bub-user">${m.html}</div></div>`;
+  return `<div class="row ai"><div class="msg-ava ai"><i data-lucide="pill" style="width:15px"></i></div>
+    <div class="ai-body"><div class="ai-name">CitCare Agent</div>${m.html}
+    ${m.src?`<div class="src-row">${m.src.map(s=>`<span class="coin">${s}</span>`).join('')}</div>`:''}
+    ${m.disc?`<div class="disc">⚕ Please consult a licensed pharmacist before use.</div>`:''}
+    <div class="actions"><div class="act"><i data-lucide="copy" style="width:15px"></i></div><div class="act"><i data-lucide="refresh-cw" style="width:15px"></i></div><div class="act"><i data-lucide="thumbs-up" style="width:15px"></i></div><div class="act"><i data-lucide="thumbs-down" style="width:15px"></i></div></div>
+    </div></div>`;
+}
+
+function renderThread(msgs){
+  if(!msgs.length){
+    $('#stream').innerHTML=`<div class="empty">
+      <div class="serif hi">Good evening, admin</div>
+      <div class="sub">Ask about stock, prices, substitutes or indications — in English or မြန်မာ.</div>
+      <div class="sugs">
+        ${[['Check stock','total stock of 1000000024029','package-search'],['Find substitutes','substitutes for ALAXAN','replace'],['Top sellers','top 5 by stock at CCBHSC','trending-up'],['Burmese query','ဖျားနာ အတွက် ဘာဆေး ရှိလဲ','languages']].map(s=>`<div class="sug" onclick="$('#ta').value='${s[1]}';grow($('#ta'));$('#ta').focus()"><div style="display:flex;align-items:center;gap:8px"><i data-lucide="${s[2]}" style="width:16px;color:var(--accent)"></i><span class="st">${s[0]}</span></div><div class="sd">${s[1]}</div></div>`).join('')}
+      </div></div>`;
+  } else {
+    $('#stream').innerHTML=`<div class="thread">${msgs.map(bubble).join('')}</div>`;
+  }
+  lucide.createIcons();
+}
+
+function openChat(id){active=id;renderRecents();renderThread(id==='c1'?THREAD:[{r:'user',html:'(demo) open '+id},{r:'ai',html:'<p>This is a prototype — live chats load from the agent backend.</p>',disc:true}]);$('#stream').scrollTop=0;}
+function newChat(){active='';renderRecents();renderThread([]);$('#ta').focus();}
+
+let live=[];
+function send(){
+  const t=$('#ta').value.trim();if(!t)return;
+  if(!live.length && active!=='c1'){} // start fresh thread visually
+  live = (active==='c1'?THREAD.slice():[]).concat(live);
+  active='live';
+  live.push({r:'user',html:t});
+  $('#ta').value='';grow($('#ta'));
+  renderThread(live);
+  // typing indicator
+  $('#stream .thread').insertAdjacentHTML('beforeend',`<div class="row ai" id="typing"><div class="msg-ava ai"><i data-lucide="pill" style="width:15px"></i></div><div class="ai-body"><div class="ai-name">CitCare Agent</div><div class="typing"><span></span><span></span><span></span></div></div></div>`);
+  lucide.createIcons();
+  $('#stream').scrollTop=$('#stream').scrollHeight;
+  const my=/[က-႟]/.test(t);
+  const ans = my
+    ? {r:'ai',html:'<p class="my">ရှာဖွေပေးပါမယ်။ စုစုပေါင်း balance stock က <b>14,963</b> ယူနစ် ဖြစ်ပါတယ် <span class="coin">inventory</span>။</p>',src:['1 · inventory'],disc:true}
+    : {r:'ai',html:'<p>Looking that up… the total balance stock is <b>14,963 units</b> across 53 sites <span class="coin">inventory</span>.</p>',src:['1 · inventory balance'],disc:true};
+  setTimeout(()=>{live.push(ans);renderThread(live);$('#stream').scrollTop=$('#stream').scrollHeight;},900);
+}
+
+renderRecents();renderThread(THREAD);
+$('#sendBtn').disabled=true;
+</script>
+</body>
+</html>

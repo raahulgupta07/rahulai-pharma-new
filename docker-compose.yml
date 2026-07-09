@@ -1,0 +1,93 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8088:8000"          # host 8088 -> container 8000
+    env_file:
+      - .env                 # OPENROUTER_API_KEY, SECRET_KEY, tunables
+    environment:
+      # Override the host-facing URLs from .env: inside the compose network the
+      # API reaches the other services by name on their INTERNAL ports.
+      POSTGRES_URL: postgresql://pharmacy:pharmacy@postgres:5432/pharmacy
+      REDIS_URL: redis://redis:6379/0
+      INCOMING_DIR: /incoming
+    volumes:
+      - sftp_data:/incoming          # shared with sftp + worker (manual /ingest)
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: pgvector/pgvector:pg16    # Postgres 16 + pgvector extension
+    environment:
+      POSTGRES_USER: pharmacy
+      POSTGRES_PASSWORD: pharmacy
+      POSTGRES_DB: pharmacy
+    ports:
+      - "5433:5432"          # host 5433 (5432 already in use) -> container 5432
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pharmacy -d pharmacy"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"          # host 6380 -> container 6379
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # SFTP drop point. Users upload article*/balance* xlsx into /upload.
+  # Auth: password (SFTP_PASSWORD) AND/OR SSH key (drop *.pub in ./sftp/keys).
+  sftp:
+    image: atmoz/sftp:alpine
+    ports:
+      - "2222:22"            # connect: sftp -P 2222 pharma@<host>
+    # uid:gid:dir tail makes atmoz create + chown the upload dir to the user,
+    # so SFTP writes succeed even though it is a mounted volume.
+    command: "pharma:${SFTP_PASSWORD:-pharma}:1001:1001:upload"
+    volumes:
+      - sftp_data:/home/pharma/upload
+      - ./sftp/keys:/home/pharma/.ssh/keys:ro
+      - ./sftp/chown.sh:/etc/sftp.d/chown.sh:ro   # fix upload dir ownership on boot
+    restart: unless-stopped
+
+  # Ingest worker: watches the SFTP upload dir, loads new files, busts cache.
+  ingest-worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: ["python", "-m", "app.watcher"]
+    healthcheck:
+      disable: true                  # worker has no HTTP server to probe
+    env_file:
+      - .env
+    environment:
+      POSTGRES_URL: postgresql://pharmacy:pharmacy@postgres:5432/pharmacy
+      REDIS_URL: redis://redis:6379/0
+      INCOMING_DIR: /incoming
+    volumes:
+      - sftp_data:/incoming          # same volume the SFTP user writes to
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  sftp_data:

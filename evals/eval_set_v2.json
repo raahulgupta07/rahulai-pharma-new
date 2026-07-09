@@ -1,0 +1,254 @@
+{
+  "_comment": "Accuracy eval v2 — expanded shop-question coverage (substitutes, condition semantic+graph, per-site stock, totals, cross-store availability), EN + Burmese. All expected values computed live from Postgres on 2026-07-02 (5292 catalog / 111654 inventory). Anchors: PARACAP 1000000024029 (Paracetamol; total 14963, 53 sites, top 20059-CCGMPMTN=2589, sub 1000000384200 YSI PARA-TAB); BIOGESIC 500MG 10`S 1000000131948 (Paracetamol; total 8827, 53 sites; 20043-CCSJ=395, 20060-CCBHSC=140, 20059-CCGMPMTN=100, low 20061-CC50BTH=7; sub PARACAP 1000000024029); ROYAL-D 25G 1000000015837 (Electrolyte Powder; total 37605, 53 sites; 20052-CCTLKK=4154, 20043-CCSJ=2311, 20024-CC73=2298, low 20064-CCGMLM=100; sub ROYAL-D S`BERRY 1000000009952). Condition anchor: drug_edges rel=treats dst=headache (22 srcs; top brands ALAXAN 10`S, ANAFLAM IBUPROFEN 400MG); dst=fever (17 srcs, paracetamol/ibuprofen brands). Each case: question, expect_contains (all substrings must appear, normalizer strips commas/spaces/case), optional expect_script ('my'=Burmese reply).",
+  "cases": [
+    {
+      "id": "v1_en_full_info",
+      "question": "show me full information for this article code 1000000024029",
+      "expect_contains": [
+        "PARACAP",
+        "Paracetamol"
+      ]
+    },
+    {
+      "id": "v1_en_total_stock_all_sites",
+      "question": "What is the total balance stock of article 1000000024029 across all sites?",
+      "expect_contains": [
+        "14963"
+      ]
+    },
+    {
+      "id": "v1_en_stock_top_site",
+      "question": "What is the stock of article 1000000024029 at site 20059-CCGMPMTN?",
+      "expect_contains": [
+        "2589"
+      ]
+    },
+    {
+      "id": "v1_en_substitutes",
+      "question": "Find substitutes for article 1000000024029",
+      "expect_contains": [
+        "1000000384200"
+      ]
+    },
+    {
+      "id": "v1_my_total_stock",
+      "question": "article 1000000024029 ရဲ့ site အားလုံးပေါင်း လက်ကျန် stock စုစုပေါင်း ဘယ်လောက်ရှိလဲ",
+      "expect_contains": [
+        "14963"
+      ],
+      "expect_script": "my"
+    },
+    {
+      "id": "en_substitutes_biogesic",
+      "question": "What substitutes do you have for BIOGESIC 500MG (article 1000000131948)?",
+      "expect_contains": [
+        "PARACAP"
+      ]
+    },
+    {
+      "id": "my_substitutes_biogesic",
+      "question": "BIOGESIC (article 1000000131948) အစား ထိုးသုံးလို့ရတဲ့ ဆေးတွေ ဘာတွေရှိလဲ",
+      "expect_contains": [
+        "1000000024029"
+      ],
+      "expect_script": "my"
+    },
+    {
+      "id": "en_substitutes_royald",
+      "question": "Find alternatives for article 1000000015837 (ROYAL-D 25G)",
+      "expect_contains": [
+        "1000000009952"
+      ]
+    },
+    {
+      "id": "my_substitutes_royald",
+      "question": "ROYAL-D 25G (article 1000000015837) မရှိရင် အစားသုံးလို့ရတဲ့ တခြားဆေး ရှိလား",
+      "expect_contains": [
+        "1000000009952"
+      ],
+      "expect_script": "my"
+    },
+    {
+      "id": "en_condition_headache",
+      "question": "what products do you have for headache?",
+      "expect_contains": [
+        "ALAXAN"
+      ]
+    },
+    {
+      "id": "my_condition_headache",
+      "question": "ခေါင်းကိုက်တာအတွက် ဘာဆေးတွေ ရှိလဲ",
+      "expect_contains": [],
+      "expect_script": "my"
+    },
+    {
+      "id": "en_condition_fever",
+      "question": "which medicine should I take for fever?",
+      "expect_contains": [
+        "PARACETAMOL"
+      ]
+    },
+    {
+      "id": "my_condition_fever",
+      "question": "ဖျားနေလို့ပါ၊ ဘယ်ဆေး သောက်သင့်လဲ",
+      "expect_contains": [],
+      "expect_script": "my"
+    },
+    {
+      "id": "en_need_rehydration",
+      "question": "a customer has diarrhea and is dehydrated — what rehydration products do you have?",
+      "expect_contains": [
+        "REHYDRATION"
+      ]
+    },
+    {
+      "id": "en_stock_biogesic_ccsj",
+      "question": "How many units of article 1000000131948 are in stock at store 20043-CCSJ?",
+      "expect_contains": [
+        "395"
+      ]
+    },
+    {
+      "id": "my_stock_biogesic_ccsj",
+      "question": "store 20043-CCSJ မှာ article 1000000131948 လက်ကျန် ဘယ်လောက်ရှိလဲ",
+      "expect_contains": [
+        "395"
+      ],
+      "expect_script": "my"
+    },
+    {
+      "id": "en_stock_royald_cctlkk",
+      "question": "What is the balance stock of article 1000000015837 at site 20052-CCTLKK?",
+      "expect_contains": [
+        "4154"
+      ]
+    },
+    {
+      "id": "my_stock_royald_cctlkk",
+      "question": "site 20052-CCTLKK မှာ ROYAL-D 25G (article 1000000015837) stock ဘယ်နှစ်ခု ကျန်လဲ",
+      "expect_contains": [
+        "4154"
+      ],
+      "expect_script": "my"
+    },
+    {
+      "id": "en_stock_biogesic_ccbhsc",
+      "question": "Check stock of article 1000000131948 at store 20060-CCBHSC",
+      "expect_contains": [
+        "140"
+      ]
+    },
+    {
+      "id": "my_stock_biogesic_gmpmtn",
+      "question": "20059-CCGMPMTN ဆိုင်မှာ article 1000000131948 ဘယ်လောက် ကျန်သေးလဲ",
+      "expect_contains": [
+        "100"
+      ],
+      "expect_script": "my"
+    },
+    {
+      "id": "en_total_biogesic",
+      "question": "What is the total stock of BIOGESIC article 1000000131948 across all stores?",
+      "expect_contains": [
+        "8827"
+      ]
+    },
+    {
+      "id": "my_total_biogesic",
+      "question": "article 1000000131948 ကို ဆိုင်ခွဲအားလုံးပေါင်းရင် စုစုပေါင်း လက်ကျန် ဘယ်လောက်ရှိလဲ",
+      "expect_contains": [
+        "8827"
+      ],
+      "expect_script": "my"
+    },
+    {
+      "id": "en_total_royald",
+      "question": "Total balance stock of article 1000000015837 across all sites?",
+      "expect_contains": [
+        "37605"
+      ]
+    },
+    {
+      "id": "my_total_royald",
+      "question": "ROYAL-D 25G (article 1000000015837) site အားလုံးပေါင်း စုစုပေါင်း stock ဘယ်လောက်လဲ",
+      "expect_contains": [
+        "37605"
+      ],
+      "expect_script": "my"
+    },
+    {
+      "id": "en_other_store_biogesic",
+      "question": "Store 20061-CC50BTH only has a few units of BIOGESIC (article 1000000131948). Which other store has the most stock of it?",
+      "expect_contains": [
+        "20043-CCSJ"
+      ]
+    },
+    {
+      "id": "my_other_store_biogesic",
+      "question": "20061-CC50BTH ဆိုင်မှာ article 1000000131948 မလုံလောက်ဘူး၊ ဘယ် store မှာ အများဆုံး ရှိလဲ",
+      "expect_contains": [
+        "20043-CCSJ"
+      ],
+      "expect_script": "my"
+    },
+    {
+      "id": "en_other_store_royald",
+      "question": "20064-CCGMLM is running low on article 1000000015837. Which other branch has the highest stock?",
+      "expect_contains": [
+        "20052-CCTLKK"
+      ]
+    },
+    {
+      "id": "my_other_store_royald",
+      "question": "20064-CCGMLM မှာ ROYAL-D 25G (article 1000000015837) နည်းနေပြီ၊ တခြားဘယ်ဆိုင်ခွဲမှာ အများဆုံးရှိလဲ",
+      "expect_contains": [
+        "20052-CCTLKK"
+      ],
+      "expect_script": "my"
+    },
+    {
+      "id": "en_top_store_paracap",
+      "question": "Which store has the highest stock of article 1000000024029 and how many units?",
+      "expect_contains": [
+        "2589"
+      ]
+    },
+    {
+      "id": "en_site_count_biogesic",
+      "question": "At how many sites is article 1000000131948 stocked?",
+      "expect_contains": [
+        "53"
+      ]
+    },
+    {
+      "id": "my_code_lookup_unienzyme",
+      "question": "1000000008760 ကို ရှာပြီး ဘယ်လိုသုံးရမလဲ",
+      "expect_contains": [
+        "UNIENZYME"
+      ],
+      "expect_script": "my"
+    },
+    {
+      "id": "en_code_lookup_diovan",
+      "question": "what is article code 1000000333547 and do you stock it?",
+      "expect_contains": [
+        "DIOVAN"
+      ]
+    },
+    {
+      "id": "en_code_lookup_begesic",
+      "question": "look up article 1000000009907 for me",
+      "expect_contains": [
+        "BEGESIC"
+      ]
+    },
+    {
+      "id": "my_code_lookup_ohlala",
+      "question": "1000000407747 ဆိုတဲ့ article code က ဘာဆေးလဲ",
+      "expect_contains": [
+        "OHH LA LA"
+      ],
+      "expect_script": "my"
+    }
+  ]
+}

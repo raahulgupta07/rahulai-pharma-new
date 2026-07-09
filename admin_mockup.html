@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CitCare Admin — full mockup</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/lucide@latest"></script>
+<style>
+  :root{
+    --bg:#faf9f7; --surface:#ffffff; --surface2:#f4f2ee; --tertiary:#f0eee9;
+    --ink:#1a1a18; --ink2:#6b6b66; --ink3:#9a9a93;
+    --accent:#c96342; --accent-h:#b5512f; --accent-soft:#f3e7e1;
+    --line:#e6e3dd; --line2:#d8d4cc;
+    --green:#3f8f5f; --green-soft:#e7f1ea; --amber:#b5862f; --amber-soft:#f6eedd;
+    --red:#c0392b; --red-soft:#f7e6e4; --blue:#3573b5; --blue-soft:#e7eff7;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+  .serif{font-family:Georgia,'Times New Roman',serif}
+  .tnum{font-variant-numeric:tabular-nums}
+  .card{background:var(--surface);border:0.5px solid var(--line);border-radius:12px}
+  .kpi{background:var(--surface);border:0.5px solid var(--line);border-radius:10px;padding:14px}
+  .navlink{display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:10px;font-size:14px;color:var(--ink2);cursor:pointer;transition:background .18s,color .18s}
+  .navlink:hover{background:rgba(0,0,0,.03);color:var(--ink)}
+  .navlink.active{background:var(--accent-soft);color:var(--accent);font-weight:500}
+  .btn{display:inline-flex;align-items:center;gap:8px;border-radius:10px;padding:8px 14px;font-size:13px;font-weight:500;cursor:pointer;border:0.5px solid var(--line);background:var(--surface);color:var(--ink);transition:background .18s}
+  .btn:hover{background:var(--surface2)}
+  .btn-accent{background:var(--accent);color:#fff;border-color:var(--accent)}
+  .btn-accent:hover{background:var(--accent-h)}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;font-weight:500;font-size:12px;color:var(--ink2);padding:9px 16px}
+  td{padding:10px 16px;border-top:0.5px solid var(--line)}
+  tbody tr{transition:background .15s}
+  tbody tr:hover{background:var(--surface2)}
+  .badge{font-size:11px;padding:2px 8px;border-radius:8px;font-weight:500}
+  .b-en{background:var(--blue-soft);color:var(--blue)}
+  .b-my{background:var(--accent-soft);color:var(--accent-h)}
+  .b-ok{background:var(--green-soft);color:var(--green)}
+  .b-warn{background:var(--amber-soft);color:var(--amber)}
+  .input{background:var(--surface);border:0.5px solid var(--line);border-radius:10px;padding:8px 12px;font-size:14px;color:var(--ink);outline:none;width:100%}
+  .input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+  .page{display:none}
+  .page.active{display:block}
+  .bar{height:6px;border-radius:4px;background:var(--accent-soft);overflow:hidden}
+  .bar > span{display:block;height:100%;background:var(--accent);opacity:.55}
+  ::-webkit-scrollbar{width:9px;height:9px}::-webkit-scrollbar-thumb{background:var(--line2);border-radius:6px}
+</style>
+</head>
+<body>
+<div style="display:flex;height:100vh;overflow:hidden">
+
+  <!-- SIDEBAR (fixed) -->
+  <aside style="width:212px;flex-shrink:0;height:100vh;overflow-y:auto;background:var(--surface2);border-right:0.5px solid var(--line);padding:16px 12px">
+    <div style="display:flex;align-items:center;gap:9px;padding:6px 10px 18px">
+      <span style="width:9px;height:9px;border-radius:50%;background:var(--green)"></span>
+      <span style="font-size:15px;font-weight:500">CitCare admin</span>
+    </div>
+    <nav id="nav" style="display:flex;flex-direction:column;gap:2px"></nav>
+    <div style="margin-top:18px;padding:10px;border-top:0.5px solid var(--line)">
+      <div class="navlink" onclick="go('chat')"><i data-lucide="message-circle" style="width:17px"></i>Chat widget</div>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+    <!-- TOPBAR (fixed) -->
+    <div style="display:flex;align-items:center;gap:12px;padding:11px 22px;border-bottom:0.5px solid var(--line);background:var(--surface)">
+      <span style="font-size:13px;color:var(--ink3)">Admin</span>
+      <i data-lucide="chevron-right" style="width:14px;color:var(--ink3)"></i>
+      <span id="crumb" style="font-size:14px;font-weight:500">Dashboard</span>
+      <div style="margin-left:auto;display:flex;align-items:center;gap:10px">
+        <div style="display:flex;align-items:center;gap:7px;background:var(--surface2);border-radius:10px;padding:7px 11px;width:210px">
+          <i data-lucide="search" style="width:15px;color:var(--ink3)"></i>
+          <span style="font-size:13px;color:var(--ink3)">Search…</span>
+        </div>
+        <span class="badge b-ok">live</span>
+        <span style="width:28px;height:28px;border-radius:50%;background:var(--blue-soft);color:var(--blue);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:500">AD</span>
+      </div>
+    </div>
+
+    <!-- SCROLL REGION -->
+    <main style="flex:1;overflow-y:auto;background:var(--bg);padding:24px 28px">
+      <div id="pages" style="max-width:1040px;margin:0 auto"></div>
+    </main>
+  </div>
+</div>
+
+<script>
+const NAV=[
+  ['dashboard','Dashboard','layout-dashboard'],
+  ['data','Data','database'],
+  ['ftp','SFTP uploads','server'],
+  ['conversations','Conversations','messages-square'],
+  ['tenants','Tenants','building-2'],
+  ['stores','Stores','store'],
+  ['agent','Agent config','bot'],
+  ['eval','Evaluation','flask-conical'],
+  ['settings','Settings','settings'],
+];
+
+function h(s){return s}
+const PAGES={};
+
+PAGES.dashboard=`
+<div style="display:flex;align-items:flex-start;gap:12px;margin-bottom:20px">
+  <h1 class="serif" style="font-size:30px;margin:0">Dashboard</h1>
+  <span class="badge" style="background:var(--surface2);color:var(--ink2);margin-top:8px">data v5 · refreshed 14:32</span>
+  <button class="btn btn-accent" style="margin-left:auto"><i data-lucide="refresh-cw" style="width:15px"></i>Reload</button>
+</div>
+<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:14px">
+  <div class="kpi"><div style="font-size:12px;color:var(--ink2);margin-bottom:6px">Cache hit rate</div><div style="display:flex;align-items:baseline;gap:6px"><span style="font-size:24px;font-weight:500">95.6%</span><span style="font-size:12px;color:var(--green)">▲ 2.1</span></div></div>
+  <div class="kpi"><div style="font-size:12px;color:var(--ink2);margin-bottom:6px">p95 latency</div><div style="display:flex;align-items:baseline;gap:5px"><span style="font-size:24px;font-weight:500">20</span><span style="font-size:12px;color:var(--ink3)">ms</span></div></div>
+  <div class="kpi"><div style="font-size:12px;color:var(--ink2);margin-bottom:6px">Requests today</div><div style="font-size:24px;font-weight:500" class="tnum">2,161</div></div>
+  <div class="kpi"><div style="font-size:12px;color:var(--ink2);margin-bottom:6px">Errors</div><div style="display:flex;align-items:baseline;gap:6px"><span style="font-size:24px;font-weight:500;color:var(--green)">0</span><span style="font-size:12px;color:var(--ink3)">/ 24h</span></div></div>
+</div>
+<div style="display:grid;grid-template-columns:1.6fr 1fr;gap:12px;margin-bottom:14px">
+  <div class="card" style="padding:16px">
+    <div style="display:flex;align-items:center;margin-bottom:12px"><span style="font-size:14px;font-weight:500">Requests · last 12h</span><span style="margin-left:auto;font-size:12px;color:var(--ink2)">cache vs llm</span></div>
+    <svg viewBox="0 0 560 110" style="width:100%;height:110px">
+      <polyline points="0,86 46,74 93,78 140,56 186,62 233,38 280,46 326,28 373,34 420,22 466,28 513,16 560,20" fill="none" stroke="var(--accent)" stroke-width="2"/>
+      <polyline points="0,100 46,98 93,99 140,93 186,95 233,88 280,90 326,86 373,88 420,84 466,86 513,82 560,83" fill="none" stroke="var(--line2)" stroke-width="1.5"/>
+    </svg>
+  </div>
+  <div class="card" style="padding:16px">
+    <div style="font-size:14px;font-weight:500;margin-bottom:10px">Data status</div>
+    <table><tbody>
+      <tr><td style="border:0;color:var(--ink2);padding:5px 0">Catalog</td><td style="border:0;text-align:right" class="tnum">4,892</td></tr>
+      <tr><td style="border:0;color:var(--ink2);padding:5px 0">Inventory</td><td style="border:0;text-align:right" class="tnum">111,654</td></tr>
+      <tr><td style="border:0;color:var(--ink2);padding:5px 0">Sites</td><td style="border:0;text-align:right" class="tnum">53</td></tr>
+      <tr><td style="border:0;color:var(--ink2);padding:5px 0">Embedded</td><td style="border:0;text-align:right" class="tnum">4,880</td></tr>
+    </tbody></table>
+  </div>
+</div>
+<div class="card">
+  <div style="display:flex;align-items:center;padding:13px 16px;border-bottom:0.5px solid var(--line)"><span style="font-size:14px;font-weight:500">Recent conversations</span><span style="margin-left:auto;font-size:12px;color:var(--blue);cursor:pointer">View all</span></div>
+  <table><thead><tr><th>Lang</th><th>Question</th><th style="text-align:right">Status</th><th style="text-align:right">Latency</th></tr></thead><tbody>
+    <tr><td><span class="badge b-en">EN</span></td><td style="color:var(--ink2)">top 5 by stock at CCBHSC</td><td style="text-align:right;color:var(--green)">cached</td><td style="text-align:right;color:var(--ink3)" class="tnum">6 ms</td></tr>
+    <tr><td><span class="badge b-my">MY</span></td><td style="color:var(--ink2)">ဖျားနာ အတွက် ဘာဆေးရှိလဲ</td><td style="text-align:right;color:var(--ink3)">semantic</td><td style="text-align:right;color:var(--ink3)" class="tnum">1.2 s</td></tr>
+    <tr><td><span class="badge b-en">EN</span></td><td style="color:var(--ink2)">substitutes for 1000000024029</td><td style="text-align:right;color:var(--ink3)">tool</td><td style="text-align:right;color:var(--ink3)" class="tnum">2.1 s</td></tr>
+  </tbody></table>
+</div>`;
+
+PAGES.data=`
+<div style="display:flex;align-items:flex-start;gap:12px;margin-bottom:18px">
+  <div><h1 class="serif" style="font-size:30px;margin:0">Data</h1>
+  <div style="margin-top:8px;display:flex;gap:8px">
+    <span class="badge" style="background:var(--surface2);color:var(--ink2)">4,892 catalog</span>
+    <span class="badge" style="background:var(--surface2);color:var(--ink2)">111,654 inventory</span>
+    <span class="badge" style="background:var(--surface2);color:var(--ink2)">data v5</span>
+  </div></div>
+  <div style="margin-left:auto;display:flex;gap:8px">
+    <button class="btn"><i data-lucide="upload" style="width:15px"></i>Upload xlsx</button>
+    <button class="btn btn-accent"><i data-lucide="refresh-cw" style="width:15px"></i>Reload</button>
+  </div>
+</div>
+<h2 style="font-size:15px;font-weight:500;margin:0 0 10px">Catalog</h2>
+<div style="max-width:380px;margin-bottom:12px"><input class="input" placeholder="Search brand, generic or code…"></div>
+<div class="card" style="overflow:hidden;margin-bottom:28px">
+  <table><thead><tr><th>Code</th><th>Brand</th><th>Generic</th><th>Category</th></tr></thead><tbody>
+    <tr><td class="tnum">1000000024029</td><td>PARACAP PARACETAMOL 10'S</td><td style="color:var(--ink2)">Paracetamol</td><td style="color:var(--ink2)">OTC</td></tr>
+    <tr><td class="tnum">1000000384200</td><td>YSI PARA-TAB 500MG 10'S</td><td style="color:var(--ink2)">Paracetamol</td><td style="color:var(--ink2)">OTC</td></tr>
+    <tr><td class="tnum">1000000009840</td><td>ALAXAN 10'S</td><td style="color:var(--ink2)">Paracetamol & Ibuprofen</td><td style="color:var(--ink2)">Rx</td></tr>
+    <tr><td class="tnum">1000000015837</td><td>ROYAL-D 25G</td><td style="color:var(--ink2)">Electrolyte Powder</td><td style="color:var(--ink2)">OTC</td></tr>
+  </tbody></table>
+</div>
+<h2 style="font-size:15px;font-weight:500;margin:0 0 10px">Inventory</h2>
+<div style="display:flex;gap:10px;margin-bottom:12px"><input class="input" style="width:160px" placeholder="Site code"><input class="input" style="width:240px" placeholder="Article code…"></div>
+<div class="card" style="overflow:hidden">
+  <table><thead><tr><th>Code</th><th>Brand</th><th>Site</th><th style="text-align:right">Stock</th><th style="text-align:right">Price</th></tr></thead><tbody>
+    <tr><td class="tnum">1000000015837</td><td>ROYAL-D 25G</td><td style="color:var(--ink2)">20052-CCTLKK</td><td style="text-align:right" class="tnum">4,154</td><td style="text-align:right;color:var(--ink2)" class="tnum">800 MMK</td></tr>
+    <tr><td class="tnum">1000000024029</td><td>PARACAP PARACETAMOL</td><td style="color:var(--ink2)">20059-CCGMPMTN</td><td style="text-align:right" class="tnum">2,589</td><td style="text-align:right;color:var(--ink2)" class="tnum">1,600 MMK</td></tr>
+    <tr><td class="tnum">1000000369323</td><td>RELYTE ORS 20.5G</td><td style="color:var(--ink2)">20026-CC19</td><td style="text-align:right" class="tnum">6,533</td><td style="text-align:right;color:var(--ink2)" class="tnum">700 MMK</td></tr>
+  </tbody></table>
+</div>`;
+
+PAGES.ftp=`
+<div style="display:flex;align-items:flex-start;gap:12px;margin-bottom:18px">
+  <div><h1 class="serif" style="font-size:30px;margin:0">SFTP uploads</h1>
+  <p style="font-size:14px;color:var(--ink2);max-width:520px;margin:8px 0 0">Drop article and balance-stock xlsx over SFTP, or upload manually. Worker ingests automatically and busts the cache.</p></div>
+  <div style="margin-left:auto;display:flex;gap:8px">
+    <button class="btn"><i data-lucide="upload" style="width:15px"></i>Upload xlsx</button>
+    <button class="btn btn-accent"><i data-lucide="refresh-cw" style="width:15px"></i>Ingest now</button>
+  </div>
+</div>
+<div class="card" style="padding:16px;margin-bottom:20px">
+  <div style="display:flex;align-items:center;gap:8px;font-size:14px;font-weight:500;margin-bottom:12px"><i data-lucide="server" style="width:16px"></i>Connection</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 32px;font-size:13px">
+    <div style="display:flex;justify-content:space-between"><span style="color:var(--ink2)">Host</span><span>pharmacy.citcare.mm</span></div>
+    <div style="display:flex;justify-content:space-between"><span style="color:var(--ink2)">Port</span><span class="tnum">2222</span></div>
+    <div style="display:flex;justify-content:space-between"><span style="color:var(--ink2)">User</span><span>pharma</span></div>
+    <div style="display:flex;justify-content:space-between"><span style="color:var(--ink2)">Path</span><span>upload/</span></div>
+  </div>
+  <p style="font-family:monospace;font-size:12px;color:var(--ink2);border-top:0.5px solid var(--line);margin:12px 0 0;padding-top:12px">sftp -P 2222 pharma@pharmacy.citcare.mm</p>
+  <p style="font-size:12px;color:var(--ink3);margin:4px 0 0">Auto-ingest polls every 15s · key or password auth.</p>
+</div>
+${ftpTable('Archived','check',[['1782115277_articles-export.xlsx','628 KB','today 14:30'],['1782107161_balance_stock.xlsx','3.5 MB','today 14:22']])}
+${ftpTable('Pending','clock',[])}
+${ftpTable('Failed','alert-triangle',[])}`;
+
+function ftpTable(title,icon,rows){
+  let body = rows.length? rows.map(r=>`<tr><td><i data-lucide="file-spreadsheet" style="width:14px;color:var(--ink3);vertical-align:-2px;margin-right:6px"></i>${r[0]}</td><td style="text-align:right;color:var(--ink2)">${r[1]}</td><td style="text-align:right;color:var(--ink2)">${r[2]}</td></tr>`).join('')
+    : `<tr><td colspan="3" style="color:var(--ink3)">None.</td></tr>`;
+  return `<div style="margin-bottom:18px"><div style="display:flex;align-items:center;gap:8px;font-size:14px;font-weight:500;margin-bottom:8px"><i data-lucide="${icon}" style="width:15px"></i>${title} <span class="badge" style="background:var(--surface2);color:var(--ink2)">${rows.length}</span></div>
+  <div class="card" style="overflow:hidden"><table><thead><tr><th>File</th><th style="text-align:right">Size</th><th style="text-align:right">Modified</th></tr></thead><tbody>${body}</tbody></table></div></div>`;
+}
+
+PAGES.conversations=`
+<h1 class="serif" style="font-size:30px;margin:0 0 14px">Conversations</h1>
+<div style="display:flex;gap:10px;margin-bottom:16px">
+  <select class="input" style="width:130px"><option>All langs</option><option>EN</option><option>MY</option></select>
+  <input class="input" style="width:160px" placeholder="Store filter">
+  <select class="input" style="width:100px"><option>50</option><option>100</option></select>
+</div>
+${conv('EN','top 5 articles by stock at CCBHSC','Top 5 at store CCBHSC: 1) SILOXOGENE 10\\'S — 208 units, 2) TERUMO SYRINGE 5CC — 180, 3) ELECTRAL FORTE ORS — 167…','20060-CCBHSC',true,'6 ms')}
+${conv('MY','ဖျားနာ ကိုယ်ပူ အတွက် ဘာဆေး ရှိလဲ','ဖျားနာအတွက် PARACAP PARACETAMOL၊ BIOGESIC 500MG စသည့် Paracetamol ဆေးများ ရရှိနိုင်ပါသည်။ အသုံးမပြုမီ ဆေးဝါးကျွမ်းကျင်သူနှင့် တိုင်ပင်ပါ။','all',false,'1.2 s')}
+${conv('EN','total stock of article 1000000024029','The total balance stock for article 1000000024029 across all sites is 14,963.','all',false,'8.7 s')}`;
+
+function conv(lang,q,a,store,cached,lat){
+  return `<div class="card" style="padding:14px 16px;margin-bottom:10px">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+      <span class="badge ${lang==='MY'?'b-my':'b-en'}">${lang}</span>
+      <span style="font-weight:500;font-size:14px">${q}</span>
+      ${cached?'<span class="badge b-ok">cached</span>':''}
+    </div>
+    <p style="font-size:13px;color:var(--ink2);margin:0 0 8px;line-height:1.55">${a}</p>
+    <div style="font-size:12px;color:var(--ink3);display:flex;gap:14px"><span>store: ${store}</span><span>${lat}</span><span>just now</span></div>
+  </div>`;
+}
+
+PAGES.tenants=`
+<h1 class="serif" style="font-size:30px;margin:0 0 6px">Tenants</h1>
+<p style="font-size:14px;color:var(--ink2);margin:0 0 18px">Embed credentials for client sites. Point the widget's CITYAGENT_BASE_URL here.</p>
+<div class="card" style="padding:14px 16px;margin-bottom:16px">
+  <div style="font-size:13px;font-weight:500;margin-bottom:10px">Add credential</div>
+  <div style="display:flex;gap:10px"><input class="input" placeholder="embed_id"><input class="input" placeholder="public_key"><button class="btn btn-accent" style="white-space:nowrap"><i data-lucide="plus" style="width:15px"></i>Add</button></div>
+</div>
+<div class="card" style="overflow:hidden">
+  <table><thead><tr><th>embed_id</th><th>public_key</th><th style="text-align:right">Actions</th></tr></thead><tbody>
+    <tr><td>citcare-web</td><td style="font-family:monospace;color:var(--ink2)">pk_live_8f3a…</td><td style="text-align:right"><i data-lucide="trash-2" style="width:15px;color:var(--ink3);cursor:pointer"></i></td></tr>
+    <tr><td>citcare-pos</td><td style="font-family:monospace;color:var(--ink2)">pk_live_2b7c…</td><td style="text-align:right"><i data-lucide="trash-2" style="width:15px;color:var(--ink3);cursor:pointer"></i></td></tr>
+  </tbody></table>
+</div>
+<div style="display:flex;gap:8px;align-items:center;background:var(--blue-soft);color:var(--blue);border-radius:10px;padding:10px 14px;margin-top:14px;font-size:13px"><i data-lucide="info" style="width:15px"></i>With credentials registered, only matching embed_id + public_key are allowed.</div>`;
+
+const STORES=[['20043-CCSJ',2292,58128,574539960],['20015-CCGV',2126,38131,440682698],['20026-CC19',2410,61204,398210400],['20052-CCTLKK',1980,29844,221034000],['20060-CCBHSC',2661,33120,198540500]];
+const MAXV=574539960;
+PAGES.stores=`
+<h1 class="serif" style="font-size:30px;margin:0 0 16px">Stores</h1>
+<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px">
+  <div class="kpi"><div style="font-size:12px;color:var(--ink2)">Sites</div><div style="font-size:24px;font-weight:500" class="tnum">53</div></div>
+  <div class="kpi"><div style="font-size:12px;color:var(--ink2)">Total units</div><div style="font-size:24px;font-weight:500" class="tnum">2.1M</div></div>
+  <div class="kpi"><div style="font-size:12px;color:var(--ink2)">Stock value</div><div style="font-size:24px;font-weight:500" class="tnum">14.2B MMK</div></div>
+</div>
+<div style="max-width:300px;margin-bottom:12px"><input class="input" placeholder="Filter site code…"></div>
+<div class="card" style="overflow:hidden"><table><thead><tr><th>Site</th><th style="text-align:right">SKUs</th><th style="text-align:right">Units</th><th style="width:180px">Stock value</th></tr></thead><tbody>
+${STORES.map(s=>`<tr><td>${s[0]}</td><td style="text-align:right" class="tnum">${s[1].toLocaleString()}</td><td style="text-align:right" class="tnum">${s[2].toLocaleString()}</td><td><div style="display:flex;align-items:center;gap:10px"><div class="bar" style="flex:1"><span style="width:${Math.round(s[3]/MAXV*100)}%"></span></div><span class="tnum" style="font-size:12px;color:var(--ink2);white-space:nowrap">${(s[3]/1e6).toFixed(0)}M</span></div></td></tr>`).join('')}
+</tbody></table></div>`;
+
+PAGES.agent=`
+<h1 class="serif" style="font-size:30px;margin:0 0 16px">Agent config</h1>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px">
+  ${cfg('Model','google/gemini-3.5-flash')}${cfg('Embedding model','google/gemini-embedding-2')}
+  ${cfg('Rate limit','30 / min')}${cfg('Cache TTL','600 s')}
+</div>
+<div class="card" style="padding:16px">
+  <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><span style="font-size:14px;font-weight:500">System prompt</span><span class="badge b-warn">custom active</span></div>
+  <textarea class="input" style="height:150px;font-family:monospace;font-size:12.5px;line-height:1.6;resize:vertical">You are the CitCare Pharmacy Assistant, bilingual (English / Burmese).
+Detect the user's language and reply in the same language.
+Never translate article codes, prices, or units.
+Use tools for every number — never guess.
+End stock/price answers with a pharmacist disclaimer.</textarea>
+  <div style="display:flex;gap:10px;align-items:center;margin-top:10px"><button class="btn btn-accent">Save prompt</button><span style="font-size:12px;color:var(--ink3)">applied on next restart</span></div>
+</div>`;
+function cfg(k,v){return `<div class="card" style="padding:14px"><div style="font-size:12px;color:var(--ink2);margin-bottom:4px">${k} <span style="color:var(--ink3)">· .env</span></div><div style="font-size:15px;font-weight:500">${v}</div></div>`}
+
+PAGES.eval=`
+<div style="display:flex;align-items:flex-start;gap:12px;margin-bottom:16px">
+  <div><h1 class="serif" style="font-size:30px;margin:0">Evaluation</h1>
+  <p style="font-size:14px;color:var(--ink2);max-width:520px;margin:8px 0 0">Runs the real screenshot questions (EN + Burmese) through the live agent and checks answers contain the correct data.</p></div>
+  <button class="btn btn-accent" style="margin-left:auto"><i data-lucide="play" style="width:15px"></i>Run eval</button>
+</div>
+<div class="card" style="padding:18px;margin-bottom:16px;display:flex;align-items:center;gap:18px">
+  <div style="font-size:34px;font-weight:500;color:var(--green)">13/13</div>
+  <div><div style="font-size:14px;font-weight:500">All passing</div><div style="font-size:13px;color:var(--ink2)">100% · last run 2m ago · ~38s</div></div>
+</div>
+${ev(true,'en_full_info','full information for article 1000000024029','PARACAP PARACETAMOL 10\\'S, Paracetamol, 53 sites, 14,963 units…')}
+${ev(true,'my_total_stock','article 1000000024029 ရဲ့ stock စုစုပေါင်း','စုစုပေါင်းလက်ကျန် 14,963 ဖြစ်ပါသည်…')}
+${ev(true,'en_top5_ccbhsc','top 5 by stock at CCBHSC','1) SILOXOGENE 1000000008752 — 208 units…')}`;
+function ev(ok,id,q,a){return `<div class="card" style="padding:12px 14px;margin-bottom:8px;${ok?'':'background:var(--red-soft)'}">
+  <div style="display:flex;align-items:center;gap:9px">
+    <i data-lucide="${ok?'check':'x'}" style="width:16px;color:${ok?'var(--green)':'var(--red)'}"></i>
+    <span style="font-size:12px;color:var(--ink3);font-family:monospace">${id}</span>
+    <span style="font-size:13px;font-weight:500">${q}</span>
+  </div>
+  <p style="font-size:12.5px;color:var(--ink2);margin:6px 0 0 25px;line-height:1.5">${a}</p></div>`}
+
+PAGES.settings=`
+<h1 class="serif" style="font-size:30px;margin:0 0 16px">Settings</h1>
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px">
+  <div class="card" style="padding:14px"><div style="font-size:13px;font-weight:500;margin-bottom:8px">Models</div><div style="font-size:13px;color:var(--ink2);line-height:1.9">gemini-3.5-flash<br>gemini-embedding-2</div></div>
+  <div class="card" style="padding:14px"><div style="font-size:13px;font-weight:500;margin-bottom:8px">Limits</div><div style="font-size:13px;color:var(--ink2);line-height:1.9">30 req/min<br>cache 600s · session 900s</div></div>
+  <div class="card" style="padding:14px"><div style="font-size:13px;font-weight:500;margin-bottom:8px">Data</div><div style="font-size:13px;color:var(--ink2);line-height:1.9" class="tnum">4,892 catalog<br>111,654 inventory · v5</div></div>
+</div>
+<div class="card" style="padding:16px;margin-bottom:16px;border-color:var(--amber)">
+  <div style="display:flex;align-items:center;gap:8px;font-size:14px;font-weight:500;color:var(--amber);margin-bottom:10px"><i data-lucide="shield-alert" style="width:16px"></i>Security</div>
+  <ul style="font-size:13px;color:var(--ink2);margin:0;padding-left:18px;line-height:1.9">
+    <li>Rotate the OpenRouter API key if it was shared</li>
+    <li>Set a 32-byte SECRET_KEY matching Laravel CITYAGENT_SECRET_KEY</li>
+    <li>SFTP key-auth only in production</li>
+    <li>Tighten CORS to the host domain before public deploy</li>
+  </ul>
+</div>
+<div class="card" style="padding:16px">
+  <div style="font-size:14px;font-weight:500;margin-bottom:10px">Embed API endpoints</div>
+  <div style="font-family:monospace;font-size:12.5px;color:var(--ink2);line-height:1.9">POST /api/embed/session/create<br>POST /api/embed/chat · /chat/stream<br>POST /api/embed/reload · /ingest<br>GET /health · /ready · /metrics</div>
+</div>`;
+
+PAGES.chat=`
+<h1 class="serif" style="font-size:30px;margin:0 0 16px">Chat widget</h1>
+<div style="max-width:560px;margin:0 auto">
+<div class="card" style="overflow:hidden">
+  <div style="display:flex;align-items:center;gap:9px;padding:13px 16px;border-bottom:0.5px solid var(--line)"><span style="width:9px;height:9px;border-radius:50%;background:var(--green)"></span><span style="font-weight:500;font-size:14px">CityCare Agent</span><span style="margin-left:auto;font-size:12px;color:var(--ink3)">online</span></div>
+  <div style="padding:18px;display:flex;flex-direction:column;gap:12px;background:var(--bg)">
+    <div style="align-self:flex-start;max-width:78%;background:var(--surface2);border:0.5px solid var(--line);border-radius:14px;border-bottom-left-radius:4px;padding:10px 14px;font-size:14px">Hi! Ask about stock, prices, substitutes, or indications — in English or Burmese.</div>
+    <div style="align-self:flex-end;max-width:78%;background:var(--accent);color:#fff;border-radius:14px;border-bottom-right-radius:4px;padding:10px 14px;font-size:14px">total stock of article 1000000024029?</div>
+    <div style="align-self:flex-start;max-width:78%;background:var(--surface2);border:0.5px solid var(--line);border-radius:14px;border-bottom-left-radius:4px;padding:10px 14px;font-size:14px">The total balance stock of article <b>1000000024029</b> across all sites is <b>14,963</b>.<br><br>Please consult a licensed pharmacist before use.</div>
+    <div style="align-self:flex-end;max-width:78%;background:var(--accent);color:#fff;border-radius:14px;border-bottom-right-radius:4px;padding:10px 14px;font-size:14px">ဖျားနာ အတွက် ဘာဆေးရှိလဲ</div>
+  </div>
+  <div style="padding:12px 16px;border-top:0.5px solid var(--line);display:flex;gap:10px"><input class="input" placeholder="Message the pharmacy assistant…"><button class="btn btn-accent">Send</button></div>
+</div>
+</div>`;
+
+// render nav
+const nav=document.getElementById('nav');
+NAV.forEach(([id,label,icon])=>{
+  const d=document.createElement('div');d.className='navlink';d.dataset.id=id;
+  d.innerHTML=`<i data-lucide="${icon}" style="width:17px"></i>${label}`;
+  d.onclick=()=>go(id);nav.appendChild(d);
+});
+const pagesEl=document.getElementById('pages');
+function go(id){
+  pagesEl.innerHTML=PAGES[id]||'';
+  document.querySelectorAll('.navlink').forEach(n=>n.classList.toggle('active',n.dataset.id===id));
+  const label=(NAV.find(n=>n[0]===id)||[,'Chat widget'])[1];
+  document.getElementById('crumb').textContent=label;
+  if(window.lucide)lucide.createIcons();
+}
+go('dashboard');
+</script>
+</body>
+</html>

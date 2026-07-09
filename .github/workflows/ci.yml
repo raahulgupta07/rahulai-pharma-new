@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  admin-build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: pharmacy-agent/admin
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install
+      - run: npm run build   # verifies the SvelteKit admin compiles
+
+  backend-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: pharmacy-agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      # Data-coupled tests (test_tools/test_api/...) need the real dataset + a
+      # live Postgres/Redis, so they run in the deploy env. CI verifies the
+      # parts that don't need data: imports, smoke, and eval-set structure.
+      - run: python -c "import app.api, app.agent, app.tools, app.graph, app.auth, app.admin; print('imports ok')"
+      - run: python -m pytest tests/test_smoke.py "tests/test_eval.py::test_eval_set_well_formed" -q
+
+  # Full suite + live eval + load test run in the deploy environment (need the
+  # dataset, OpenRouter key, and live services). See RUNBOOK.md.

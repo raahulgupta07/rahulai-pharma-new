@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CitCare — Data (redesign)</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Noto+Sans+Myanmar:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lucide@latest"></script>
+<style>
+  :root{
+    --bg:#faf9f7;--surface:#fff;--s2:#f4f2ee;--s3:#efece6;--sidebar:#f5f3ef;
+    --ink:#1f1e1c;--ink2:#5f5e58;--ink3:#8a877f;
+    --accent:#c96342;--accent-h:#b5512f;--accent-soft:#f4e7e1;
+    --line:#e7e3dc;--line2:#dcd7ce;
+    --green:#3f8f5f;--green-s:#e6f1ea;--amber:#b5862f;--amber-s:#f7eedd;--red:#c0392b;--red-s:#f8e7e4;--blue:#3573b5;--blue-s:#e6eff7;--violet:#7a5bd0;--violet-s:#ece6f8;
+    --shadow:0 1px 2px rgba(20,20,18,.04),0 4px 14px rgba(20,20,18,.05);
+    --shadow-lg:0 12px 44px rgba(20,20,18,.13);
+  }
+  html.dark{
+    --bg:#15141a;--surface:#1f1e24;--s2:#27262e;--s3:#2f2e37;--sidebar:#1a1917;
+    --ink:#ece9f0;--ink2:#aca99f;--ink3:#7a766d;
+    --accent:#e07a55;--accent-h:#ec8a66;--accent-soft:#3a2a23;
+    --line:#332f3b;--line2:#423e4d;
+    --green:#5fcf8a;--green-s:#16331f;--amber:#e0b25a;--amber-s:#3a2e12;--red:#f08a7d;--red-s:#3a1714;--blue:#73a9e8;--blue-s:#1a2740;--violet:#a98ef0;--violet-s:#241a3a;
+    --shadow:0 1px 2px rgba(0,0,0,.3),0 4px 16px rgba(0,0,0,.35);--shadow-lg:0 14px 50px rgba(0,0,0,.55);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:'Inter','Noto Sans Myanmar',-apple-system,sans-serif;font-size:14px;-webkit-font-smoothing:antialiased}
+  .serif{font-family:'Fraunces','Noto Sans Myanmar',serif;font-weight:600;letter-spacing:-.015em}
+  .mono{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace}
+  .tnum{font-variant-numeric:tabular-nums}
+  .scroll::-webkit-scrollbar{width:9px;height:9px}.scroll::-webkit-scrollbar-thumb{background:var(--line2);border-radius:6px}
+
+  /* top bar + shell (same Aurora frame) */
+  .topbar{display:flex;align-items:center;gap:6px;padding:10px 18px;border-bottom:1px solid var(--line);background:var(--surface);position:sticky;top:0;z-index:30}
+  .logo{display:flex;align-items:center;gap:9px;padding-right:12px}
+  .logo .mark{width:30px;height:30px;border-radius:9px;background:linear-gradient(145deg,var(--accent),var(--accent-h));color:#fff;display:flex;align-items:center;justify-content:center}
+  .logo b{font-size:15px;font-weight:700}.logo small{font-size:9px;letter-spacing:.18em;color:var(--ink3);font-weight:600;display:block;margin-top:-2px}
+  .tab{display:flex;align-items:center;gap:7px;padding:7px 12px;border-radius:9px;font-size:13.5px;font-weight:500;color:var(--ink2);cursor:pointer}
+  .tab:hover{background:var(--s2);color:var(--ink)}.tab.on{background:var(--s2);color:var(--ink);font-weight:600}
+  .ico{width:34px;height:34px;display:flex;align-items:center;justify-content:center;border-radius:9px;color:var(--ink3);cursor:pointer}.ico:hover{background:var(--s2);color:var(--ink)}
+
+  .shell{display:flex;height:calc(100vh - 53px)}
+  .side{width:200px;flex-shrink:0;border-right:1px solid var(--line);background:var(--surface);padding:12px 10px;overflow-y:auto}
+  .grp{font-size:10px;font-weight:700;letter-spacing:.1em;color:var(--ink3);text-transform:uppercase;padding:12px 10px 5px}
+  .nav{display:flex;align-items:center;gap:10px;padding:8px 11px;border-radius:9px;font-size:13.5px;color:var(--ink2);cursor:pointer;font-weight:500}
+  .nav:hover{background:var(--s2);color:var(--ink)}.nav.on{background:var(--accent-soft);color:var(--accent);font-weight:600}
+  .main{flex:1;overflow-y:auto;padding:20px 24px;min-width:0}
+  .wrap{max-width:1120px;margin:0 auto}
+
+  /* KPI strip */
+  .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:14px 0 16px}
+  .kpi{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:13px 15px;box-shadow:var(--shadow)}
+  .kpi .v{font-size:23px;font-weight:700;letter-spacing:-.02em}.kpi .v small{font-size:13px;color:var(--ink3);font-weight:500}
+  .kpi .k{font-size:12px;color:var(--ink2);margin-top:2px;display:flex;align-items:center;gap:5px}
+
+  /* segmented */
+  .seg{display:inline-flex;background:var(--s2);border-radius:11px;padding:3px}
+  .seg span{display:flex;align-items:center;gap:6px;padding:7px 15px;border-radius:9px;font-size:13.5px;font-weight:600;color:var(--ink2);cursor:pointer}
+  .seg span.on{background:var(--surface);color:var(--ink);box-shadow:var(--shadow)}
+
+  /* filter bar */
+  .filters{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:14px 0}
+  .srch{display:flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--line);border-radius:11px;padding:8px 12px;min-width:280px;flex:1;max-width:420px}
+  .srch input{border:0;background:none;outline:none;font-size:14px;color:var(--ink);width:100%;font-family:inherit}
+  .sel{display:flex;align-items:center;gap:7px;background:var(--surface);border:1px solid var(--line);border-radius:11px;padding:8px 12px;font-size:13px;color:var(--ink);cursor:pointer}
+  .sel:hover{border-color:var(--line2)}
+  .chip{font-size:12.5px;padding:6px 12px;border-radius:9px;border:1px solid var(--line);cursor:pointer;color:var(--ink2);background:var(--surface);font-weight:500}
+  .chip:hover{border-color:var(--accent);color:var(--accent)}
+  .chip.on{background:var(--accent-soft);border-color:transparent;color:var(--accent-h)}
+  .btn{display:inline-flex;align-items:center;gap:7px;border-radius:11px;padding:8px 13px;font-size:13px;font-weight:600;cursor:pointer;border:1px solid var(--line);background:var(--surface);color:var(--ink)}
+  .btn:hover{background:var(--s2)}.btn-p{background:var(--accent);color:#fff;border-color:var(--accent)}.btn-p:hover{background:var(--accent-h)}
+
+  /* table */
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);overflow:hidden}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  thead th{position:sticky;top:0;background:var(--surface);text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--ink3);padding:11px 14px;border-bottom:1px solid var(--line);font-weight:700;z-index:1}
+  tbody td{padding:11px 14px;border-top:1px solid var(--line)}
+  tbody tr{cursor:pointer;transition:.1s}tbody tr:hover{background:var(--s2)}
+  .num{text-align:right;font-variant-numeric:tabular-nums}
+  .codechip{font-family:'JetBrains Mono',monospace;font-size:11.5px;font-weight:500;color:var(--accent);background:var(--accent-soft);border-radius:6px;padding:2px 7px}
+  .badge{font-size:10.5px;font-weight:600;padding:2px 8px;border-radius:7px;white-space:nowrap}
+  .b-rx{background:var(--violet-s);color:var(--violet)}.b-otc{background:var(--blue-s);color:var(--blue)}.b-vit{background:var(--green-s);color:var(--green)}
+  .b-trad{background:var(--amber-s);color:var(--amber)}.b-hhc{background:var(--s2);color:var(--ink2)}
+  .b-ok{background:var(--green-s);color:var(--green)}.b-low{background:var(--amber-s);color:var(--amber)}.b-out{background:var(--red-s);color:var(--red)}
+  .bar{height:6px;border-radius:4px;background:var(--accent-soft);overflow:hidden;width:90px;display:inline-block;vertical-align:middle}.bar>i{display:block;height:100%;background:var(--accent);opacity:.8}
+  .ck{width:15px;height:15px;border:1.5px solid var(--line2);border-radius:4px;cursor:pointer;display:inline-block;vertical-align:middle}
+  .foot{display:flex;align-items:center;gap:12px;padding:11px 14px;border-top:1px solid var(--line);font-size:12.5px;color:var(--ink3)}
+  .pg{display:flex;align-items:center;gap:4px;margin-left:auto}
+  .pgb{width:30px;height:30px;border:1px solid var(--line);border-radius:8px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--ink2)}.pgb:hover{background:var(--s2)}
+
+  /* detail drawer */
+  .drawer{position:fixed;top:0;right:0;height:100%;width:400px;max-width:92vw;background:var(--surface);border-left:1px solid var(--line);box-shadow:var(--shadow-lg);transform:translateX(100%);transition:transform .25s;z-index:60;display:flex;flex-direction:column}
+  .drawer.open{transform:none}
+  .dwr-h{display:flex;align-items:flex-start;gap:11px;padding:18px;border-bottom:1px solid var(--line)}
+  .dwr-b{flex:1;overflow-y:auto;padding:18px}
+  .kv{display:flex;justify-content:space-between;gap:14px;padding:9px 0;border-bottom:1px solid var(--line);font-size:13px}.kv .k{color:var(--ink2)}.kv .v{font-weight:600;text-align:right;max-width:60%}
+  .sec{font-size:10.5px;font-weight:700;letter-spacing:.05em;color:var(--ink3);text-transform:uppercase;margin:16px 0 6px}
+  .prose{font-size:13px;line-height:1.6;color:var(--ink2)}
+  .ov{position:fixed;inset:0;background:rgba(20,20,18,.35);z-index:55;display:none}.ov.open{display:block}
+  @media(max-width:900px){.kpis{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div class="logo"><span class="mark"><i data-lucide="pill" style="width:17px"></i></span><div><b>CitCare</b><small>PHARMA</small></div></div>
+  <div class="tab"><i data-lucide="message-circle" style="width:16px"></i>Chat</div>
+  <div class="tab"><i data-lucide="layout-dashboard" style="width:16px"></i>Workspace</div>
+  <div class="tab on"><i data-lucide="database" style="width:16px"></i>Data</div>
+  <div class="tab"><i data-lucide="settings" style="width:16px"></i>Settings</div>
+  <div style="margin-left:auto;display:flex;gap:3px"><div class="ico" onclick="toggleTheme()" id="themeBtn"><i data-lucide="moon" style="width:18px"></i></div></div>
+</div>
+
+<div class="shell">
+  <aside class="side">
+    <div class="grp">Data</div>
+    <div class="nav on"><i data-lucide="database" style="width:17px"></i>Catalog &amp; inventory</div>
+    <div class="nav"><i data-lucide="server" style="width:17px"></i>SFTP uploads</div>
+  </aside>
+
+  <main class="main"><div class="wrap">
+    <div style="display:flex;align-items:flex-end;gap:12px">
+      <div><h1 class="serif" style="margin:0;font-size:27px">Data</h1><div style="margin-top:5px;font-size:13px;color:var(--ink2)">Browse, filter &amp; manage catalog and inventory</div></div>
+      <div style="margin-left:auto;display:flex;gap:8px">
+        <button class="btn"><i data-lucide="upload" style="width:15px"></i>Upload xlsx</button>
+        <button class="btn"><i data-lucide="download" style="width:15px"></i>Export CSV</button>
+        <button class="btn btn-p"><i data-lucide="refresh-cw" style="width:15px"></i>Reload</button>
+      </div>
+    </div>
+
+    <div class="kpis">
+      <div class="kpi"><div class="v tnum">5,292</div><div class="k"><i data-lucide="package" style="width:13px"></i>Catalog SKUs</div></div>
+      <div class="kpi"><div class="v tnum">111,654</div><div class="k"><i data-lucide="boxes" style="width:13px"></i>Inventory rows</div></div>
+      <div class="kpi"><div class="v tnum">8</div><div class="k"><i data-lucide="tags" style="width:13px"></i>Categories</div></div>
+      <div class="kpi"><div class="v tnum">96<small>%</small></div><div class="k"><i data-lucide="circle-check" style="width:13px"></i>In stock</div></div>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:12px">
+      <div class="seg">
+        <span class="on" onclick="setTab('catalog',this)"><i data-lucide="book-open" style="width:15px"></i>Catalog</span>
+        <span onclick="setTab('inventory',this)"><i data-lucide="boxes" style="width:15px"></i>Inventory</span>
+      </div>
+      <span style="font-size:12.5px;color:var(--ink3)" id="count">5,292 articles</span>
+    </div>
+
+    <!-- ===== CATALOG ===== -->
+    <div id="catalog">
+      <div class="filters">
+        <div class="srch"><i data-lucide="search" style="width:15px;color:var(--ink3)"></i><input placeholder="Search brand, generic or code…"></div>
+        <div class="sel"><i data-lucide="tag" style="width:14px"></i>Category<i data-lucide="chevron-down" style="width:14px;color:var(--ink3)"></i></div>
+        <div class="sel"><i data-lucide="arrow-up-down" style="width:14px"></i>Brand A–Z<i data-lucide="chevron-down" style="width:14px;color:var(--ink3)"></i></div>
+        <span style="width:1px;height:24px;background:var(--line);margin:0 2px"></span>
+        <span class="chip on">All</span>
+        <span class="chip">Rx</span>
+        <span class="chip">OTC</span>
+        <span class="chip">Vitamins</span>
+        <span class="chip">Has Burmese</span>
+        <div class="sel" style="margin-left:auto"><i data-lucide="sliders-horizontal" style="width:14px"></i>Columns</div>
+      </div>
+
+      <div class="card">
+        <div class="scroll" style="max-height:calc(100vh - 360px);overflow:auto">
+        <table>
+          <thead><tr>
+            <th style="width:34px"><span class="ck"></span></th>
+            <th>Code</th><th>Brand</th><th>Generic</th><th>Category</th><th>Burmese</th><th class="num">Sites</th><th style="width:30px"></th>
+          </tr></thead>
+          <tbody id="catb"></tbody>
+        </table>
+        </div>
+        <div class="foot">
+          <span>Showing <b style="color:var(--ink)">1–25</b> of 5,292</span>
+          <div class="sel" style="padding:5px 10px;font-size:12px">25 / page<i data-lucide="chevron-down" style="width:13px"></i></div>
+          <div class="pg"><div class="pgb"><i data-lucide="chevron-left" style="width:15px"></i></div><span style="font-size:12.5px;color:var(--ink)">1</span><span>/ 212</span><div class="pgb"><i data-lucide="chevron-right" style="width:15px"></i></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== INVENTORY ===== -->
+    <div id="inventory" style="display:none">
+      <div class="filters">
+        <div class="srch"><i data-lucide="search" style="width:15px;color:var(--ink3)"></i><input placeholder="Search article code or brand…"></div>
+        <div class="sel"><i data-lucide="store" style="width:14px"></i>All sites (53)<i data-lucide="chevron-down" style="width:14px;color:var(--ink3)"></i></div>
+        <span style="width:1px;height:24px;background:var(--line);margin:0 2px"></span>
+        <span class="chip on">All stock</span>
+        <span class="chip"><span style="color:var(--green)">●</span> In stock</span>
+        <span class="chip"><span style="color:var(--amber)">●</span> Low (&lt;20)</span>
+        <span class="chip"><span style="color:var(--red)">●</span> Out</span>
+        <div class="sel" style="margin-left:auto"><i data-lucide="arrow-up-down" style="width:14px"></i>Stock high→low</div>
+      </div>
+
+      <div class="card">
+        <div class="scroll" style="max-height:calc(100vh - 360px);overflow:auto">
+        <table>
+          <thead><tr>
+            <th>Article</th><th>Brand</th><th>Site</th><th class="num">Stock</th><th style="width:130px">Level</th><th class="num">Price</th><th class="num">Status</th>
+          </tr></thead>
+          <tbody id="invb"></tbody>
+        </table>
+        </div>
+        <div class="foot">
+          <span>Showing <b style="color:var(--ink)">1–25</b> of 111,654</span>
+          <div class="sel" style="padding:5px 10px;font-size:12px">25 / page<i data-lucide="chevron-down" style="width:13px"></i></div>
+          <div class="pg"><div class="pgb"><i data-lucide="chevron-left" style="width:15px"></i></div><span style="font-size:12.5px;color:var(--ink)">1</span><span>/ 4,467</span><div class="pgb"><i data-lucide="chevron-right" style="width:15px"></i></div></div>
+        </div>
+      </div>
+    </div>
+
+  </div></main>
+</div>
+
+<!-- detail drawer -->
+<div class="ov" id="ov" onclick="closeDrawer()"></div>
+<div class="drawer" id="drawer">
+  <div class="dwr-h">
+    <span style="width:36px;height:36px;border-radius:10px;background:var(--accent-soft);color:var(--accent);display:flex;align-items:center;justify-content:center;flex-shrink:0"><i data-lucide="pill" style="width:18px"></i></span>
+    <div style="flex:1;min-width:0"><div class="serif" style="font-size:16px" id="dTitle">PARACAP PARACETAMOL 10`S</div><div style="font-size:12px;color:var(--ink3)" class="mono">1000000024029</div></div>
+    <div class="ico" onclick="closeDrawer()"><i data-lucide="x" style="width:18px"></i></div>
+  </div>
+  <div class="dwr-b scroll" id="dBody"></div>
+</div>
+
+<script>
+const $=s=>document.querySelector(s);
+function toggleTheme(){const d=document.documentElement.classList.toggle('dark');$('#themeBtn').innerHTML=`<i data-lucide="${d?'sun':'moon'}" style="width:18px"></i>`;lucide.createIcons();}
+
+const CATBADGE={Rx:'b-rx',OTC:'b-otc',Vit:'b-vit',Trad:'b-trad',HHC:'b-hhc'};
+const CAT=[
+  ['1000000024029','PARACAP PARACETAMOL 10`S','Paracetamol','OTC','OTC',1,'fever, headache'],
+  ['1000000009840','ALAXAN 10`S','Paracetamol & Ibuprofen','Rx','Rx',1,'pain, inflammation'],
+  ['1000000131948','BIOGESIC 500MG 10`S','Paracetamol','OTC','OTC',1,'fever, body pain'],
+  ['1000000015837','ROYAL-D 25G','Oral rehydration salts','HHC','HHC',1,'dehydration'],
+  ['1000000332083','METFORMIN 500MG','Metformin HCl','Rx','Rx',0,'type 2 diabetes'],
+  ['1000000009839','BRUSTAN 10`S','Paracetamol & Ibuprofen','Rx','Rx',1,'pain, fever'],
+  ['1000000201145','VITAMIN C 1000MG','Ascorbic acid','Vit','Vit',0,'supplement'],
+  ['1000000308812','SILOXOGENE 10`S','Alumina / Magnesia','OTC','OTC',1,'acidity, reflux'],
+  ['1000000288471','AMOXIL 500MG','Amoxicillin','Rx','Rx',1,'bacterial infection'],
+  ['1000000410233','TIGER BALM 10G','Camphor / Menthol','Trad','Trad',0,'muscle ache']
+];
+function catRows(){
+  return CAT.map(r=>`<tr onclick="openDrawer('${r[0]}','${r[1].replace(/'/g,'')}')">
+    <td><span class="ck" onclick="event.stopPropagation()"></span></td>
+    <td><span class="codechip">${r[0]}</span></td>
+    <td style="font-weight:500">${r[1]}</td>
+    <td style="color:var(--ink2)">${r[2]}</td>
+    <td><span class="badge ${CATBADGE[r[3]]}">${r[3]==='Rx'?'Prescription':r[3]==='OTC'?'OTC':r[3]==='Vit'?'Vitamin':r[3]==='HHC'?'Home care':'Traditional'}</span></td>
+    <td>${r[5]?'<span class="badge b-ok">✓ MY</span>':'<span class="badge b-hhc">—</span>'}</td>
+    <td class="num">53</td>
+    <td><i data-lucide="chevron-right" style="width:15px;color:var(--ink3)"></i></td></tr>`).join('');
+}
+const INV=[
+  ['1000000015837','ROYAL-D 25G','20043-CCSJ',2840,100,800],
+  ['1000000024029','PARACAP 10`S','20043-CCSJ',988,72,1600],
+  ['1000000009840','ALAXAN 10`S','20015-CCGV',412,42,1250],
+  ['1000000131948','BIOGESIC 500MG','20032-CCHAGL',369,38,950],
+  ['1000000308812','SILOXOGENE','20026-CC19',208,22,1100],
+  ['1000000009839','BRUSTAN 10`S','20013-CCJN',53,8,1250],
+  ['1000000201145','VITAMIN C 1000','20060-CCBHSC',14,3,2200],
+  ['1000000332083','METFORMIN 500MG','20052-CCTLKK',0,0,1500]
+];
+function invRows(){
+  return INV.map(r=>{
+    const q=r[3], st=q===0?['b-out','Out']:q<20?['b-low','Low']:['b-ok','In stock'];
+    return `<tr onclick="openDrawer('${r[0]}','${r[1].replace(/'/g,'')}')">
+      <td><span class="codechip">${r[0]}</span></td>
+      <td style="font-weight:500">${r[1]}</td>
+      <td class="mono" style="color:var(--ink2);font-size:12px">${r[2]}</td>
+      <td class="num" style="font-weight:600">${q.toLocaleString()}</td>
+      <td><span class="bar"><i style="width:${r[4]}%"></i></span></td>
+      <td class="num">${r[5].toLocaleString()} <span style="color:var(--ink3);font-size:11px">MMK</span></td>
+      <td class="num"><span class="badge ${st[0]}">${st[1]}</span></td></tr>`;
+  }).join('');
+}
+function setTab(t,el){
+  document.querySelectorAll('.seg span').forEach(s=>s.classList.remove('on'));el.classList.add('on');
+  $('#catalog').style.display=t==='catalog'?'':'none';
+  $('#inventory').style.display=t==='inventory'?'':'none';
+  $('#count').textContent=t==='catalog'?'5,292 articles':'111,654 stock rows · 53 sites';
+}
+function openDrawer(code,title){
+  $('#dTitle').textContent=title;$('#drawer').querySelector('.mono').textContent=code;
+  $('#dBody').innerHTML=`
+    <div style="display:flex;gap:7px;margin-bottom:14px"><span class="badge b-rx">Prescription</span><span class="badge b-ok">In stock · 53 sites</span></div>
+    <div class="kv"><span class="k">Generic</span><span class="v">Paracetamol & Ibuprofen</span></div>
+    <div class="kv"><span class="k">Composition</span><span class="v">Para 325mg & Ibuprofen 400mg</span></div>
+    <div class="kv"><span class="k">Category</span><span class="v">5102 · Prescription</span></div>
+    <div class="kv"><span class="k">Total stock</span><span class="v tnum">3,120 units</span></div>
+    <div class="kv"><span class="k">Avg price</span><span class="v tnum">1,250 MMK</span></div>
+    <div class="sec">Indication (မြန်မာ)</div>
+    <div class="prose my">ဖျားနာခြင်း၊ ကိုယ်လက်နာကျင်ခြင်း၊ ခေါင်းကိုက်ခြင်း အတွက် သုံးပါသည်။</div>
+    <div class="sec">Top branches</div>
+    ${[['20043-CCSJ',395],['20015-CCGV',380],['20032-CCHAGL',369],['20024-CC73',314]].map(s=>`<div class="kv"><span class="k mono" style="font-size:12px">${s[0]}</span><span class="v tnum">${s[1]}</span></div>`).join('')}
+    <button class="btn btn-p" style="width:100%;justify-content:center;margin-top:16px"><i data-lucide="share-2" style="width:15px"></i>View in knowledge graph</button>`;
+  $('#drawer').classList.add('open');$('#ov').classList.add('open');lucide.createIcons();
+}
+function closeDrawer(){$('#drawer').classList.remove('open');$('#ov').classList.remove('open');}
+
+$('#catb').innerHTML=catRows();$('#invb').innerHTML=invRows();
+lucide.createIcons();
+</script>
+</body>
+</html>
