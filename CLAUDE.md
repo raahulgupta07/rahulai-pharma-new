@@ -34,21 +34,47 @@ cold = first ask, warm = exact cache hit:
 
 | stack | port | cold p50 | cold p95 | cold mean | warm |
 |-------|------|---------:|---------:|----------:|-----:|
-| baseline  | :8088 | 9,797ms | 12,955ms | 10,234ms | ~3ms |
-| optimize  | :8091 | 6,498ms | 13,921ms |  8,065ms | ~3ms |
+| baseline               | :8088 | 9,797ms | 12,955ms | 10,234ms | ~3ms |
+| optimize, flags off    | :8091 | 6,498ms | 13,921ms |  8,065ms | ~3ms |
+| optimize + fast path   | :8091 | 6,164ms | 11,773ms |  7,020ms | ~3ms |
 
-**Read this honestly.** p50 dropped ~34% (9.8s → 6.5s) but **p95 did NOT improve**
-— it is slightly worse, dominated by one slow sample at n=20, so the tail is
-noise, not signal. The warm path is an exact-hash cache hit on both stacks (~3ms);
-the cache is not what moved p50. Most of the p50 win is simply
-`learning_enabled=False` (no 3-run history replay + no second extraction model per
-turn), NOT the fast path or the semantic cache — both of those are still OFF (see
-below). Do not attribute the gain to features that were not running.
+Median per intent, baseline → fast path ON (n=4 per intent — noisy, single run):
 
-**Pending / not-yet-live design work (all built, all OFF by default — see
-"Optimization"):** the deterministic fast path, the semantic answer cache, and the
-router/answer model split are all coded on `feature/optimize` behind config flags
-that default to `False`. They are wired and tested but not enabled anywhere.
+| intent | baseline | fast path OFF | fast path ON | |
+|--------|---------:|--------------:|-------------:|--|
+| `hot_have`   | 10,858ms | 6,409ms | **5,084ms** | fast path claims it |
+| `hot_where`  |  9,798ms | 7,288ms | **6,166ms** | fast path claims it |
+| `catalog`    | 12,608ms | 5,070ms |  4,940ms | falls through |
+| `substitute` | 12,406ms | 13,061ms | 12,102ms | falls through |
+| `semantic`   |  9,212ms | 13,921ms | 10,395ms | falls through |
+| `site`       | 12,299ms |  6,896ms |  6,164ms | falls through |
+
+**Hot intents: 9,798ms → 5,757ms median, −41%.** Those two are most real traffic.
+
+### The correction that matters — read before optimizing further
+
+The fast path was predicted to land hot intents near **~700ms**. It lands at
+**~5,700ms**. Deleting two of three sequential LLM calls bought only ~1,300ms,
+because **one `gemini-3.5-flash` call through OpenRouter is itself ~5 seconds.**
+
+**Per-call cost dominates, not round-trip count.** Any plan that reasons about
+"N legs → 1 leg" and expects a proportional win is wrong on this stack. The
+remaining ~5s is a single unavoidable LLM call.
+
+The next lever follows directly: the fast path's phrasing call has **no tools**
+and one job — restate a FACTS block in the user's language. It does not need
+`gemini-3.5-flash`. Run it on `flash-lite` and re-bench; that is the cheapest
+experiment left.
+
+Secondary honesty: p95 is noise at n=20. Most of the *flags-off* p50 win is just
+`learning_enabled=False` (no 3-run history replay, no second extraction model per
+turn) — not the fast path, not the cache. Do not attribute gains to features that
+were not running.
+
+**Built but OFF by default:** the semantic answer cache and the router/answer
+model split are coded behind flags defaulting to `False`. The fast path is also
+OFF by default; `docker-compose.optimized.yml` sets `FAST_PATH_ENABLED=true` on
+the `:8091` stack so it can be benched.
 
 **Blocking production (operator-only, NOT code):**
 1. Rotate the OpenRouter key (was shared in chat).
@@ -246,6 +272,27 @@ touches the baseline's.
 - A catalog upsert must set `embedding = NULL` when the embedded source text
   changes, or `embed_catalog(only_missing=True)` will keep answering semantic
   searches from a stale vector.
+
+## The embed widget (`app/static/widget.js`)
+
+Restyled to the teal design. It is injected into **arbitrary customer sites**, so
+it cannot use the admin's CSS vars or Tailwind — inline styles and a scoped style
+block are correct there, and colours are hex, not tokens.
+
+Three things must never change without breaking production embeds:
+
+1. **The SSE wire contract** — `event: step`, `event: result`,
+   `data: {"delta": …}`, `data: [DONE]`, frames split on `\n\n`.
+2. **The session flow** — `POST /api/embed/session/create` →
+   `/api/embed/chat/stream`, including the 401 re-mint-once retry.
+3. **Every `data-*` attribute** — `data-embed-id`, `data-public-key`, `data-user`,
+   `data-user-sig`, `data-title`, `data-greeting`, `data-accent`, `data-stream`.
+   Customers have these in live HTML (see `INTEGRATION.md`). Only the *default*
+   value of `data-accent` changed: `#c96342` → `#006869`.
+
+The design mock's tool-trace chips, citation pills, typing indicator, and quick
+replies were **deliberately skipped** — each needs new SSE parsing or state, and
+the contract above outranks the design.
 
 ## Conventions
 
