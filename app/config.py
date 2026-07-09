@@ -75,6 +75,26 @@ class Settings(BaseSettings):
     learning_enabled: bool = False
     learning_model: str = "google/gemini-2.5-flash-lite"  # cheap extraction model
 
+    # ---- latency: delete LLM round trips (measured baseline p50 ~9.8s) ----
+    # Fast path: resolve the drug deterministically (trigram + drug_alias), run
+    # one SQL query, and spend a single LLM call phrasing the answer — instead of
+    # the model picking a tool, waiting, then writing. Cuts 3 legs to 1.
+    fast_path_enabled: bool = False
+    # Semantic cache: near-match the question embedding instead of hashing it.
+    # KEEP OFF. Measured on gemini-embedding-2, whole-question cosine cannot
+    # separate "same question" from "different strength": "do I have Panadol"
+    # scores 0.947 against "...Panadol 1g" but only 0.927 against "Do we have
+    # Panadol?" — the dangerous pair is CLOSER than the benign one. No threshold
+    # is safe. To use this, pin the resolved article_code into the scope key
+    # (see app/resolver.py) so variants land in different buckets.
+    semantic_cache_enabled: bool = False
+    semantic_cache_threshold: float = 0.94
+    # Tool selection is an easy task; answer phrasing is not. Agno's output_model
+    # runs the tool loop on router_model, then regenerates the final answer with
+    # the strong model. Saves cost, not latency — the round trips remain.
+    router_split_enabled: bool = False
+    router_model: str = "google/gemini-2.5-flash-lite"
+
     # ---- MySQL source sync (pull the client's app DB -> our Postgres) ----
     # We never write to their DB. A read-only account runs two SELECTs whose
     # column ALIASES map their schema onto ours (article_code, brand_name, ...).

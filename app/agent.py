@@ -224,16 +224,36 @@ def build_agent(model_id: str | None = None) -> Agent:
     """
 
     settings = get_settings()
+    answer_id = model_id or settings.openrouter_model
     model = OpenRouter(
-        id=model_id or settings.openrouter_model,
+        id=answer_id,
         api_key=settings.openrouter_api_key,
         max_tokens=2048,   # room for a full substitute list (see RESPONSE STYLE exception); still caps essays
     )
+    extra: dict = {}
+    # Router/answer split: the cheap router_model drives the tool-selection loop,
+    # while the requested (stronger) model phrases the final answer via Agno's
+    # first-class output_model. Agno relabels the router's own content as an
+    # IntermediateRunContentEvent, so only the answer model's prose streams out
+    # (agno/agent/_run.py stream path; the system_message — BILINGUAL_SYSTEM_PROMPT
+    # — is preserved for output_model because output_model_prompt is left unset).
+    if getattr(settings, "router_split_enabled", False) and settings.router_model:
+        model = OpenRouter(
+            id=settings.router_model,
+            api_key=settings.openrouter_api_key,
+            max_tokens=2048,
+        )
+        extra["output_model"] = OpenRouter(
+            id=answer_id,
+            api_key=settings.openrouter_api_key,
+            max_tokens=2048,
+        )
     return Agent(
         model=model,
         tools=TOOLS,
         system_message=BILINGUAL_SYSTEM_PROMPT,
         markdown=True,
+        **extra,
     )
 
 

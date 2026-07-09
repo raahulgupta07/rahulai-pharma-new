@@ -40,6 +40,7 @@ from app.cache import (
     is_valid_credential,
     set_cached_answer,
 )
+from app import fastpath
 from app.config import get_settings
 from app.db import close_pool, counts, get_pool
 from app.embeddings import close as close_embeddings
@@ -407,6 +408,19 @@ async def _answer(
         return cached, True
     metrics.incr("cache_misses")
 
+    if get_settings().fast_path_enabled:
+        facts = await fastpath.answer(message, store_id)
+        if facts is not None:
+            phrase_prompt = fastpath.build_phrasing_input(
+                _scoped_message(message, store_id), facts
+            )
+            metrics.incr("llm_calls")
+            metrics.record_llm()
+            out = await fastpath.get_phrasing_agent(model).arun(phrase_prompt)
+            content = getattr(out, "content", str(out))
+            await set_cached_answer(message, store_id, content, model=model)
+            return content, False
+
     prompt = _scoped_message(message, store_id)
     token = set_store_scope(store_id)
     run_kw: Dict[str, Any] = {}
@@ -589,6 +603,38 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             yield "data: [DONE]\n\n"
             return
         metrics.incr("cache_misses")
+
+        if get_settings().fast_path_enabled:
+            facts = await fastpath.answer(req.message, store_id)
+            if facts is not None:
+                step = json.dumps({"label": facts["tool"], "icon": "search"})
+                yield f"event: step\ndata: {step}\n\n"
+                rows = fastpath.result_rows(facts)
+                if rows:
+                    result = json.dumps({"tool": facts["tool"], "rows": rows[:8]})
+                    yield f"event: result\ndata: {result}\n\n"
+                phrase_prompt = fastpath.build_phrasing_input(
+                    _scoped_message(req.message, store_id), facts
+                )
+                metrics.incr("llm_calls")
+                metrics.record_llm()
+                full = ""
+                try:
+                    async for event in fastpath.get_phrasing_agent(req.model).arun(
+                        phrase_prompt, stream=True, stream_events=True,
+                    ):
+                        if type(event).__name__ == "RunContentEvent":
+                            delta = getattr(event, "content", None)
+                            if isinstance(delta, str) and delta:
+                                full += delta
+                                yield f"data: {json.dumps({'delta': delta})}\n\n"
+                except Exception as exc:  # noqa: BLE001
+                    yield f"event: error\ndata: {json.dumps({'detail': str(exc)})}\n\n"
+                if full:
+                    await log_chat(req.message, full, store_id, False, int((_t.time() - t0) * 1000))
+                    await set_cached_answer(req.message, store_id, full, model=req.model)
+                yield "data: [DONE]\n\n"
+                return
 
         scope = set_store_scope(store_id)
         full = ""

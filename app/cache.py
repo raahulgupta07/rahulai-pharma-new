@@ -13,16 +13,27 @@ Backed by an async redis client built from ``settings.redis_url``. Three jobs:
 from __future__ import annotations
 
 import hashlib
-from typing import Optional
+import json
+import logging
+import time
+from typing import List, Optional
 
 import redis.asyncio as redis
 
 from app.config import get_settings
 
+logger = logging.getLogger(__name__)
+
 _client: Optional[redis.Redis] = None
 
 _DATA_VERSION_KEY = "pharmacy:data_version"
 _CRED_KEY = "pharmacy:credentials"  # hash: embed_id -> public_key
+
+# Semantic answer cache: a bounded per-(version, model, store) list of
+# {question vector, answer} entries. The exact-hash cache above is free and
+# ~3ms; this near-match layer only runs on its miss, and only when enabled.
+_SEM_INDEX_PREFIX = "pharmacy:sqa:"  # list key: {prefix}{version}|{model}|{store}
+_SEM_MAX_ENTRIES = 64                # hard cap per scope, so the index can't grow unbounded
 
 
 def get_client() -> redis.Redis:
@@ -112,9 +123,17 @@ async def make_query_key(
 async def get_cached_answer(
     message: str, store_id: Optional[str], model: Optional[str] = None
 ) -> Optional[str]:
-    """Return a cached agent answer for this (message, store, model), or ``None``."""
+    """Return a cached agent answer for this (message, store, model), or ``None``.
 
-    return await get_cached(await make_query_key(message, store_id, model))
+    Tries the exact hash first (free, ~3ms). On a miss, and only when
+    ``semantic_cache_enabled``, falls back to an embedding near-match within the
+    SAME (version, model, store) scope.
+    """
+
+    exact = await get_cached(await make_query_key(message, store_id, model))
+    if exact is not None:
+        return exact
+    return await _semantic_lookup(message, store_id, model)
 
 
 async def set_cached_answer(
@@ -128,6 +147,116 @@ async def set_cached_answer(
 
     ttl = ttl if ttl is not None else get_settings().cache_ttl_seconds
     await set_cached(await make_query_key(message, store_id, model), answer, ttl)
+    await _semantic_store(message, store_id, answer, model, ttl)
+
+
+# ---- semantic (embedding) near-match layer --------------------------------
+
+
+def _cosine(a: List[float], b: List[float]) -> float:
+    """Cosine similarity of two equal-length vectors (-1.0 on a zero vector)."""
+
+    import numpy as np
+
+    va = np.asarray(a, dtype=np.float32)
+    vb = np.asarray(b, dtype=np.float32)
+    na = float(np.linalg.norm(va))
+    nb = float(np.linalg.norm(vb))
+    if na == 0.0 or nb == 0.0:
+        return -1.0
+    return float(np.dot(va, vb) / (na * nb))
+
+
+async def _semantic_index_key(store_id: str, model: Optional[str]) -> str:
+    """Scope key for the semantic index — store_id is part of it (never cross)."""
+
+    version = await get_data_version()
+    resolved = _resolve_model(model)
+    return f"{_SEM_INDEX_PREFIX}{version}|{resolved}|{store_id}"
+
+
+async def _semantic_lookup(
+    message: str, store_id: Optional[str], model: Optional[str]
+) -> Optional[str]:
+    """Return the answer of the closest cached question above threshold, or ``None``.
+
+    Fails closed: disabled flag, absent store_id, a missing embedding, or any
+    error returns ``None`` so the caller falls through to the LLM. store_id is
+    part of the scope key, so a hit can never cross stores.
+    """
+
+    settings = get_settings()
+    if not settings.semantic_cache_enabled or not store_id:
+        return None
+    try:
+        from app.embeddings import embed_query_cached
+
+        qvec = await embed_query_cached(message)
+        if not qvec:
+            return None
+        key = await _semantic_index_key(store_id, model)
+        entries = await get_client().lrange(key, 0, -1)
+        if not entries:
+            return None
+
+        ttl = settings.cache_ttl_seconds
+        now = time.time()
+        best_sim = settings.semantic_cache_threshold
+        best_answer: Optional[str] = None
+        for raw in entries:
+            try:
+                entry = json.loads(raw)
+            except (ValueError, TypeError):
+                continue
+            if now - entry.get("ts", 0.0) > ttl:
+                continue  # stale relative to the exact cache's freshness window
+            vec = entry.get("vec")
+            answer = entry.get("a")
+            if not vec or answer is None:
+                continue
+            sim = _cosine(qvec, vec)
+            if sim >= best_sim:
+                best_sim = sim
+                best_answer = answer
+        return best_answer
+    except Exception:   # noqa: BLE001 — the near-match layer must never break lookup
+        logger.exception("Semantic cache lookup failed; falling through to LLM")
+        return None
+
+
+async def _semantic_store(
+    message: str,
+    store_id: Optional[str],
+    answer: str,
+    model: Optional[str],
+    ttl: int,
+) -> None:
+    """Append this (question vector, answer) to the scope index, bounded + TTL'd.
+
+    No-op when disabled or store_id is absent. Trims to the newest
+    ``_SEM_MAX_ENTRIES`` and expires the whole index at ``ttl`` so stock answers
+    stay fresh. Errors are swallowed — indexing is best-effort.
+    """
+
+    settings = get_settings()
+    if not settings.semantic_cache_enabled or not store_id:
+        return
+    try:
+        from app.embeddings import embed_query_cached
+
+        qvec = await embed_query_cached(message)
+        if not qvec:
+            return
+        key = await _semantic_index_key(store_id, model)
+        norm = " ".join(message.strip().lower().split())
+        entry = json.dumps({"q": norm, "vec": qvec, "a": answer, "ts": time.time()})
+        pipe = get_client().pipeline()
+        pipe.rpush(key, entry)
+        pipe.ltrim(key, -_SEM_MAX_ENTRIES, -1)
+        pipe.expire(key, ttl)
+        await pipe.execute()
+    except Exception:   # noqa: BLE001 — indexing is best-effort, never fatal
+        logger.exception("Semantic cache store failed; entry not indexed")
 
 
 # ---- rate limiting ---------------------------------------------------------

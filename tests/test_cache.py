@@ -92,3 +92,128 @@ def test_reload_endpoint_bumps_version(api_client):
     assert body["status"] == "reloaded"
     assert body["catalog_rows"] >= 1
     assert body["data_version"] == before + 1
+
+
+# ---- semantic answer cache -------------------------------------------------
+
+# Vectors chosen so cosine(_VA, _V_HIT) ~= 0.995 (>= 0.94) and
+# cosine(_VA, _V_BELOW) ~= 0.902 (< 0.94), exercising both sides of the default
+# threshold without touching the real embedding API.
+_VA = [1.0, 0.0, 0.0]
+_V_HIT = [1.0, 0.1, 0.0]
+_V_BELOW = [1.0, 0.48, 0.0]
+
+
+def _patch_embedder(monkeypatch, mapping):
+    """Force ``embed_query_cached`` to return a fixed vector per message."""
+
+    async def fake_embed(text):
+        return mapping[text]
+
+    monkeypatch.setattr("app.embeddings.embed_query_cached", fake_embed)
+
+
+def _enable_semantic(monkeypatch, enabled=True, threshold=0.94):
+    s = get_settings()
+    monkeypatch.setattr(s, "semantic_cache_enabled", enabled, raising=False)
+    monkeypatch.setattr(s, "semantic_cache_threshold", threshold, raising=False)
+
+
+def test_semantic_exact_hit_still_works(monkeypatch):
+    _enable_semantic(monkeypatch)
+
+    async def boom(text):  # exact hit must NOT reach the embedder
+        raise AssertionError("embed_query_cached called on an exact hit")
+
+    # store path DOES embed; only guard the lookup's exact-hit path.
+    async def go2():
+        store = f"S-{uuid.uuid4()}"
+        msg = "do i have panadol"
+        _patch_embedder(monkeypatch, {msg: _VA})
+        await cache.set_cached_answer(msg, store, "exact-answer", ttl=60)
+        monkeypatch.setattr("app.embeddings.embed_query_cached", boom)
+        hit = await cache.get_cached_answer(msg, store)  # same text -> exact hash hit
+        await cache.close_client()
+        return hit
+
+    assert run(go2()) == "exact-answer"
+
+
+def test_semantic_hit_above_threshold(monkeypatch):
+    _enable_semantic(monkeypatch)
+
+    async def go():
+        store = f"S-{uuid.uuid4()}"
+        stored = "do i have panadol"
+        similar = "do we have panadol"
+        _patch_embedder(monkeypatch, {stored: _VA, similar: _V_HIT})
+        await cache.set_cached_answer(stored, store, "PANADOL: 50 in stock", ttl=60)
+        hit = await cache.get_cached_answer(similar, store)  # no exact hash match
+        await cache.close_client()
+        return hit
+
+    assert run(go()) == "PANADOL: 50 in stock"
+
+
+def test_semantic_near_miss_below_threshold(monkeypatch):
+    _enable_semantic(monkeypatch)
+
+    async def go():
+        store = f"S-{uuid.uuid4()}"
+        stored = "do i have panadol"
+        variant = "do i have panadol 1g"
+        _patch_embedder(monkeypatch, {stored: _VA, variant: _V_BELOW})
+        await cache.set_cached_answer(stored, store, "PANADOL: 50 in stock", ttl=60)
+        miss = await cache.get_cached_answer(variant, store)  # below 0.94 -> no hit
+        await cache.close_client()
+        return miss
+
+    assert run(go()) is None
+
+
+def test_semantic_cross_store_never_hits(monkeypatch):
+    _enable_semantic(monkeypatch)
+
+    async def go():
+        store_a = f"A-{uuid.uuid4()}"
+        store_b = f"B-{uuid.uuid4()}"
+        stored = "do i have panadol"
+        similar = "do we have panadol"
+        _patch_embedder(monkeypatch, {stored: _VA, similar: _V_HIT})
+        await cache.set_cached_answer(stored, store_a, "STORE-A: 50 in stock", ttl=60)
+        cross = await cache.get_cached_answer(similar, store_b)  # near vector, other store
+        await cache.close_client()
+        return cross
+
+    assert run(go()) is None  # scope key includes store_id -> can never cross
+
+
+def test_semantic_disabled_flag_no_hit(monkeypatch):
+    _enable_semantic(monkeypatch, enabled=False)
+
+    async def go():
+        store = f"S-{uuid.uuid4()}"
+        stored = "do i have panadol"
+        similar = "do we have panadol"
+        _patch_embedder(monkeypatch, {stored: _VA, similar: _V_HIT})
+        await cache.set_cached_answer(stored, store, "PANADOL: 50 in stock", ttl=60)
+        miss = await cache.get_cached_answer(similar, store)
+        await cache.close_client()
+        return miss
+
+    assert run(go()) is None  # flag off -> exact-only, near phrasing misses
+
+
+def test_semantic_no_store_id_fails_closed(monkeypatch):
+    _enable_semantic(monkeypatch)
+
+    async def go():
+        stored = "do i have panadol"
+        similar = "do we have panadol"
+        _patch_embedder(monkeypatch, {stored: _VA, similar: _V_HIT})
+        await cache.set_cached_answer(stored, None, "GLOBAL: 50 in stock", ttl=60)
+        miss = await cache.get_cached_answer(similar, None)  # no store scope -> fail closed
+        await cache.close_client()
+        return miss
+
+    assert run(go()) is None

@@ -18,39 +18,59 @@ SvelteKit admin SPA ("Aurora" UI) is served at `/admin`.
 
 **Functionally complete + running locally.** Services up (api/postgres/redis/sftp/
 ingest-worker healthy), real data loaded (5,292 catalog · 111,654 inventory),
-47 tests pass. Aurora UI (Overview/Settings/Chat/Data), Claude-style chat with
-tool-use trace + rich rendering, redesigned Data page, GraphRAG, auth, embed API —
-all live + verified.
+**81 tests pass** (4 skipped — live/network-gated). Aurora UI
+(Overview/Settings/Chat/Data), Claude-style chat with tool-use trace + rich
+rendering, redesigned Data page, GraphRAG, auth, embed API — all live + verified.
 
-**Git:** the repo went under version control on 2026-07-09. `main` holds the
+**Git:** repo under version control since 2026-07-09. `main` holds the
 pre-optimization baseline (`1610801`); `feature/optimize` holds the speed +
-accuracy fixes (`27a4f94`). There is **no remote** — both commits are local only.
+accuracy fixes and the optimization design. There is **NO REMOTE** — every commit
+is local only. Nothing is pushed anywhere.
 
-**Pending code work (see "Optimization" below):**
-- **A3 — blocked, and it can mislead a pharmacist.** `stock_qty` and `price` are
-  `NOT NULL DEFAULT 0` (schema.sql:49-50), so a blank cell in the Excel export is
-  indistinguishable from "zero on hand". Needs a migration dropping `NOT NULL` so
-  `NULL` can mean *unknown*. Not done — schema change against 111k live rows.
-- **Nothing is benchmarked.** `evals/bench.py` (20 questions, EN + Burmese,
-  cold/warm, p50/p95, cache-hit rate) exists but has never run live — it is gated
-  behind `RUN_LIVE=1` and spends OpenRouter credit. There is no measured
-  before/after latency. Do not quote a speedup number until it runs.
-- **The container runs the OLD baked code.** Nothing on `feature/optimize` is live.
-- Not built: the deterministic fast path, the semantic answer cache, the
-  router/answer model split.
+### Measured latency (real, not estimates)
+
+`evals/bench.py` has now run live, side-by-side (see "Two stacks" below). n=20,
+cold = first ask, warm = exact cache hit:
+
+| stack | port | cold p50 | cold p95 | cold mean | warm |
+|-------|------|---------:|---------:|----------:|-----:|
+| baseline  | :8088 | 9,797ms | 12,955ms | 10,234ms | ~3ms |
+| optimize  | :8091 | 6,498ms | 13,921ms |  8,065ms | ~3ms |
+
+**Read this honestly.** p50 dropped ~34% (9.8s → 6.5s) but **p95 did NOT improve**
+— it is slightly worse, dominated by one slow sample at n=20, so the tail is
+noise, not signal. The warm path is an exact-hash cache hit on both stacks (~3ms);
+the cache is not what moved p50. Most of the p50 win is simply
+`learning_enabled=False` (no 3-run history replay + no second extraction model per
+turn), NOT the fast path or the semantic cache — both of those are still OFF (see
+below). Do not attribute the gain to features that were not running.
+
+**Pending / not-yet-live design work (all built, all OFF by default — see
+"Optimization"):** the deterministic fast path, the semantic answer cache, and the
+router/answer model split are all coded on `feature/optimize` behind config flags
+that default to `False`. They are wired and tested but not enabled anywhere.
 
 **Blocking production (operator-only, NOT code):**
 1. Rotate the OpenRouter key (was shared in chat).
 2. Set prod `SECRET_KEY` (32-byte) = Laravel `CITYAGENT_SECRET_KEY`.
 3. Deploy + expose behind TLS / real domain (localhost now).
-4. Tighten CORS `ALLOWED_ORIGINS` to host domain.
+4. Tighten CORS `ALLOWED_ORIGINS` — it **defaults to `*`** (config.py:67).
 5. SFTP key-auth only (password now).
 6. Point LDAP/Keycloak at real servers to test SSO.
+7. **`is_valid_credential` (cache.py) returns `True` for ANY credentials when
+   none are registered** — dev-open by design, but a prod deploy with an empty
+   `pharmacy:credentials` hash accepts every embed. Seed a credential (or gate it)
+   before exposing the embed API.
 
 **Optional polish (not blocking):** label chat trace by mode (SQL/RAG/Graph);
 graph-page label de-clutter; wire Data Export-CSV / Upload buttons; settings
 toggles → real runtime behaviour (needs a `/admin/config` POST; currently
-local-only UI prefs); a prod readiness-check script for items 1–6.
+local-only UI prefs); a prod readiness-check script for items 1–7.
+
+**Not yet visually verified:** nobody has laid eyes on the *authenticated* admin
+UI in a browser. Headless Chrome hangs on the authed route, so every claim about
+how the logged-in pages actually render is unverified. The dark palette is
+derived, not reviewed (see "Design").
 
 ## Architecture
 
@@ -141,19 +161,79 @@ where the token is a user's search string, not a scope.
 Scope reaches tools via the `_STORE_SCOPE` contextvar. Never bypass
 `set_store_scope`.
 
+## Two stacks — side-by-side benchmarking
+
+`docker-compose.optimized.yml` overlays the baseline compose so **both stacks run
+at once** and can be benched against each other:
+
+```bash
+docker compose -p pharmacy-opt \
+  -f docker-compose.yml -f docker-compose.optimized.yml up -d --build
+#   baseline   api :8088  postgres :5433  redis :6380  sftp :2222
+#   optimize   api :8091  postgres :5434  redis :6381  sftp :2223
+BENCH_BASE_URL=http://localhost:8091 RUN_LIVE=1 ./venv/bin/python -m evals.bench
+```
+
+`!override` on every `ports:` block is **required**: Compose MERGES sequences like
+`ports` by appending, so without it each service would publish the baseline port
+*as well* and fail with "port is already allocated". Volumes are namespaced by the
+`-p pharmacy-opt` project, so the optimize stack gets its own pgdata and never
+touches the baseline's.
+
 ## Optimization notes (2026-07-09)
 
 - **Provider is OpenRouter, always.** Do not propose a direct Google/OpenAI
   client to shave the proxy hop. Win latency by deleting LLM round trips.
-- Per question the agent currently makes 2–3 sequential LLM calls (pick tool →
-  run → phrase). The intended fix is a deterministic fast path: resolve the drug
-  via the trigram GIN index + a `drug_alias` table (no LLM), run one SQL query,
-  then one LLM call purely to phrase the answer in the user's language.
-- `learning_enabled` now defaults to **False** (config.py). When on, it adds
-  `num_history_runs=3` replays plus a second extraction model to every turn.
-- The answer cache key is `(data_version, model, store_id, normalized_message)`.
-  It is an exact hash — near-miss phrasings do not hit. A semantic (embedding)
-  cache is the intended upgrade.
+- **A3 landed.** `inventory.stock_qty` / `inventory.price` are now **NULLABLE**
+  (`migrations/0001_inventory_nullable_stock_price.sql` drops `NOT NULL` +
+  `DEFAULT`). `NULL` means **UNKNOWN — never zero**; a blank cell in the Excel
+  export no longer masquerades as "zero on hand". The migration is idempotent but
+  has been applied to the **:8091 optimize DB ONLY, NOT :8088** — the baseline
+  still has the old `NOT NULL DEFAULT 0` schema.
+  - **Consequence — `NULLS LAST`.** Postgres sorts NULLs *first* in `ORDER BY …
+    DESC`, so `get_stock` and `top_by_stock` (tools.py) now say `DESC NULLS LAST`
+    to keep unknown-quantity rows from floating to the top. `find_at_other_stores`
+    filters `stock_qty > 0`, which already excludes NULL, so it needs no change.
+- Per question the agent makes 2–3 sequential LLM calls (pick tool → run →
+  phrase). The **fast path** (`app/fastpath.py` + `app/resolver.py`, flag
+  `fast_path_enabled`, default OFF) collapses that to one phrasing call for the
+  two hottest intents only:
+  - **HOT_HAVE** ("do I have X" / "X ရှိလား") and **HOT_WHERE** ("who else has X"
+    / "ဘယ်ဆိုင်မှာ X ရှိလဲ"). Anything else — or an AMBIGUOUS resolution — falls
+    through to the full agent.
+  - Intent detection is **regex**, tuned so **false negatives are fine, false
+    positives are not**: a wrong fast-path answer in a pharmacy is worse than a
+    slow one, so an unresolvable or ambiguous mention falls through rather than
+    guessing.
+  - Resolution (`resolver.py`) is zero-LLM, three layers cheapest-first: exact
+    article code → **`drug_alias`** table lookup → trigram similarity (GIN index).
+    The single phrasing agent has **no tools**, so it cannot fetch or invent a
+    number — it only restates the FACTS block.
+  - `drug_alias` exists (`migrations/0002_drug_alias.sql`) but **has no write path
+    yet** — nothing populates it, so the alias layer is currently always a miss
+    and resolution falls to trigram. Wiring the "pharmacist clarified → learn the
+    alias" write is the next step.
+- **The semantic answer cache is a KNOWN-BAD idea as built. Leave it OFF.**
+  (`semantic_cache_enabled`, `semantic_cache_threshold`, default OFF.) Measured on
+  `gemini-embedding-2`, whole-question cosine **cannot** separate "same question"
+  from "different strength": `"do I have Panadol"` scores **0.947** against
+  `"…Panadol 1g"` (a genuinely *different* product) but only **0.927** against
+  `"Do we have Panadol?"` (the *same* question). The dangerous pair is CLOSER than
+  the benign one — **no threshold is safe**, and a false hit serves the wrong
+  drug's stock. The fix is to **pin the resolved `article_code` into the cache
+  scope key** (via `resolver.py`) so strength variants land in different buckets.
+  Until that exists, keep it off.
+- The **router/answer split** (`router_split_enabled`, `router_model`, default
+  OFF) uses Agno's `output_model` (`agno/agent/agent.py:297`): the cheap
+  `router_model` drives the tool-selection loop, then the strong model regenerates
+  the final answer. It saves **COST, not latency** — the round trips remain.
+- `learning_enabled` defaults to **False** (config.py). When on, it adds
+  `num_history_runs=3` replays plus a second extraction model to every turn — this
+  is the single biggest driver of the baseline's p50 (see "Measured latency").
+- The exact answer cache key is `(data_version, model, store_id,
+  normalized_message)` — a SHA-256 hash, so near-miss phrasings do not hit. It is
+  free and ~3ms on a hit. The semantic layer above was the intended near-match
+  upgrade; it is unsafe as built.
 - A shared `lru_cache`'d Agno `Agent` **is** safe under concurrent `arun()` with
   different `session_id`s — `agno/agent/_session.py` only writes
   `agent.session_id` when it is `None`, and the app always passes one. Pinned by
@@ -174,9 +254,23 @@ Scope reaches tools via the `_STORE_SCOPE` contextvar. Never bypass
   `<svelte:component>` (deprecated). Use actions for delegated DOM handlers to
   stay a11y-clean (no inline `onclick` on static divs).
 - **Tailwind v4** with `@theme` tokens mapped to CSS vars (`--c-*`) for dark mode.
-  Use semantic classes: `bg-surface`, `text-ink`/`text-ink-2`/`text-ink-3`,
-  `border-line`, `bg-accent`, `*-soft`. `.elev` for card shadow. Serif headings via
-  `.page-title` (Fraunces). Burmese renders in Noto Sans Myanmar.
+  Use semantic classes: `bg-surface`/`bg-surface-2`, `text-ink`/`text-ink-2`/
+  `text-ink-3`, `border-line`, `bg-accent`, `*-soft`. `.elev` for card shadow.
+  Display headings via `.page-title` (**Space Grotesk**); body is **IBM Plex
+  Sans**; Burmese renders in Noto Sans Myanmar. **There are only two surface
+  levels** (`surface`, `surface-2`) — there is no `--color-surface-3` token. Any
+  `bg-surface-3` is a phantom that renders as no colour; repoint it to `bg-surface`
+  or `bg-surface-2`. Every colour class MUST resolve to a `--color-*` token in
+  `admin/src/app.css`.
+
+- **Design (teal rebrand).** The app was rebranded to a **teal** accent
+  (`--c-accent`) + Space Grotesk / IBM Plex Sans. **`text-on-accent` exists on
+  purpose:** in dark mode the accent lightens past ~70% L, where white text on it
+  fails AA contrast, so `--c-on-accent` flips dark. **NEVER put `text-white` on an
+  accent fill** — use `text-on-accent`. The design mock ships **light only**; the
+  entire **dark palette in `app.css` is DERIVED** (same hues, inverted lightness,
+  eased chroma) and has **NOT been reviewed by a human**. Treat dark-mode colour as
+  provisional.
 - **Admin API auth:** every `/admin/*` call needs a Bearer JWT. The layout's fetch
   wrapper injects it from `localStorage.auth_token`. A 401 shows as "backend
   offline" in the UI — usually a stale/expired token; re-login.

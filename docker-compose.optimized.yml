@@ -20,6 +20,10 @@ services:
   api:
     ports: !override
       - "8091:8000"
+    environment:
+      # The fast path is OFF by default everywhere. Turn it on here so the
+      # optimize stack can be benched against the baseline with it running.
+      FAST_PATH_ENABLED: "true"
 
   postgres:
     ports: !override
