@@ -14,13 +14,30 @@ SvelteKit admin SPA ("Aurora" UI) is served at `/admin`.
   Flash variants, A/B picker). Override with `OPENROUTER_MODEL` env.
 - **Embeddings:** `google/gemini-embedding-2` (3072-dim, pgvector, exact scan).
 
-## Status (2026-06-23)
+## Status (2026-07-09)
 
 **Functionally complete + running locally.** Services up (api/postgres/redis/sftp/
-ingest-worker healthy), real data loaded (5,292 catalog · 111,654 inventory, v22),
-38 tests pass. Aurora UI (Overview/Settings/Chat/Data), Claude-style chat with
+ingest-worker healthy), real data loaded (5,292 catalog · 111,654 inventory),
+47 tests pass. Aurora UI (Overview/Settings/Chat/Data), Claude-style chat with
 tool-use trace + rich rendering, redesigned Data page, GraphRAG, auth, embed API —
 all live + verified.
+
+**Git:** the repo went under version control on 2026-07-09. `main` holds the
+pre-optimization baseline (`1610801`); `feature/optimize` holds the speed +
+accuracy fixes (`27a4f94`). There is **no remote** — both commits are local only.
+
+**Pending code work (see "Optimization" below):**
+- **A3 — blocked, and it can mislead a pharmacist.** `stock_qty` and `price` are
+  `NOT NULL DEFAULT 0` (schema.sql:49-50), so a blank cell in the Excel export is
+  indistinguishable from "zero on hand". Needs a migration dropping `NOT NULL` so
+  `NULL` can mean *unknown*. Not done — schema change against 111k live rows.
+- **Nothing is benchmarked.** `evals/bench.py` (20 questions, EN + Burmese,
+  cold/warm, p50/p95, cache-hit rate) exists but has never run live — it is gated
+  behind `RUN_LIVE=1` and spends OpenRouter credit. There is no measured
+  before/after latency. Do not quote a speedup number until it runs.
+- **The container runs the OLD baked code.** Nothing on `feature/optimize` is live.
+- Not built: the deterministic fast path, the semantic answer cache, the
+  router/answer model split.
 
 **Blocking production (operator-only, NOT code):**
 1. Rotate the OpenRouter key (was shared in chat).
@@ -87,6 +104,7 @@ cd admin && npm run build          # production build (the api image bakes this)
 # Tests
 ./venv/bin/python -m pytest -q     # fast, no LLM, no network
 RUN_LIVE=1 ./venv/bin/python -m evals.run_eval   # live accuracy (costs $)
+RUN_LIVE=1 ./venv/bin/python -m evals.bench      # live latency p50/p95 (costs $)
 ```
 
 ## ⚠️ Deploy gotcha — backend code is BAKED into the image
@@ -103,6 +121,51 @@ until [ "$(curl -s -o /dev/null -w '%{http_code}' localhost:8088/health)" = 200 
 
 Admin SPA changes are picked up by the vite dev server (HMR) at :5173, but the
 docker-served `/admin` needs a rebuild.
+
+## ⚠️ Site scoping — always go through `_site_clause`
+
+A site token may be a full code (`20005-CCYK`), its numeric prefix (`20005`), or
+its alpha suffix (`CCYK`). **Never** match a site with `ILIKE '%' || $n || '%'`
+and never with bare `=`. Both have shipped as bugs:
+
+- `ILIKE '%x%'` on the *enforced* store scope let a prefix-shaped `store_id`
+  substring-match sibling branches — one store reading another's stock.
+- Bare `=` in `get_article_info` / `summarize_article` disagreed with
+  `get_stock`'s `_site_clause`, so the same store got "not stocked" from one tool
+  and a real quantity from another.
+
+`_site_clause(col, param)` (tools.py) is the only correct matcher. The one
+legitimate `ILIKE` on `site_code` is the **unscoped** branch of `list_sites`,
+where the token is a user's search string, not a scope.
+
+Scope reaches tools via the `_STORE_SCOPE` contextvar. Never bypass
+`set_store_scope`.
+
+## Optimization notes (2026-07-09)
+
+- **Provider is OpenRouter, always.** Do not propose a direct Google/OpenAI
+  client to shave the proxy hop. Win latency by deleting LLM round trips.
+- Per question the agent currently makes 2–3 sequential LLM calls (pick tool →
+  run → phrase). The intended fix is a deterministic fast path: resolve the drug
+  via the trigram GIN index + a `drug_alias` table (no LLM), run one SQL query,
+  then one LLM call purely to phrase the answer in the user's language.
+- `learning_enabled` now defaults to **False** (config.py). When on, it adds
+  `num_history_runs=3` replays plus a second extraction model to every turn.
+- The answer cache key is `(data_version, model, store_id, normalized_message)`.
+  It is an exact hash — near-miss phrasings do not hit. A semantic (embedding)
+  cache is the intended upgrade.
+- A shared `lru_cache`'d Agno `Agent` **is** safe under concurrent `arun()` with
+  different `session_id`s — `agno/agent/_session.py` only writes
+  `agent.session_id` when it is `None`, and the app always passes one. Pinned by
+  `tests/test_agent_concurrency.py`. Do not "fix" this by rebuilding agents.
+- Never call pandas (`read_excel`, `iterrows`) directly from an `async def` — it
+  blocks the event loop and freezes every concurrent chat for the whole parse.
+  Use `asyncio.to_thread`.
+- Refresh materialized views `CONCURRENTLY` (both have the required UNIQUE
+  index); a plain `REFRESH` takes `ACCESS EXCLUSIVE` and blocks all readers.
+- A catalog upsert must set `embedding = NULL` when the embedded source text
+  changes, or `embed_catalog(only_missing=True)` will keep answering semantic
+  searches from a stale vector.
 
 ## Conventions
 
