@@ -69,7 +69,10 @@ class Settings(BaseSettings):
     embed_in_background: bool = True   # don't block reload on embedding
 
     # ---- Agno self-learning (preferences-only memory; see agent.py) ----
-    learning_enabled: bool = True
+    # Off by default: enabling replays 3 prior runs into every prompt and runs a
+    # second extraction model per turn, so it adds latency + cost to the hot path
+    # (including trivial lookups). Flip to True via env to trade speed for memory.
+    learning_enabled: bool = False
     learning_model: str = "google/gemini-2.5-flash-lite"  # cheap extraction model
 
     # ---- MySQL source sync (pull the client's app DB -> our Postgres) ----

@@ -1,6 +1,6 @@
 """Agent tools for the CitCare pharmacy domain.
 
-These seven async tools form the agent's capabilities. The docstrings here are
+These twelve async tools form the agent's capabilities. The docstrings here are
 load-bearing — Agno surfaces them to the model as tool descriptions, so they
 describe behaviour precisely.
 
@@ -9,14 +9,19 @@ returns ``List[Dict]`` using asyncpg positional placeholders ($1, $2, ...).
 Numeric columns (price) arrive as ``Decimal`` from asyncpg and are converted to
 ``float`` here so the returned dicts are JSON-serializable.
 
-The seven tools:
-    1. get_article_info  - look up one article by its catalog code.
-    2. search_by_name    - fuzzy-search articles by (partial) product name.
-    3. get_stock         - current stock for an article, optionally per site.
-    4. top_by_stock      - top-N best-stocked articles at a site.
-    5. filter_by_price   - articles within a price range, optionally per site.
-    6. get_substitutes   - therapeutic / generic substitutes for an article.
-    7. summarize_article - one combined info + stock + price summary.
+The twelve tools:
+    1.  get_article_info         - look up one article by its catalog code.
+    2.  search_by_name           - fuzzy-search articles by (partial) product name.
+    3.  get_stock                - current stock for an article, optionally per site.
+    4.  top_by_stock             - top-N best-stocked articles at a site.
+    5.  filter_by_price          - articles within a price range, optionally per site.
+    6.  get_substitutes          - therapeutic / generic substitutes for an article.
+    7.  summarize_article        - one combined info + stock + price summary.
+    8.  search_by_meaning        - semantic (pgvector) search by need/symptom.
+    9.  related_drugs            - knowledge-graph traversal for related products.
+    10. drugs_for_same_condition - graph hop to products treating the same condition.
+    11. find_at_other_stores     - which OTHER branches stock an article.
+    12. list_sites               - resolve a named branch to a real site code.
 """
 
 from __future__ import annotations
@@ -141,7 +146,7 @@ async def get_article_info(code: str) -> List[Dict]:
           FROM inventory i
           LEFT JOIN catalog c USING (article_code)
          WHERE i.article_code = $1
-           AND ($2::text IS NULL OR i.site_code = $2)
+           AND ($2::text IS NULL OR """ + _site_clause("i.site_code", "$2") + """)
          ORDER BY i.site_code
         """,
         code,
@@ -187,8 +192,8 @@ async def search_by_name(name: str) -> List[Dict]:
         name: Full or partial product name (any language as stored).
 
     Returns:
-        A list of up to 25 matching articles (article_code, brand_name,
-        generic_name, category, pack_size), ordered by brand_name. Empty if
+        A list of up to 50 matching articles (article_code, brand_name,
+        generic_name, category), ordered by brand_name. Empty if
         nothing matches.
     """
 
@@ -344,7 +349,7 @@ async def get_substitutes(code: str) -> List[Dict]:
         code: The article/catalog code to find substitutes for (literal).
 
     Returns:
-        A list of candidate substitutes (article_code, brand_name, pack_size).
+        A list of candidate substitutes (article_code, brand_name, generic_name).
         Empty if the source article has no/empty generic_name or no other
         article shares its generic_name.
     """
@@ -400,7 +405,7 @@ async def summarize_article(code: str) -> Dict:
           FROM inventory i
           LEFT JOIN catalog c USING (article_code)
          WHERE i.article_code = $1
-           AND ($2::text IS NULL OR i.site_code = $2)
+           AND ($2::text IS NULL OR """ + _site_clause("i.site_code", "$2") + """)
          GROUP BY i.article_code, c.brand_name, c.generic_name
         """,
         code,
@@ -475,7 +480,7 @@ async def search_by_meaning(query: str, site: str = "") -> List[Dict]:
                AND EXISTS (
                    SELECT 1 FROM inventory i
                     WHERE i.article_code = c.article_code
-                      AND i.site_code ILIKE '%' || $2 || '%'
+                      AND """ + _site_clause("i.site_code", "$2") + """
                )
              ORDER BY c.embedding <=> $1::vector
              LIMIT 10
@@ -527,7 +532,7 @@ async def related_drugs(code: str, hops: int = 2, in_stock_site: str = "") -> Li
     codes = [r["article_code"] for r in rows]
     stock = await q(
         """SELECT article_code, stock_qty FROM inventory
-            WHERE site_code ILIKE '%' || $1 || '%' AND article_code = ANY($2)""",
+            WHERE """ + _site_clause("site_code", "$1") + """ AND article_code = ANY($2)""",
         site, codes,
     )
     smap = {s["article_code"]: s["stock_qty"] for s in stock}

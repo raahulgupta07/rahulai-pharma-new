@@ -79,33 +79,55 @@ async def bump_data_version() -> int:
 # ---- query-answer cache ----------------------------------------------------
 
 
-async def make_query_key(message: str, store_id: Optional[str]) -> str:
-    """Build a version-scoped cache key for one (message, store) pair.
+def _resolve_model(model: Optional[str]) -> str:
+    """Resolve a requested model id to the one the agent will actually use.
+
+    Mirrors ``agent.get_agent``: unknown/empty ids fall back to the configured
+    default, so the key matches the model that actually produced the answer.
+    """
+
+    from app.agent import ALLOWED_MODEL_IDS
+
+    return model if model in ALLOWED_MODEL_IDS else get_settings().openrouter_model
+
+
+async def make_query_key(
+    message: str, store_id: Optional[str], model: Optional[str] = None
+) -> str:
+    """Build a version-scoped cache key for one (message, store, model) triple.
 
     Normalises the message (strip + lowercase) so trivially-different phrasings
-    of the same question still hit. Includes data_version so a reload misses.
+    of the same question still hit. Includes data_version so a reload misses, and
+    the resolved chat model so answers from different models don't collide.
     """
 
     version = await get_data_version()
     norm = " ".join(message.strip().lower().split())
-    raw = f"{version}|{store_id or '*'}|{norm}"
+    resolved = _resolve_model(model)
+    raw = f"{version}|{resolved}|{store_id or '*'}|{norm}"
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     return f"pharmacy:qa:{digest}"
 
 
-async def get_cached_answer(message: str, store_id: Optional[str]) -> Optional[str]:
-    """Return a cached agent answer for this (message, store), or ``None``."""
+async def get_cached_answer(
+    message: str, store_id: Optional[str], model: Optional[str] = None
+) -> Optional[str]:
+    """Return a cached agent answer for this (message, store, model), or ``None``."""
 
-    return await get_cached(await make_query_key(message, store_id))
+    return await get_cached(await make_query_key(message, store_id, model))
 
 
 async def set_cached_answer(
-    message: str, store_id: Optional[str], answer: str, ttl: Optional[int] = None
+    message: str,
+    store_id: Optional[str],
+    answer: str,
+    ttl: Optional[int] = None,
+    model: Optional[str] = None,
 ) -> None:
-    """Cache an agent answer for this (message, store)."""
+    """Cache an agent answer for this (message, store, model)."""
 
     ttl = ttl if ttl is not None else get_settings().cache_ttl_seconds
-    await set_cached(await make_query_key(message, store_id), answer, ttl)
+    await set_cached(await make_query_key(message, store_id, model), answer, ttl)
 
 
 # ---- rate limiting ---------------------------------------------------------

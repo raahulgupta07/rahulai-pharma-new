@@ -17,6 +17,26 @@ from app.config import get_settings
 
 _URL = "https://openrouter.ai/api/v1/embeddings"
 
+_client: Optional[httpx.AsyncClient] = None
+
+
+def _get_client() -> httpx.AsyncClient:
+    """Return the shared async HTTP client (lazily created)."""
+
+    global _client
+    if _client is None:
+        _client = httpx.AsyncClient(timeout=60)
+    return _client
+
+
+async def close() -> None:
+    """Close the shared HTTP client and reset the global."""
+
+    global _client
+    if _client is not None:
+        await _client.aclose()
+        _client = None
+
 
 def _headers() -> dict:
     return {
@@ -29,18 +49,18 @@ async def embed_many(texts: List[str], batch_size: int = 64) -> List[List[float]
     """Embed a list of texts (batched). Returns one vector per input, in order."""
 
     model = get_settings().embedding_model
+    client = _get_client()
     out: List[List[float]] = []
-    async with httpx.AsyncClient(timeout=60) as client:
-        for i in range(0, len(texts), batch_size):
-            chunk = texts[i : i + batch_size]
-            r = await client.post(
-                _URL, headers=_headers(), json={"model": model, "input": chunk}
-            )
-            r.raise_for_status()
-            data = r.json()["data"]
-            # API may not preserve order; sort by index to be safe.
-            data.sort(key=lambda d: d.get("index", 0))
-            out.extend(d["embedding"] for d in data)
+    for i in range(0, len(texts), batch_size):
+        chunk = texts[i : i + batch_size]
+        r = await client.post(
+            _URL, headers=_headers(), json={"model": model, "input": chunk}
+        )
+        r.raise_for_status()
+        data = r.json()["data"]
+        # API may not preserve order; sort by index to be safe.
+        data.sort(key=lambda d: d.get("index", 0))
+        out.extend(d["embedding"] for d in data)
     return out
 
 
@@ -71,4 +91,4 @@ async def embed_query_cached(text: str) -> List[float]:
     return vec
 
 
-__all__ = ["embed_many", "embed_one", "embed_query_cached", "to_pgvector"]
+__all__ = ["embed_many", "embed_one", "embed_query_cached", "to_pgvector", "close"]

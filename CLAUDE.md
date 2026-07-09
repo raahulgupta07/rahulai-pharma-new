@@ -41,7 +41,7 @@ local-only UI prefs); a prod readiness-check script for items 1–6.
 SvelteKit admin (admin/)  ──serves──>  /admin  (built into the api image)
         │ fetch
         ▼
-FastAPI (app/api.py) :8088 ──> Agno agent (app/agent.py, 10 tools)
+FastAPI (app/api.py) :8088 ──> Agno agent (app/agent.py, 12 tools)
         │                            │
         ▼                            ▼
 Postgres 16 + pgvector         Redis (cache, sessions, rate limit)
@@ -60,8 +60,8 @@ The agent is a **router**: per question it picks among three retrieval modes —
 | Path | Role |
 |------|------|
 | `app/api.py` | FastAPI app, lifespan, auth routes, embed chat + **SSE stream** (`event: step` tool-trace, `event: result` rows, `data:` deltas) |
-| `app/agent.py` | `build_agent()` — OpenRouter model, 10 tools, bilingual system prompt |
-| `app/tools.py` | the 10 agent tools (store-scope contextvar) |
+| `app/agent.py` | `build_agent()` — OpenRouter model, 12 tools, bilingual system prompt |
+| `app/tools.py` | the 12 agent tools (store-scope contextvar) |
 | `app/admin.py` | admin router: catalog/inventory/categories, stores, conversations, graph, users, upload, sftp |
 | `app/auth.py` | users table, bcrypt, JWT, local + LDAP + OIDC, merge-by-email |
 | `app/graph.py` | `drug_edges`, `build_edges`, recursive `related()`, LLM `build_treats_edges` |

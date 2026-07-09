@@ -41,7 +41,14 @@ async def init_pool() -> asyncpg.Pool:
     global _pool
     if _pool is None:
         settings = get_settings()
-        _pool = await asyncpg.create_pool(dsn=settings.postgres_url)
+        # ~100 users, low RPS: a small pool is plenty. command_timeout caps any
+        # single query so one slow statement can't hold a connection forever.
+        _pool = await asyncpg.create_pool(
+            dsn=settings.postgres_url,
+            min_size=2,
+            max_size=20,
+            command_timeout=60,
+        )
     return _pool
 
 
@@ -111,7 +118,8 @@ async def run_sql_file(path: str) -> None:
         path: Filesystem path to the ``.sql`` file.
     """
 
-    script = Path(path).read_text(encoding="utf-8")
+    # Reading the file is blocking I/O; keep it off the event loop.
+    script = await asyncio.to_thread(Path(path).read_text, encoding="utf-8")
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(script)
@@ -194,25 +202,11 @@ def _coerce_float(value: object) -> float:
         return 0.0
 
 
-async def load_excel_to_postgres(
-    catalog_path: str, inventory_path: str
-) -> Dict[str, int]:
-    """Load catalog + inventory spreadsheets into Postgres.
+def _parse_excel_rows(catalog_path: str, inventory_path: str):
+    """Read both spreadsheets and build catalog + inventory row tuples.
 
-    Applies the schema, reads both Excel files with pandas, normalises and
-    coerces columns tolerantly (missing columns are skipped/defaulted), then
-    bulk-upserts the rows.
-
-    Args:
-        catalog_path: Path to the product catalog ``.xlsx``.
-        inventory_path: Path to the per-site inventory ``.xlsx``.
-
-    Returns:
-        Mapping ``{"catalog_rows": N, "inventory_rows": M}`` with the actual
-        row counts in each table afterwards.
+    Synchronous (pandas/CPU-bound) — call via a thread from async code.
     """
-
-    await apply_schema()
 
     catalog_df = _normalize_columns(pd.read_excel(catalog_path))
     inventory_df = _normalize_columns(pd.read_excel(inventory_path))
@@ -251,6 +245,34 @@ async def load_excel_to_postgres(
                 _coerce_str(row.get("uom")),
             )
         )
+
+    return catalog_rows, inventory_rows
+
+
+async def load_excel_to_postgres(
+    catalog_path: str, inventory_path: str
+) -> Dict[str, int]:
+    """Load catalog + inventory spreadsheets into Postgres.
+
+    Applies the schema, reads both Excel files with pandas, normalises and
+    coerces columns tolerantly (missing columns are skipped/defaulted), then
+    bulk-upserts the rows.
+
+    Args:
+        catalog_path: Path to the product catalog ``.xlsx``.
+        inventory_path: Path to the per-site inventory ``.xlsx``.
+
+    Returns:
+        Mapping ``{"catalog_rows": N, "inventory_rows": M}`` with the actual
+        row counts in each table afterwards.
+    """
+
+    await apply_schema()
+
+    # pandas read + row building is CPU-bound; keep it off the event loop.
+    catalog_rows, inventory_rows = await asyncio.to_thread(
+        _parse_excel_rows, catalog_path, inventory_path
+    )
 
     catalog_sql = """
         INSERT INTO catalog

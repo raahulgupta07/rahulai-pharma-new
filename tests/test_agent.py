@@ -13,7 +13,7 @@ from app.agent import TOOLS, build_agent
 from app.config import get_settings
 
 
-def test_agent_builds_with_seven_tools():
+def test_agent_builds_with_twelve_tools():
     agent = build_agent()
     assert type(agent).__name__ == "Agent"
     assert len(TOOLS) == 12

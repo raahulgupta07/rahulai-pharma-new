@@ -42,6 +42,7 @@ from app.cache import (
 )
 from app.config import get_settings
 from app.db import close_pool, counts, get_pool
+from app.embeddings import close as close_embeddings
 from app.ingest import reload_from_data_dir
 
 import logging
@@ -102,6 +103,7 @@ async def lifespan(_app: FastAPI):
     yield
     await close_pool()
     await close_client()
+    await close_embeddings()
 
 
 app = FastAPI(title="CitCare Pharmacy Agent", lifespan=lifespan)
@@ -388,17 +390,18 @@ async def _answer(
     store_id: Optional[str],
     user_id: Optional[str] = None,
     session_id: Optional[str] = None,
+    model: Optional[str] = None,
 ):
     """Run the agent for one message, force-scoped to ``store_id``.
 
     Returns ``(content, was_cached)``. Checks the Redis query cache first; on a
     miss runs the agent and caches the answer. ``user_id``/``session_id`` (when
-    given) drive Agno self-learning memory.
+    given) drive Agno self-learning memory. ``model`` selects the chat model.
     """
 
     from app import metrics
 
-    cached = await get_cached_answer(message, store_id)
+    cached = await get_cached_answer(message, store_id, model)
     if cached is not None:
         metrics.incr("cache_hits")
         return cached, True
@@ -414,12 +417,12 @@ async def _answer(
     try:
         metrics.incr("llm_calls")
         metrics.record_llm()
-        out = await get_agent().arun(prompt, **run_kw)
+        out = await get_agent(model).arun(prompt, **run_kw)
         content = getattr(out, "content", str(out))
     finally:
         reset_store_scope(token)
 
-    await set_cached_answer(message, store_id, content)
+    await set_cached_answer(message, store_id, content, model=model)
     return content, False
 
 
@@ -555,7 +558,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
     store_id = claims.get("store_id")
     user_id, session_id = _learn_ids(claims, req.session_id)
     t0 = _t.time()
-    content, was_cached = await _answer(req.message, store_id, user_id, session_id)
+    content, was_cached = await _answer(req.message, store_id, user_id, session_id, req.model)
     await log_chat(req.message, content, store_id, was_cached, int((_t.time() - t0) * 1000))
     return ChatResponse(content=content)
 
@@ -565,6 +568,9 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
     """Streaming chat over SSE — token deltas plus agent-activity step events."""
 
     claims = _claims(req.session_token)
+    rl_id = claims.get("uid") or claims.get("store_id") or claims.get("embed_id") or "anon"
+    if not await check_rate_limit(str(rl_id)):
+        raise HTTPException(status_code=429, detail="rate limit exceeded")
     store_id = claims.get("store_id")
     user_id, session_id = _learn_ids(claims, req.session_id)
 
@@ -574,9 +580,18 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
         from app.admin import log_chat
         from app import metrics
 
+        t0 = _t.time()
+        cached = await get_cached_answer(req.message, store_id, req.model)
+        if cached is not None:
+            metrics.incr("cache_hits")
+            yield f"data: {json.dumps({'delta': cached})}\n\n"
+            await log_chat(req.message, cached, store_id, True, int((_t.time() - t0) * 1000))
+            yield "data: [DONE]\n\n"
+            return
+        metrics.incr("cache_misses")
+
         scope = set_store_scope(store_id)
         full = ""
-        t0 = _t.time()
         metrics.incr("llm_calls")
         metrics.record_llm()
         try:
@@ -625,6 +640,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             reset_store_scope(scope)
             if full:
                 await log_chat(req.message, full, store_id, False, int((_t.time() - t0) * 1000))
+                await set_cached_answer(req.message, store_id, full, model=req.model)
             yield "data: [DONE]\n\n"
 
     return StreamingResponse(gen(), media_type="text/event-stream")

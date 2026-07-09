@@ -1,7 +1,7 @@
-"""Agno agent wiring: OpenRouter model + 7 tools + bilingual EN/Burmese system prompt.
+"""Agno agent wiring: OpenRouter model + 12 tools + bilingual EN/Burmese system prompt.
 
 Builds the configured Agno agent: an OpenRouter chat model (id + key from
-:func:`app.config.get_settings`), the seven pharmacy tools from
+:func:`app.config.get_settings`), the twelve pharmacy tools from
 :mod:`app.tools`, and the :data:`BILINGUAL_SYSTEM_PROMPT`.
 """
 
@@ -227,7 +227,7 @@ def build_agent(model_id: str | None = None) -> Agent:
     model = OpenRouter(
         id=model_id or settings.openrouter_model,
         api_key=settings.openrouter_api_key,
-        max_tokens=1200,   # cap runaway generation; concise answers (see RESPONSE STYLE)
+        max_tokens=2048,   # room for a full substitute list (see RESPONSE STYLE exception); still caps essays
     )
     return Agent(
         model=model,
@@ -263,7 +263,7 @@ def build_learning_agent(model_id: str | None = None) -> Agent:
         model = OpenRouter(
             id=model_id or settings.openrouter_model,
             api_key=settings.openrouter_api_key,
-            max_tokens=1200,   # cap runaway generation; concise answers (see RESPONSE STYLE)
+            max_tokens=2048,   # room for a full substitute list (see RESPONSE STYLE exception); still caps essays
         )
         lm = LearningMachine(
             db=db,

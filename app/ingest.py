@@ -18,6 +18,7 @@ Inventory load uses asyncpg ``copy_records_to_table`` so 100k+ rows load fast.
 
 from __future__ import annotations
 
+import asyncio
 import math
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -163,15 +164,22 @@ def parse_inventory(path: str) -> List[Tuple]:
 async def ingest_catalog(path: str) -> int:
     """Upsert catalog rows (merge: add new, update existing). Returns row count."""
 
-    rows = parse_catalog(path)
+    # Parsing 100k+ rows with pandas is CPU-bound; keep it off the event loop.
+    rows = await asyncio.to_thread(parse_catalog, path)
     if not rows:
         return 0
     cols = ", ".join(_CATALOG_FIELDS)
     placeholders = ", ".join(f"${i+1}" for i in range(len(_CATALOG_FIELDS)))
     updates = ", ".join(f"{f} = EXCLUDED.{f}" for f in _CATALOG_FIELDS if f != "article_code")
+    # Reset the vector to NULL only when embedded source text actually changed,
+    # so embed_catalog(only_missing=True) re-embeds it. IS DISTINCT FROM treats
+    # NULLs sanely; unchanged rows keep their embedding (no needless re-embed).
+    _EMBED_SRC = ("brand_name", "generic_name", "composition", "indication")
+    changed = " OR ".join(f"catalog.{f} IS DISTINCT FROM EXCLUDED.{f}" for f in _EMBED_SRC)
     sql = (
         f"INSERT INTO catalog ({cols}) VALUES ({placeholders}) "
-        f"ON CONFLICT (article_code) DO UPDATE SET {updates}"
+        f"ON CONFLICT (article_code) DO UPDATE SET {updates}, "
+        f"embedding = CASE WHEN {changed} THEN NULL ELSE catalog.embedding END"
     )
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -186,7 +194,7 @@ async def ingest_inventory(path: str) -> int:
     Returns inventory row count.
     """
 
-    records = parse_inventory(path)
+    records = await asyncio.to_thread(parse_inventory, path)
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -202,11 +210,17 @@ async def ingest_inventory(path: str) -> int:
 async def refresh_views() -> None:
     """Refresh materialized views after a data change (best-effort)."""
 
+    # CONCURRENTLY avoids the ACCESS EXCLUSIVE lock that blocks all readers,
+    # but it is illegal until the MV has been populated once (both MVs are
+    # created WITH NO DATA). Fall back to a plain refresh in that case.
     for mv in ("mv_store_summary", "mv_article_summary"):
         try:
-            await execute(f"REFRESH MATERIALIZED VIEW {mv}")
-        except Exception:  # noqa: BLE001 - view may not exist yet
-            pass
+            await execute(f"REFRESH MATERIALIZED VIEW CONCURRENTLY {mv}")
+        except Exception:  # noqa: BLE001 - not yet populated, or view missing
+            try:
+                await execute(f"REFRESH MATERIALIZED VIEW {mv}")
+            except Exception:  # noqa: BLE001 - view may not exist yet
+                pass
 
 
 async def backfill_catalog_stubs() -> int:
@@ -238,8 +252,9 @@ async def embed_catalog(only_missing: bool = True, batch_size: int = 64) -> int:
     Builds a text blob (brand + generic + composition + indication) per article
     and stores its gemini-embedding-2 vector. Skips stub rows (brand == code,
     no clinical text) — embedding a bare code adds no semantic value. When
-    ``only_missing`` is True, only rows with NULL embedding are processed, so
-    daily reloads re-embed just new/changed articles.
+    ``only_missing`` is True, only rows with NULL embedding are processed. The
+    catalog upsert resets embedding to NULL whenever the embedded source text
+    changes, so daily reloads re-embed exactly the new and changed articles.
 
     Returns the number of rows embedded.
     """
