@@ -48,8 +48,75 @@ from app.embeddings import close as close_embeddings
 from app.ingest import reload_from_data_dir
 
 import logging
+import re as _re
 
 logger = logging.getLogger("pharmacy.api")
+
+_MY_CHARS = _re.compile(r"[က-႟]")   # Burmese block
+
+
+def _step_detail(tool_args) -> str:
+    """A short, human detail for a tool step, pulled from its arguments.
+
+    Turns three identical 'Looking up article info' rows into distinct lines
+    ('Looking up RELYTE', 'Searching for fever medicine'). Store scope is not in
+    the args (it rides a contextvar), so nothing leaks a sibling branch here.
+    """
+
+    if not isinstance(tool_args, dict):
+        return ""
+    for k in ("query", "name", "mention", "term", "condition", "keyword"):
+        v = tool_args.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()[:48]
+    for k in ("code", "article_code"):
+        v = tool_args.get(k)
+        if v:
+            return str(v)[:20]
+    for k in ("store", "store_id", "site"):
+        v = tool_args.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()[:20]
+    return ""
+
+
+def _plan_line(message: str) -> str:
+    """A one-line plan for the answer, chosen by intent from the question.
+
+    Template, not a model call: it reads like a plan without adding a round trip
+    on a stack where per-call LLM cost dominates latency. Bilingual to match the
+    question. Deliberately honest and generic — it says what the agent is about
+    to do, it does not promise a specific finding.
+    """
+
+    m = (message or "").strip()
+    if not m:
+        return ""
+    my = bool(_MY_CHARS.search(m))
+    low = m.lower()
+
+    def has(*words):
+        return any(w in low for w in words) or any(w in m for w in words)
+
+    if has("price", "cost", "ဈေး", "စျေး", "ဈေးနှုန်း"):
+        return "ဈေးနှုန်းရှာဖွေပြီး ဆိုင်များအလိုက် နှိုင်းယှဉ်ပါမည်။" if my \
+            else "I'll find the item, then read its price across branches."
+    if has("substitute", "alternative", "instead", "အစား", "အစားထိုး"):
+        return "ရောဂါတူ/ဆေးတူ အစားထိုးများ ရှာဖွေပါမည်။" if my \
+            else "I'll identify the drug, then find substitutes for the same use."
+    if has("branch", "store", "which shop", "where", "ဆိုင်", "ဘယ်မှာ", "ဘယ်ဆိုင်"):
+        return "ဆေးကို ဖော်ထုတ်ပြီး ဆိုင်များအလိုက် လက်ကျန်စစ်ပါမည်။" if my \
+            else "I'll resolve the item, then check stock at each branch."
+    # symptom before plain "have/stock": "medicine for fever" is a need, not a
+    # named item, so the condition search is the more honest plan.
+    if has("fever", "pain", "cough", "cold", "headache", "ဖျား", "အဖျား", "ချောင်း", "ဝေဒနာ"):
+        return "ရောဂါလက္ခဏာအတွက် သင့်လျော်သောဆေးများ ရှာဖွေပါမည်။" if my \
+            else "I'll look for medicines that treat this, then check what's in stock."
+    if has("stock", "have", "available", "ရှိ", "လက်ကျန်"):
+        return "ဆေးကို ရှာဖွေပြီး လက်ကျန်ပမာဏ စစ်ဆေးပါမည်။" if my \
+            else "I'll match the item in the catalog, then check its stock."
+    return "မေးခွန်းကို နားလည်ပြီး ဒေတာဘေ့စ်တွင် ရှာဖွေပါမည်။" if my \
+        else "I'll interpret the question, then search the catalog and stock."
 from app.security import (
     create_session_token,
     decode_session_token,
@@ -751,6 +818,13 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 return
         metrics.incr("cache_misses")
 
+        # A one-line plan up front (template, no LLM call) — the agentic "here's
+        # what I'll do" beat before any tool runs. Additive SSE event; consumers
+        # that don't know it (the embed widget) ignore it.
+        plan = _plan_line(req.message)
+        if plan:
+            yield f"event: plan\ndata: {json.dumps({'text': plan})}\n\n"
+
         # See _answer(): pin the version we answer against, so an ingest that
         # lands mid-stream invalidates this answer instead of being masked by it.
         version = await get_data_version()
@@ -760,7 +834,11 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
         if get_settings().fast_path_enabled and not follow_up:
             facts = await fastpath.answer(req.message, store_id)
             if facts is not None:
-                step = json.dumps({"label": facts["tool"], "icon": "search"})
+                _detail = facts.get("brand_name") or facts.get("mention") or ""
+                step = json.dumps({
+                    "label": facts["tool"], "icon": "search",
+                    "args": {"name": _detail} if _detail else {},
+                })
                 yield f"event: step\ndata: {step}\n\n"
                 rows = fastpath.result_rows(facts)
                 if rows:
@@ -810,8 +888,13 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             ):
                 name = type(event).__name__
                 if name == "ToolCallStartedEvent":
-                    tool = getattr(getattr(event, "tool", None), "tool_name", "") or ""
-                    frame = json.dumps({"label": tool or "Searching", "icon": "search"})
+                    tobj = getattr(event, "tool", None)
+                    tool = getattr(tobj, "tool_name", "") or ""
+                    detail = _step_detail(getattr(tobj, "tool_args", None))
+                    frame = json.dumps({
+                        "label": tool or "Searching", "icon": "search",
+                        "args": {"detail": detail} if detail else {},
+                    })
                     yield f"event: step\ndata: {frame}\n\n"
                 elif name == "ToolCallCompletedEvent":
                     # forward the structured tool result (list of rows) so the UI

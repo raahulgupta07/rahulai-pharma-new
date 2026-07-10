@@ -436,6 +436,33 @@
     return TOOL_LABELS[raw] ?? raw.replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase());
   }
 
+  // Rich, distinct step text: the tool's argument folded into the phrase, so
+  // three lookups read as three different lines instead of the same label ×3.
+  const STEP_TPL = {
+    search_by_meaning: (d) => (d ? `Searching for “${d}”` : 'Searching by meaning'),
+    search_by_name: (d) => (d ? `Searching for “${d}”` : 'Searching by name'),
+    get_article_info: (d) => (d ? `Looking up ${d}` : 'Looking up article info'),
+    summarize_article: (d) => (d ? `Summarizing ${d}` : 'Summarizing article'),
+    get_stock: (d) => (d ? `Checking stock of ${d}` : 'Checking stock levels'),
+    top_by_stock: () => 'Ranking by stock',
+    filter_by_price: () => 'Filtering by price',
+    get_substitutes: (d) => (d ? `Finding substitutes for ${d}` : 'Finding substitutes'),
+    related_drugs: () => 'Tracing the drug graph',
+    drugs_for_same_condition: (d) => (d ? `Finding drugs for ${d}` : 'Finding drugs for the condition'),
+    find_at_other_stores: () => 'Checking other branches'
+  };
+  function stepText(s) {
+    const raw = typeof s === 'string' ? s : s?.label;
+    const d = typeof s === 'string' ? '' : s?.detail || '';
+    const base = STEP_TPL[raw] ? STEP_TPL[raw](d) : stepLabel(raw);
+    const n = typeof s !== 'string' && s?.count > 1 ? ` ×${s.count}` : '';
+    return base + n;
+  }
+  function fmtSecs(ms) {
+    if (!ms && ms !== 0) return '';
+    return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)}s`;
+  }
+
   async function scrollDown() {
     await tick();
     if (scroller) scroller.scrollTop = scroller.scrollHeight;
@@ -469,7 +496,7 @@
     thread.messages = [
       ...thread.messages,
       { role: 'user', text: msg },
-      { role: 'bot', text: '', steps: [], results: [], modelName: curModel?.name ?? '' }
+      { role: 'bot', text: '', plan: '', steps: [], results: [], modelName: curModel?.name ?? '' }
     ];
     threads = threads; // trigger
     const idx = thread.messages.length - 1;
@@ -516,16 +543,33 @@
           if (!data || data === '[DONE]') continue;
           try {
             const j = JSON.parse(data);
-            if (evt === 'step') {
-              // agent tool-use trace (Claude-style "working" steps)
-              const steps = [...(thread.messages[idx].steps ?? []), { label: j.label, icon: j.icon }];
+            if (evt === 'plan') {
+              // one-line "here's what I'll do" before any tool runs
+              thread.messages[idx] = { ...thread.messages[idx], plan: j.text || '' };
+              threads = threads;
+              await scrollDown();
+            } else if (evt === 'step') {
+              // agent tool-use trace (Claude-style "working" steps). Carry the
+              // tool's argument as `detail` so repeated lookups read distinctly,
+              // and fold an identical consecutive step into a xN count.
+              const detail = j.args?.detail || j.args?.name || '';
+              const steps = [...(thread.messages[idx].steps ?? [])];
+              const last = steps[steps.length - 1];
+              if (last && last.label === j.label && last.detail === detail) {
+                steps[steps.length - 1] = { ...last, count: (last.count ?? 1) + 1 };
+              } else {
+                steps.push({ label: j.label, icon: j.icon, detail, count: 1, rows: null });
+              }
               thread.messages[idx] = { ...thread.messages[idx], steps };
               threads = threads;
               await scrollDown();
             } else if (evt === 'result') {
-              // structured rows the agent's tool returned
+              // structured rows the agent's tool returned; also tag the row count
+              // onto the step it belongs to, for the "· N rows" trace hint.
               const results = [...(thread.messages[idx].results ?? []), { tool: j.tool, rows: j.rows }];
-              thread.messages[idx] = { ...thread.messages[idx], results };
+              const steps = [...(thread.messages[idx].steps ?? [])];
+              if (steps.length) steps[steps.length - 1] = { ...steps[steps.length - 1], rows: j.rows?.length ?? null };
+              thread.messages[idx] = { ...thread.messages[idx], results, steps };
               threads = threads;
             } else if (j.delta) {
               full += j.delta;
@@ -744,6 +788,14 @@
                 <div class="min-w-0 flex-1">
                   <div class="mb-1.5 text-[13px] font-semibold text-ink-2">City Pharma Agent</div>
 
+                  {#if m.plan && m.text === ''}
+                    <!-- the plan up front: "here's what I'll do" -->
+                    <div class="mb-2 flex items-start gap-1.5 text-[13px] italic text-ink-2">
+                      <Sparkles size={13} class="mt-0.5 shrink-0 text-accent-2" />
+                      <span>{m.plan}</span>
+                    </div>
+                  {/if}
+
                   {#if m.steps?.length}
                     {#if m.text === ''}
                       <!-- live tool-use trace while the agent works -->
@@ -758,7 +810,10 @@
                             {:else}
                               <Check size={14} class="text-success" />
                             {/if}
-                            <span>{stepLabel(s.label)}</span>
+                            <span class="flex-1">{stepText(s)}</span>
+                            {#if s.rows != null}
+                              <span class="text-[11px] tabular-nums text-ink-3">{s.rows} row{s.rows === 1 ? '' : 's'}</span>
+                            {/if}
                           </div>
                         {/each}
                       </div>
@@ -768,13 +823,21 @@
                         <summary class="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-[12.5px] font-medium text-ink-2">
                           <ChevronRight size={14} class="transition-transform group-open/d:rotate-90" />
                           <Wrench size={13} class="text-accent" />
-                          Looked up {m.steps.length} source{m.steps.length > 1 ? 's' : ''}
+                          Worked for {fmtSecs(m.latencyMs)} · {m.steps.length} step{m.steps.length > 1 ? 's' : ''}
                         </summary>
                         <div class="px-3 pb-2.5">
+                          {#if m.plan}
+                            <div class="mb-1.5 flex items-start gap-1.5 py-0.5 text-[12.5px] italic text-ink-3">
+                              <Sparkles size={12} class="mt-0.5 shrink-0" />{m.plan}
+                            </div>
+                          {/if}
                           {#each m.steps as s}
                             <div class="flex items-center gap-2 py-0.5 text-[12.5px] text-ink-2">
                               <Check size={13} class="text-success" />
-                              {stepLabel(s.label)}
+                              <span class="flex-1">{stepText(s)}</span>
+                              {#if s.rows != null}
+                                <span class="text-[11px] tabular-nums text-ink-3">{s.rows} row{s.rows === 1 ? '' : 's'}</span>
+                              {/if}
                             </div>
                           {/each}
                           {#if m.results?.length}
