@@ -413,6 +413,35 @@ def _scoped_message(message: str, store_id: Optional[str]) -> str:
     return "\n".join(lines) + f"\n\n{message}"
 
 
+async def _remember(
+    client_session: Optional[str],
+    model: Optional[str],
+    session_id: Optional[str],
+    user_id: Optional[str],
+    question: str,
+    answer: str,
+) -> None:
+    """Record a turn that no agent run wrote for us.
+
+    The fast path answers with a tool-less phrasing agent, and a cache hit runs
+    no agent at all — neither leaves a trace in the conversation. Without this,
+    those turns are invisible to the next one, and "which other shop has it?"
+    has nothing to resolve "it" against.
+
+    Only for real conversations; a client without a session_id has no history to
+    keep. Best-effort: ``record_turn`` never raises.
+    """
+
+    if not _conversational(client_session):
+        return
+    from app.history import record_turn
+
+    # Write through the SAME agent that will later read the history back.
+    await record_turn(
+        get_agent(model, with_history=True), session_id, user_id, question, answer
+    )
+
+
 def _conversational(client_session: Optional[str]) -> bool:
     """True when this client keeps a multi-turn conversation we must preserve.
 
@@ -472,6 +501,9 @@ async def _answer(
         cached = await get_cached_answer(message, store_id, model)
         if cached is not None:
             metrics.incr("cache_hits")
+            # A cache hit runs no agent, so nothing would record this turn and
+            # the NEXT turn would not know it happened.
+            await _remember(client_session, model, session_id, user_id, message, cached)
             return cached, True
     metrics.incr("cache_misses")
 
@@ -480,15 +512,11 @@ async def _answer(
     # filing stale stock under the new version.
     version = await get_data_version()
 
-    # The fast path is STATELESS: it answers with its own tool-less phrasing
-    # agent, which has no db and no session, so its turn is never written to the
-    # conversation. Let it answer turn 1 of a conversation and turn 2 reads an
-    # empty history — "which other shop?" then has no idea what "it" is.
-    #
-    # So a client that keeps a conversation does not get the fast path. Clients
-    # that don't (the embed widget, the benchmarks) keep it and stay fast. The
-    # ~1.3s it saves is not worth a chat that forgets what it just said.
-    if get_settings().fast_path_enabled and not _conversational(client_session):
+    # The fast path's phrasing agent has no db and no session, so it records
+    # nothing. A follow-up also names no drug, so it could not be resolved from
+    # this message alone. Hence: fast path only for self-contained turns, and we
+    # write the turn into the conversation ourselves afterwards.
+    if get_settings().fast_path_enabled and not follow_up:
         facts = await fastpath.answer(message, store_id)
         if facts is not None:
             phrase_prompt = fastpath.build_phrasing_input(
@@ -499,6 +527,7 @@ async def _answer(
             out = await fastpath.get_phrasing_agent(model).arun(phrase_prompt)
             content = getattr(out, "content", str(out))
             await set_cached_answer(message, store_id, content, model=model, version=version)
+            await _remember(client_session, model, session_id, user_id, message, content)
             return content, False
 
     prompt = _scoped_message(message, store_id)
@@ -687,6 +716,10 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 metrics.incr("cache_hits")
                 yield f"data: {json.dumps({'delta': cached})}\n\n"
                 await log_chat(req.message, cached, store_id, True, int((_t.time() - t0) * 1000))
+                # No agent ran; record the turn or the next one cannot see it.
+                await _remember(
+                    req.session_id, req.model, session_id, user_id, req.message, cached
+                )
                 yield "data: [DONE]\n\n"
                 return
         metrics.incr("cache_misses")
@@ -695,9 +728,9 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
         # lands mid-stream invalidates this answer instead of being masked by it.
         version = await get_data_version()
 
-        # See _answer(): the fast path never records its turn, so a conversation
-        # that used it would forget the turn it just answered.
-        if get_settings().fast_path_enabled and not _conversational(req.session_id):
+        # See _answer(): fast path only for self-contained turns; we record the
+        # turn ourselves afterwards, since its phrasing agent never does.
+        if get_settings().fast_path_enabled and not follow_up:
             facts = await fastpath.answer(req.message, store_id)
             if facts is not None:
                 step = json.dumps({"label": facts["tool"], "icon": "search"})
@@ -727,6 +760,9 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     await log_chat(req.message, full, store_id, False, int((_t.time() - t0) * 1000))
                     await set_cached_answer(
                         req.message, store_id, full, model=req.model, version=version
+                    )
+                    await _remember(
+                        req.session_id, req.model, session_id, user_id, req.message, full
                     )
                 yield "data: [DONE]\n\n"
                 return

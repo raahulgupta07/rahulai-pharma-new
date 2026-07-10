@@ -329,6 +329,11 @@ def build_learning_agent(model_id: str | None = None) -> Agent:
         return build_agent(model_id)
 
 
+# Stable across processes and restarts, so a session written by one worker is
+# readable by another. See the comment in build_history_agent.
+HISTORY_AGENT_ID = "city-pharma-agent"
+
+
 def build_history_agent(model_id: str | None = None) -> Agent:
     """A plain agent that can see the last few turns of its own conversation.
 
@@ -358,6 +363,11 @@ def build_history_agent(model_id: str | None = None) -> Agent:
         )
         return Agent(
             model=model,
+            # A STABLE id, not the uuid Agno invents per process. AgentSession
+            # .from_dict only revives a stored run when the key "agent_id" is
+            # present, and to_dict drops it when it is None — so a run written
+            # without one is persisted and then silently ignored on read.
+            id=HISTORY_AGENT_ID,
             tools=TOOLS,
             system_message=BILINGUAL_SYSTEM_PROMPT,
             markdown=True,
