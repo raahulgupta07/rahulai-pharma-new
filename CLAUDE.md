@@ -298,6 +298,42 @@ resolves the drug from the message alone, and a follow-up names none.
 one function; every failure degrades to "the chat forgot this turn", never a
 failed answer. Re-verify after any agno upgrade.
 
+## ⚠️ SSO/LDAP already exist — and shipped with two auth bypasses
+
+`app/auth.py` has had Keycloak OIDC and LDAP since the baseline commit. Don't
+rebuild them. Both are off by default (`OIDC_ENABLED`, `LDAP_ENABLED`), which is
+the only reason the bypasses below were never exploitable. Operator guide:
+`docs/SSO.md`.
+
+**An empty LDAP password authenticates.** A simple bind with a valid DN and a
+zero-length password is an *unauthenticated simple bind* (RFC 4513 §5.1.2), and
+OpenLDAP and AD answer **success**. `login_ldap` rejects blank passwords before
+binding. `/auth/login` falls through to LDAP whenever local auth fails, so any
+provisioned email was reachable this way.
+
+**`ldap3.Connection` is always truthy.** It defines neither `__bool__` nor
+`__len__`. The original `if not ldap3.Connection(..., auto_bind=True)` was dead
+code; a wrong password only failed because `auto_bind=True` *raised* — and
+`LDAPBindError` is not `AuthError`, so it escaped as a 500. Bind explicitly with
+`auto_bind=False` and check `.bound`.
+
+**OIDC `state` was the constant `"citcare"` and was never read.** That is
+login-CSRF: replay your own `code` at a victim's callback and their browser is
+signed into your account. Now a signed, time-boxed nonce, matched against an
+httponly cookie (`SameSite=lax` — `strict` is not sent on the IdP's redirect back).
+
+**The SSO token rides back in the URL *fragment*, not a query param.** Fragments
+never reach a server, so the token stays out of access logs and `Referer`. The SPA
+scrubs it via `history.replaceState` on read.
+
+`id_token` signatures are deliberately not verified: the code is redeemed over TLS
+against `token_endpoint` authenticated with `client_secret`, and the profile comes
+from `userinfo`. **Make the Keycloak client public (no secret) and that reasoning
+collapses** — you'd then have to verify against the realm JWKS.
+
+Roles live in the `users` table, never in the token, and `_merge_external` never
+INSERTs. So a Keycloak realm admin cannot mint a pharmacy admin. Keep it that way.
+
 ## ⚠️ Product names contain backticks
 
 2,790 of 5,292 catalog rows use a backtick as an apostrophe (`PARACAP

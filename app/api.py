@@ -23,7 +23,7 @@ import json
 from typing import Any, Dict, Optional
 
 import jwt
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -254,22 +254,40 @@ async def sso_login():
     from fastapi.responses import RedirectResponse
 
     try:
-        url = await authmod.oidc_authorize_url(state="citcare")
+        state, nonce = authmod.make_state()
+        url = await authmod.oidc_authorize_url(state=state)
     except authmod.AuthError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    return RedirectResponse(url)
+
+    resp = RedirectResponse(url)
+    # SameSite=lax, not strict: the browser arrives back here via Keycloak's
+    # top-level redirect, and a strict cookie would not be sent on that request.
+    resp.set_cookie(
+        authmod.SSO_NONCE_COOKIE, nonce,
+        max_age=get_settings().oidc_state_ttl_seconds,
+        httponly=True, samesite="lax", secure=get_settings().cookie_secure, path="/auth",
+    )
+    return resp
 
 
 @app.get("/auth/sso/callback")
-async def sso_callback(code: str = "", state: str = ""):
+async def sso_callback(request: Request, code: str = "", state: str = ""):
     from fastapi.responses import RedirectResponse
 
     try:
+        # Proves this callback belongs to a login *this browser* started.
+        authmod.verify_state(state, request.cookies.get(authmod.SSO_NONCE_COOKIE, ""))
         result = await authmod.oidc_callback(code)
     except authmod.AuthError as exc:
         raise HTTPException(status_code=401, detail=str(exc))
-    # hand the token to the SPA via URL fragment
-    return RedirectResponse(f"/?sso_token={result['token']}")
+
+    # Hand the token to the SPA in the URL *fragment*. A fragment is never sent
+    # to a server, so it stays out of access logs and out of the Referer header
+    # on the SPA's next request — unlike the ?sso_token= query param this used to
+    # use. The SPA strips it from the address bar immediately on read.
+    resp = RedirectResponse(f"/admin#sso_token={result['token']}")
+    resp.delete_cookie(authmod.SSO_NONCE_COOKIE, path="/auth")  # single use
+    return resp
 
 
 from app.admin import router as admin_router  # noqa: E402

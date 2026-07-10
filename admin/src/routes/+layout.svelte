@@ -34,13 +34,16 @@
 
   const API = API_BASE;
 
-  // capture SSO token handed back via ?sso_token= (Keycloak callback redirect)
+  // Capture the SSO token handed back in the URL *fragment* (#sso_token=…) by the
+  // Keycloak callback. A fragment never reaches a server, so the token stays out
+  // of access logs and Referer headers. Scrub it from the address bar at once so
+  // it does not linger in browser history.
   if (browser) {
-    const p = new URLSearchParams(location.search);
-    const sso = p.get('sso_token');
+    const frag = new URLSearchParams(location.hash.replace(/^#/, ''));
+    const sso = frag.get('sso_token');
     if (sso) {
       localStorage.setItem('auth_token', sso);
-      history.replaceState({}, '', location.pathname);
+      history.replaceState({}, '', location.pathname + location.search);
     }
   }
 

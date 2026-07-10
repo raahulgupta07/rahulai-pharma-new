@@ -42,7 +42,11 @@ class Settings(BaseSettings):
     ldap_enabled: bool = False
     ldap_host: str = ""
     ldap_port: int = 389
-    ldap_use_ssl: bool = False
+    ldap_use_ssl: bool = False      # LDAPS on connect (port 636). Prefer this or start_tls.
+    ldap_start_tls: bool = False    # StartTLS on a plaintext port (389). Ignored if use_ssl.
+    ldap_validate_cert: bool = True  # verify the directory's TLS cert. OFF = MITM-able.
+    ldap_ca_cert_file: str = ""     # PEM bundle for a private CA; "" = system trust store
+    ldap_timeout_seconds: int = 8   # connect + receive; ldap3 is sync, so this bounds the thread
     ldap_bind_dn: str = ""          # service account to search with
     ldap_bind_password: str = ""
     ldap_base_dn: str = ""          # e.g. ou=users,dc=corp,dc=com
@@ -58,6 +62,12 @@ class Settings(BaseSettings):
     oidc_client_secret: str = ""
     oidc_redirect_uri: str = ""     # .../auth/sso/callback
     oidc_scopes: str = "openid email profile"
+    oidc_discovery_ttl_seconds: int = 300   # cache the well-known doc; 0 disables caching
+    oidc_state_ttl_seconds: int = 600       # how long a login may sit at the Keycloak form
+
+    # Set true once the app is behind TLS: marks the SSO state cookie Secure.
+    # Left false by default because the dev stack is plain http on :8088/:8091.
+    cookie_secure: bool = False
     data_dir: str = "data"          # where reload looks for article*/balance* xlsx
     incoming_dir: str = "data/incoming"   # SFTP drop dir the watcher ingests from
     watch_interval_seconds: int = 15      # poll cadence for the ingest watcher
