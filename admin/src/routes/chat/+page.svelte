@@ -101,62 +101,68 @@
     return { destroy: () => node.removeEventListener('click', h) };
   }
 
-  // ---- follow-up chips -------------------------------------------------------
-  // These used to drop a half-finished sentence ("compare prices of ") into the
-  // composer and leave the user to type the subject. They now read the article
-  // codes out of the answer's own tool results and send a complete question, so
-  // a chip is one click. A chip that has no subject to act on is not rendered.
+  // ---- follow-up questions ---------------------------------------------------
+  // Not action buttons — actual suggested QUESTIONS, the way ChatGPT/Perplexity
+  // show them: a full sentence you can click to ask. They are derived from the
+  // answer's own tool results (the subject drug + whether branches were already
+  // listed) and phrased in the answer's language — no LLM call, so they add
+  // zero latency on a stack where per-call cost dominates. The chip label IS the
+  // text we send, so the user's own bubble reads exactly what they clicked.
 
   const MY_RE = /[က-႟]/; // Burmese block
 
-  /** Article codes the agent actually returned for this message. */
-  function codesFrom(msg) {
-    const codes = new Set();
+  /** The subject drugs (name + code) the agent actually returned. */
+  function subjectsFrom(msg) {
+    const seen = new Map(); // code -> name
     for (const res of msg?.results ?? []) {
       for (const row of res.rows ?? []) {
+        let code = null;
+        let name = null;
         for (const [k, v] of Object.entries(row)) {
-          if (/code/i.test(k) && /^\d{10,14}$/.test(String(v))) codes.add(String(v));
+          const s = String(v ?? '');
+          if (/code/i.test(k) && /^\d{10,14}$/.test(s)) code = s;
+          else if (!name && /name|desc|product|article|item/i.test(k) && s.trim().length > 2)
+            name = s.trim();
         }
+        if (code && !seen.has(code)) seen.set(code, name || code);
       }
     }
-    return [...codes];
+    return [...seen.entries()].map(([code, name]) => ({ code, name }));
+  }
+
+  /** Did this answer already enumerate several branches? Then "which branches"
+      is redundant and we ask "which branch has the most" instead. */
+  function listsBranches(msg) {
+    const codes = (msg?.text ?? '').match(/\b\d{5}-[A-Z0-9]{2,}\b/g) ?? [];
+    return new Set(codes).size >= 2;
   }
 
   function followupsFor(msg) {
-    const codes = codesFrom(msg);
-    const chips = [];
+    const subs = subjectsFrom(msg);
+    const my = MY_RE.test(msg?.text ?? '');
+    const qs = [];
+    const push = (text) => qs.length < 3 && text && qs.push(text);
 
-    if (codes.length) {
-      chips.push({
-        icon: Store,
-        label: 'Stock at a branch',
-        run: () => send(`Which branches stock ${codes[0]}?`)
-      });
-      chips.push({
-        icon: DollarSign,
-        label: codes.length > 1 ? 'Compare prices' : 'Price',
-        run: () =>
-          send(
-            codes.length > 1
-              ? `Compare the prices of ${codes.slice(0, 4).join(', ')}.`
-              : `What is the price of ${codes[0]}?`
-          )
-      });
+    if (subs.length >= 2) {
+      const [a, b] = subs;
+      push(my ? `${a.name} နဲ့ ${b.name} နှိုင်းယှဉ်ပြပါ` : `Compare ${a.name} and ${b.name}.`);
+      push(my ? `${a.name} ဈေးဘယ်လောက်လဲ?` : `What's the price of ${a.name}?`);
+    } else if (subs.length === 1) {
+      const n = subs[0].name;
+      push(my ? `${n} ဈေးဘယ်လောက်လဲ?` : `What's the price of ${n}?`);
+      if (listsBranches(msg))
+        push(my ? `${n} အများဆုံး ဘယ်ဆိုင်မှာ ရှိလဲ?` : `Which branch has the most ${n}?`);
+      else push(my ? `${n} ဘယ်ဆိုင်တွေမှာ ရှိလဲ?` : `Which branches have ${n} in stock?`);
+      push(my ? `${n} အစားထိုး ဆေးရှိလား?` : `Are there substitutes for ${n}?`);
     }
 
-    // Offer the language the answer is NOT already in.
-    const isMy = MY_RE.test(msg?.text ?? '');
+    // Always offer the answer in the OTHER language.
+    const chips = qs.map((text) => ({ text, run: () => send(text) }));
     chips.push({
-      icon: Languages,
-      label: isMy ? 'English' : 'မြန်မာ',
-      run: () =>
-        send(
-          isMy
-            ? 'Translate your previous answer into English.'
-            : 'အထက်ပါ အချက်အလက်ကို မြန်မာလို ပြန်ပြောပြပါ'
-        )
+      text: my ? 'Answer in English' : 'မြန်မာလို ပြန်ဖြေပါ',
+      translate: true,
+      run: () => send(my ? 'Please answer in English.' : 'အထက်ပါအချက်အလက်ကို မြန်မာလို ပြန်ပြောပြပါ')
     });
-
     return chips;
   }
 
@@ -922,19 +928,25 @@
                       <div class="mt-1.5 text-[12px] text-danger">Couldn't save feedback — try again.</div>
                     {/if}
 
-                    <!-- follow-up chips on the latest answer -->
+                    <!-- suggested follow-up questions on the latest answer -->
                     {#if !busy && m === messages[messages.length - 1]}
                       {@const chips = followupsFor(m)}
                       {#if chips.length}
-                        <div class="mt-3.5 flex flex-wrap gap-2 border-t border-line pt-3.5">
-                          {#each chips as f}
-                            <button
-                              onclick={f.run}
-                              class="flex items-center gap-1.5 rounded-[9px] border border-line bg-surface px-3 py-1.5 text-[13px] text-ink-2 transition-colors hover:border-accent hover:bg-accent-soft hover:text-accent"
-                            >
-                              <f.icon size={14} />{f.label}
-                            </button>
-                          {/each}
+                        <div class="mt-3.5 border-t border-line pt-3">
+                          <div class="mb-1.5 flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-ink-3">
+                            <Sparkles size={12} /> Suggested
+                          </div>
+                          <div class="flex flex-col items-start gap-1.5">
+                            {#each chips as f}
+                              <button
+                                onclick={f.run}
+                                class="flex items-center gap-1.5 rounded-[9px] border border-line bg-surface px-3 py-1.5 text-left text-[13px] text-ink-2 transition-colors hover:border-accent hover:bg-accent-soft hover:text-accent"
+                              >
+                                {#if f.translate}<Languages size={13} class="shrink-0" />{:else}<CornerDownRight size={13} class="shrink-0 text-ink-3" />{/if}
+                                {f.text}
+                              </button>
+                            {/each}
+                          </div>
                         </div>
                       {/if}
                     {/if}
