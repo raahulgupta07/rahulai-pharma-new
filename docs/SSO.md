@@ -138,11 +138,14 @@ if it fails and `LDAP_ENABLED=true`, the same email/password go to LDAP.
 
 ## Things that will bite you
 
-**Empty passwords are rejected before the bind.** An LDAP simple bind with a valid
-DN and a zero-length password is an *unauthenticated simple bind* (RFC 4513 §5.1.2),
-and OpenLDAP and AD both answer **success**. Without the guard, knowing any
-provisioned email would be enough to log in as that person. Do not remove the check
-in `login_ldap`; `tests/test_auth_sso.py` fails if you do.
+**Empty passwords are rejected before the bind.** A simple bind with a valid DN and
+a zero-length password is an *unauthenticated simple bind* (RFC 4513 §5.1.2). A
+server configured to allow it — some Active Directory deployments — answers
+**success**, so knowing any provisioned email would be enough to log in as that
+person. (A default OpenLDAP refuses it server-side, and ldap3 refuses it
+client-side, but neither is guaranteed on your directory.) The old code also let
+that client-side refusal escape as an HTTP 500 on any wrong password. The guard in
+`login_ldap` closes both; `tests/test_auth_sso.py` fails if you remove it.
 
 **Keep a local password.** `ADMIN_EMAIL` / `ADMIN_PASSWORD` seed a `super_admin` on
 first boot. If Keycloak is down, that is the only way in — including the way in to

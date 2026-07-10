@@ -305,11 +305,14 @@ rebuild them. Both are off by default (`OIDC_ENABLED`, `LDAP_ENABLED`), which is
 the only reason the bypasses below were never exploitable. Operator guide:
 `docs/SSO.md`.
 
-**An empty LDAP password authenticates.** A simple bind with a valid DN and a
-zero-length password is an *unauthenticated simple bind* (RFC 4513 §5.1.2), and
-OpenLDAP and AD answer **success**. `login_ldap` rejects blank passwords before
-binding. `/auth/login` falls through to LDAP whenever local auth fails, so any
-provisioned email was reachable this way.
+**An empty LDAP password.** A simple bind with a valid DN and a zero-length
+password is an *unauthenticated simple bind* (RFC 4513 §5.1.2). Servers configured
+to allow it — some AD — answer **success**, which is login-as-anyone; a default
+OpenLDAP refuses it server-side and ldap3 refuses it client-side (verified live).
+Independently, the *old* code let ldap3's client-side refusal escape as an HTTP
+**500** on any wrong password, because `LDAPBindError` is not `AuthError`.
+`login_ldap` now rejects blank credentials before binding, closing both. Note
+`/auth/login` falls through to LDAP whenever local auth fails.
 
 **`ldap3.Connection` is always truthy.** It defines neither `__bool__` nor
 `__len__`. The original `if not ldap3.Connection(..., auto_bind=True)` was dead

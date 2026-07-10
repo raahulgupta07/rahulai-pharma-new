@@ -250,10 +250,14 @@ async def login_ldap(username: str, password: str) -> Dict:
     if not s.ldap_enabled:
         raise AuthError("ldap disabled")
 
-    # ⚠️ An empty password turns the user rebind below into an RFC 4513 §5.1.2
-    # "unauthenticated simple bind": a DN with a zero-length password. OpenLDAP
-    # and Active Directory answer *success*. Without this guard, knowing any
-    # provisioned email is enough to sign in as that user. Reject before binding.
+    # ⚠️ A blank password makes the user rebind below an RFC 4513 §5.1.2
+    # "unauthenticated simple bind" (valid DN, zero-length password). Servers
+    # CONFIGURED to allow it — some AD deployments — answer *success*, so knowing
+    # any provisioned email would be enough to log in as that user. ldap3 also
+    # raises LDAPPasswordIsMandatoryError on a blank simple-bind password, which
+    # the old code let escape as an HTTP 500. This guard closes both: reject
+    # before we ever touch the directory. (Verified live: default OpenLDAP also
+    # refuses the unauthenticated bind server-side, but do not rely on that.)
     if not password or not password.strip():
         raise AuthError("invalid credentials")
     if not username or not username.strip():
