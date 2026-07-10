@@ -76,6 +76,23 @@ def test_ingest_during_run_does_not_poison_cache():
     assert run(go()) is None
 
 
+def test_session_turn_counts_from_one_and_is_per_session():
+    """Turn 1 may use the shared cache; turn 2+ is a follow-up and must not."""
+
+    async def go():
+        a, b = f"s-{uuid.uuid4()}", f"s-{uuid.uuid4()}"
+        first = await cache.bump_session_turn(a)
+        second = await cache.bump_session_turn(a)
+        other = await cache.bump_session_turn(b)  # a different conversation
+        await cache.close_client()
+        return first, second, other
+
+    first, second, other = run(go())
+    assert first == 1  # self-contained question -> cacheable
+    assert second == 2  # follow-up -> must bypass the cache
+    assert other == 1  # sessions do not share a counter
+
+
 def test_unchanged_version_still_caches():
     """The freshness guard must not disable caching in the common case."""
 

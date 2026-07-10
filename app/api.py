@@ -33,6 +33,7 @@ from contextlib import asynccontextmanager
 from app.agent import get_agent
 from app.cache import (
     bump_data_version,
+    bump_session_turn,
     check_rate_limit,
     close_client,
     get_cached_answer,
@@ -412,26 +413,56 @@ def _scoped_message(message: str, store_id: Optional[str]) -> str:
     return "\n".join(lines) + f"\n\n{message}"
 
 
+async def _is_follow_up(client_session: Optional[str]) -> bool:
+    """True when this is turn 2+ of a real client conversation.
+
+    Clients that send no ``session_id`` (the embed widget today) never have
+    history, so every one of their turns is a first turn. Redis errors resolve to
+    False: a missed cache is cheap, a cross-conversation cache hit is not — but
+    the safe direction here is to treat the turn as fresh and self-contained.
+    """
+
+    if not client_session or not get_settings().history_enabled:
+        return False
+    try:
+        return await bump_session_turn(client_session) > 1
+    except Exception:   # noqa: BLE001 — Redis must never break chat
+        logger.exception("Session turn counter failed; treating as first turn")
+        return False
+
+
 async def _answer(
     message: str,
     store_id: Optional[str],
     user_id: Optional[str] = None,
     session_id: Optional[str] = None,
     model: Optional[str] = None,
+    client_session: Optional[str] = None,
 ):
     """Run the agent for one message, force-scoped to ``store_id``.
 
     Returns ``(content, was_cached)``. Checks the Redis query cache first; on a
     miss runs the agent and caches the answer. ``user_id``/``session_id`` (when
     given) drive Agno self-learning memory. ``model`` selects the chat model.
+
+    ``client_session`` is the session id the CLIENT sent, if any — distinct from
+    ``session_id``, which ``_learn_ids`` may have defaulted to a shared value.
+    Only a real client session gets conversation history, and only its first turn
+    may use the shared answer cache.
     """
 
     from app import metrics
 
-    cached = await get_cached_answer(message, store_id, model)
-    if cached is not None:
-        metrics.incr("cache_hits")
-        return cached, True
+    follow_up = await _is_follow_up(client_session)
+
+    # A follow-up ("which other shop has it?") is meaningless without its
+    # history, and the cache key contains no history — so it must not be read
+    # from or written to the shared cache.
+    if not follow_up:
+        cached = await get_cached_answer(message, store_id, model)
+        if cached is not None:
+            metrics.incr("cache_hits")
+            return cached, True
     metrics.incr("cache_misses")
 
     # Pin the data version we are about to answer against. If an ingest lands
@@ -439,7 +470,9 @@ async def _answer(
     # filing stale stock under the new version.
     version = await get_data_version()
 
-    if get_settings().fast_path_enabled:
+    # The fast path resolves the drug from THIS message alone. A follow-up names
+    # no drug, so it must go to the agent, which can see the conversation.
+    if get_settings().fast_path_enabled and not follow_up:
         facts = await fastpath.answer(message, store_id)
         if facts is not None:
             phrase_prompt = fastpath.build_phrasing_input(
@@ -462,12 +495,13 @@ async def _answer(
     try:
         metrics.incr("llm_calls")
         metrics.record_llm()
-        out = await get_agent(model).arun(prompt, **run_kw)
+        out = await get_agent(model, with_history=bool(client_session)).arun(prompt, **run_kw)
         content = getattr(out, "content", str(out))
     finally:
         reset_store_scope(token)
 
-    await set_cached_answer(message, store_id, content, model=model, version=version)
+    if not follow_up:
+        await set_cached_answer(message, store_id, content, model=model, version=version)
     return content, False
 
 
@@ -603,7 +637,10 @@ async def chat(req: ChatRequest) -> ChatResponse:
     store_id = claims.get("store_id")
     user_id, session_id = _learn_ids(claims, req.session_id)
     t0 = _t.time()
-    content, was_cached = await _answer(req.message, store_id, user_id, session_id, req.model)
+    content, was_cached = await _answer(
+        req.message, store_id, user_id, session_id, req.model,
+        client_session=req.session_id,
+    )
     await log_chat(req.message, content, store_id, was_cached, int((_t.time() - t0) * 1000))
     return ChatResponse(content=content)
 
@@ -626,20 +663,23 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
         from app import metrics
 
         t0 = _t.time()
-        cached = await get_cached_answer(req.message, store_id, req.model)
-        if cached is not None:
-            metrics.incr("cache_hits")
-            yield f"data: {json.dumps({'delta': cached})}\n\n"
-            await log_chat(req.message, cached, store_id, True, int((_t.time() - t0) * 1000))
-            yield "data: [DONE]\n\n"
-            return
+        # A follow-up needs its conversation; the cache key has none. See _answer().
+        follow_up = await _is_follow_up(req.session_id)
+        if not follow_up:
+            cached = await get_cached_answer(req.message, store_id, req.model)
+            if cached is not None:
+                metrics.incr("cache_hits")
+                yield f"data: {json.dumps({'delta': cached})}\n\n"
+                await log_chat(req.message, cached, store_id, True, int((_t.time() - t0) * 1000))
+                yield "data: [DONE]\n\n"
+                return
         metrics.incr("cache_misses")
 
         # See _answer(): pin the version we answer against, so an ingest that
         # lands mid-stream invalidates this answer instead of being masked by it.
         version = await get_data_version()
 
-        if get_settings().fast_path_enabled:
+        if get_settings().fast_path_enabled and not follow_up:
             facts = await fastpath.answer(req.message, store_id)
             if facts is not None:
                 step = json.dumps({"label": facts["tool"], "icon": "search"})
@@ -678,7 +718,9 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
         metrics.incr("llm_calls")
         metrics.record_llm()
         try:
-            async for event in get_agent(req.model).arun(
+            async for event in get_agent(
+                req.model, with_history=bool(req.session_id)
+            ).arun(
                 _scoped_message(req.message, store_id),
                 stream=True,
                 stream_events=True,
@@ -723,9 +765,10 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             reset_store_scope(scope)
             if full:
                 await log_chat(req.message, full, store_id, False, int((_t.time() - t0) * 1000))
-                await set_cached_answer(
-                    req.message, store_id, full, model=req.model, version=version
-                )
+                if not follow_up:
+                    await set_cached_answer(
+                        req.message, store_id, full, model=req.model, version=version
+                    )
             yield "data: [DONE]\n\n"
 
     return StreamingResponse(gen(), media_type="text/event-stream")

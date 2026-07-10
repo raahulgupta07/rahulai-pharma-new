@@ -75,6 +75,14 @@ class Settings(BaseSettings):
     learning_enabled: bool = False
     learning_model: str = "google/gemini-2.5-flash-lite"  # cheap extraction model
 
+    # ---- conversation history (multi-turn follow-ups) ----
+    # ON by default. Without it every turn is answered in isolation, so "which
+    # other shop has it?" cannot know what "it" is. Unlike learning_enabled this
+    # adds NO extra LLM call — only prompt tokens for the replayed turns.
+    # Applies only when the client sent a real per-conversation session_id.
+    history_enabled: bool = True
+    history_turns: int = 3
+
     # ---- latency: delete LLM round trips (measured baseline p50 ~9.8s) ----
     # Fast path: resolve the drug deterministically (trigram + drug_alias), run
     # one SQL query, and spend a single LLM call phrasing the answer — instead of

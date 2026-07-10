@@ -329,9 +329,55 @@ def build_learning_agent(model_id: str | None = None) -> Agent:
         return build_agent(model_id)
 
 
+def build_history_agent(model_id: str | None = None) -> Agent:
+    """A plain agent that can see the last few turns of its own conversation.
+
+    Without this, every turn is answered in isolation: "which other shop has it?"
+    arrives with no idea what "it" is, and the agent has no choice but to ask the
+    user to name the product again.
+
+    This is NOT the learning agent. It adds conversation history to the prompt and
+    nothing else — no LearningMachine, no user memory, no second extraction model,
+    so it costs prompt tokens rather than an extra ~2s LLM round trip.
+
+    Degrades to the stateless agent when no DB is available, because a chat that
+    forgets is better than a chat that crashes.
+    """
+
+    db = _get_learning_db()
+    if db is None:
+        logger.warning("No DB for history; conversation will be stateless")
+        return build_agent(model_id)
+
+    settings = get_settings()
+    try:
+        model = OpenRouter(
+            id=model_id or settings.openrouter_model,
+            api_key=settings.openrouter_api_key,
+            max_tokens=2048,
+        )
+        return Agent(
+            model=model,
+            tools=TOOLS,
+            system_message=BILINGUAL_SYSTEM_PROMPT,
+            markdown=True,
+            db=db,
+            add_history_to_context=True,
+            num_history_runs=settings.history_turns,
+        )
+    except Exception:   # noqa: BLE001 — never let history wiring break chat
+        logger.exception("Failed to build history agent; falling back to stateless")
+        return build_agent(model_id)
+
+
 @lru_cache(maxsize=8)
 def _agent_for(model_id: str) -> Agent:
     return build_agent(model_id)
+
+
+@lru_cache(maxsize=8)
+def _history_agent_for(model_id: str) -> Agent:
+    return build_history_agent(model_id)
 
 
 @lru_cache(maxsize=8)
@@ -339,18 +385,26 @@ def _learning_agent_for(model_id: str) -> Agent:
     return build_learning_agent(model_id)
 
 
-def get_agent(model_id: str | None = None) -> Agent:
+def get_agent(model_id: str | None = None, *, with_history: bool = False) -> Agent:
     """Return a cached agent for the requested model.
 
     Unknown / empty ids fall back to the configured default model. Agents are
     cached per model id so switching is cheap. When ``settings.learning_enabled``
     is true, returns the learning-enabled agent; otherwise the plain agent.
+
+    ``with_history`` selects the history-aware agent. The caller decides, because
+    history is only safe when the client supplied a REAL per-conversation
+    ``session_id``. ``_learn_ids`` falls back to a shared id when it did not, and
+    replaying one shared history into every caller's prompt would cross-wire
+    unrelated conversations.
     """
 
     settings = get_settings()
     chosen = model_id if model_id in ALLOWED_MODEL_IDS else settings.openrouter_model
     if settings.learning_enabled:
-        return _learning_agent_for(chosen)
+        return _learning_agent_for(chosen)   # already history-aware
+    if with_history and settings.history_enabled:
+        return _history_agent_for(chosen)
     return _agent_for(chosen)
 
 
@@ -360,6 +414,7 @@ __all__ = [
     "SELECTABLE_MODELS",
     "ALLOWED_MODEL_IDS",
     "build_agent",
+    "build_history_agent",
     "build_learning_agent",
     "get_agent",
 ]

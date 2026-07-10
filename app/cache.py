@@ -286,6 +286,30 @@ async def _semantic_store(
         logger.exception("Semantic cache store failed; entry not indexed")
 
 
+# ---- conversation turns ----------------------------------------------------
+
+
+async def bump_session_turn(session_id: str) -> int:
+    """Return this session's 1-based turn number, incrementing it.
+
+    Used to decide whether a question may use the shared answer cache. The cache
+    key is ``(data_version, model, store_id, message)`` — it does NOT include the
+    conversation. That is fine for a first turn, which is self-contained. But a
+    follow-up like "which other shop has it?" means nothing without its history:
+    cache it globally and the next conversation to ask those same three words is
+    served an answer about a different drug.
+
+    So turn 1 may use the cache; later turns bypass it entirely.
+    """
+
+    client = get_client()
+    key = f"pharmacy:turn:{session_id}"
+    n = int(await client.incr(key))
+    if n == 1:
+        await client.expire(key, get_settings().session_ttl_seconds)
+    return n
+
+
 # ---- rate limiting ---------------------------------------------------------
 
 
@@ -365,6 +389,7 @@ __all__ = [
     "get_data_version",
     "bump_data_version",
     "make_query_key",
+    "bump_session_turn",
     "get_cached_answer",
     "set_cached_answer",
     "check_rate_limit",
