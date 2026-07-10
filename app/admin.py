@@ -336,9 +336,15 @@ async def graph_status() -> Dict:
 async def graph_rebuild() -> Dict:
     """Rebuild structured edges (generic/ingredient/category) from the catalog."""
 
+    from app.cache import bump_data_version
     from app.graph import build_edges
 
-    return await build_edges()
+    res = await build_edges()
+    # Substitute/related answers are derived from drug_edges, so a rebuild can
+    # change them. Without the bump, cached answers outlive the graph they came
+    # from for up to CACHE_TTL_SECONDS.
+    res["data_version"] = await bump_data_version()
+    return res
 
 
 @router.post("/graph/treats")
@@ -789,11 +795,17 @@ async def run_sync(pipeline: bool = True) -> Dict:
     rebuild (faster; just refresh the rows).
     """
 
+    from app.cache import bump_data_version
     from app.sync_mysql import sync_mysql
 
     res = await sync_mysql(run_pipeline=pipeline)
     if not res.get("ok"):
         raise HTTPException(status_code=400, detail=res.get("error", "sync failed"))
+
+    # This path rewrites inventory. Every other writer (the SFTP watcher, the
+    # reload endpoint) bumps the data version; this one did not, so cached stock
+    # answers survived a sync and were served for up to CACHE_TTL_SECONDS.
+    res["data_version"] = await bump_data_version()
     return res
 
 

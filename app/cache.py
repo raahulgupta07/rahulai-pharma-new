@@ -103,16 +103,21 @@ def _resolve_model(model: Optional[str]) -> str:
 
 
 async def make_query_key(
-    message: str, store_id: Optional[str], model: Optional[str] = None
+    message: str, store_id: Optional[str], model: Optional[str] = None,
+    version: Optional[int] = None,
 ) -> str:
     """Build a version-scoped cache key for one (message, store, model) triple.
 
     Normalises the message (strip + lowercase) so trivially-different phrasings
     of the same question still hit. Includes data_version so a reload misses, and
     the resolved chat model so answers from different models don't collide.
+
+    Pass ``version`` to pin the key to a version read earlier. Writers MUST do
+    this: see :func:`set_cached_answer`.
     """
 
-    version = await get_data_version()
+    if version is None:
+        version = await get_data_version()
     norm = " ".join(message.strip().lower().split())
     resolved = _resolve_model(model)
     raw = f"{version}|{resolved}|{store_id or '*'}|{norm}"
@@ -142,12 +147,30 @@ async def set_cached_answer(
     answer: str,
     ttl: Optional[int] = None,
     model: Optional[str] = None,
+    version: Optional[int] = None,
 ) -> None:
-    """Cache an agent answer for this (message, store, model)."""
+    """Cache an agent answer for this (message, store, model).
+
+    ``version`` is the data_version observed when the answer was STARTED. An
+    agent run takes seconds; an ingest can land inside that window. Without the
+    pin, the key was built from the version at *write* time, so an answer
+    computed against old stock got filed under the new version and served —
+    fresh-looking and wrong — for a full TTL. Bumping the version could not
+    dislodge it, because the poisoned entry was written after the bump.
+
+    So: if the data changed while we were thinking, throw the answer away rather
+    than cache it. The caller still returns it to the user who waited for it;
+    only the caching is skipped. Callers that pass ``None`` keep the old
+    read-at-write-time behaviour and are, by construction, racy.
+    """
+
+    if version is not None and await get_data_version() != version:
+        logger.info("data_version changed during run; not caching stale answer")
+        return
 
     ttl = ttl if ttl is not None else get_settings().cache_ttl_seconds
-    await set_cached(await make_query_key(message, store_id, model), answer, ttl)
-    await _semantic_store(message, store_id, answer, model, ttl)
+    await set_cached(await make_query_key(message, store_id, model, version), answer, ttl)
+    await _semantic_store(message, store_id, answer, model, ttl, version)
 
 
 # ---- semantic (embedding) near-match layer --------------------------------
@@ -167,10 +190,13 @@ def _cosine(a: List[float], b: List[float]) -> float:
     return float(np.dot(va, vb) / (na * nb))
 
 
-async def _semantic_index_key(store_id: str, model: Optional[str]) -> str:
+async def _semantic_index_key(
+    store_id: str, model: Optional[str], version: Optional[int] = None
+) -> str:
     """Scope key for the semantic index — store_id is part of it (never cross)."""
 
-    version = await get_data_version()
+    if version is None:
+        version = await get_data_version()
     resolved = _resolve_model(model)
     return f"{_SEM_INDEX_PREFIX}{version}|{resolved}|{store_id}"
 
@@ -230,6 +256,7 @@ async def _semantic_store(
     answer: str,
     model: Optional[str],
     ttl: int,
+    version: Optional[int] = None,
 ) -> None:
     """Append this (question vector, answer) to the scope index, bounded + TTL'd.
 
@@ -247,7 +274,7 @@ async def _semantic_store(
         qvec = await embed_query_cached(message)
         if not qvec:
             return
-        key = await _semantic_index_key(store_id, model)
+        key = await _semantic_index_key(store_id, model, version)
         norm = " ".join(message.strip().lower().split())
         entry = json.dumps({"q": norm, "vec": qvec, "a": answer, "ts": time.time()})
         pipe = get_client().pipeline()

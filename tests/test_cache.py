@@ -54,6 +54,42 @@ def test_answer_cache_then_bump_invalidates():
     assert miss is None  # version bump invalidated it
 
 
+def test_ingest_during_run_does_not_poison_cache():
+    """An answer computed before an ingest must not be cached after it.
+
+    The agent takes seconds. If stock is reloaded mid-run, the answer in hand
+    describes the OLD data. Writing it without a pinned version files it under
+    the NEW version, where it looks fresh and is served for a full TTL — a bump
+    cannot evict an entry written after the bump.
+    """
+
+    async def go():
+        msg = f"q-{uuid.uuid4()}"
+        version = await cache.get_data_version()  # what the "run" answers against
+        await cache.bump_data_version()  # ingest lands mid-run
+        await cache.set_cached_answer(msg, "S1", "stale-answer", ttl=60, version=version)
+        after = await cache.get_cached_answer(msg, "S1")
+        await cache.close_client()
+        return after
+
+    # The stale answer is dropped, so the next question re-runs the agent.
+    assert run(go()) is None
+
+
+def test_unchanged_version_still_caches():
+    """The freshness guard must not disable caching in the common case."""
+
+    async def go():
+        msg = f"q-{uuid.uuid4()}"
+        version = await cache.get_data_version()
+        await cache.set_cached_answer(msg, "S1", "good-answer", ttl=60, version=version)
+        after = await cache.get_cached_answer(msg, "S1")
+        await cache.close_client()
+        return after
+
+    assert run(go()) == "good-answer"
+
+
 def test_rate_limit_blocks_after_quota():
     async def go():
         user = f"u-{uuid.uuid4()}"

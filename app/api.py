@@ -281,11 +281,37 @@ def _mount_admin() -> None:
     from pathlib import Path
 
     from fastapi.staticfiles import StaticFiles
+    from starlette.exceptions import HTTPException as StarletteHTTPException
+
+    class SPAStatics(StaticFiles):
+        """StaticFiles that serves index.html for unknown paths.
+
+        The build is a client-routed SPA: adapter-static emits one index.html
+        and no per-route file. Plain StaticFiles 404s on a deep link like
+        /admin/chat, so the app only worked while you never reloaded. Client
+        routes are indistinguishable from typos here, so every miss falls back
+        to the shell and the router sorts it out.
+
+        The /admin/* API routes are registered on `app` before this mount, so
+        they take precedence and never reach this fallback.
+        """
+
+        async def get_response(self, path: str, scope):
+            try:
+                return await super().get_response(path, scope)
+            except StarletteHTTPException as exc:
+                if exc.status_code != 404:
+                    raise
+                # Never mask a missing asset as the shell — a 200 text/html for
+                # a .js request breaks in confusing ways.
+                if "." in path.rsplit("/", 1)[-1]:
+                    raise
+                return await super().get_response("index.html", scope)
 
     for cand in (Path(__file__).parent.parent / "admin" / "build",
                  Path("/app/admin_build")):
         if cand.is_dir():
-            app.mount("/admin", StaticFiles(directory=str(cand), html=True), name="admin")
+            app.mount("/admin", SPAStatics(directory=str(cand), html=True), name="admin")
             break
 
 
@@ -408,6 +434,11 @@ async def _answer(
         return cached, True
     metrics.incr("cache_misses")
 
+    # Pin the data version we are about to answer against. If an ingest lands
+    # while the agent is thinking, set_cached_answer drops the answer instead of
+    # filing stale stock under the new version.
+    version = await get_data_version()
+
     if get_settings().fast_path_enabled:
         facts = await fastpath.answer(message, store_id)
         if facts is not None:
@@ -418,7 +449,7 @@ async def _answer(
             metrics.record_llm()
             out = await fastpath.get_phrasing_agent(model).arun(phrase_prompt)
             content = getattr(out, "content", str(out))
-            await set_cached_answer(message, store_id, content, model=model)
+            await set_cached_answer(message, store_id, content, model=model, version=version)
             return content, False
 
     prompt = _scoped_message(message, store_id)
@@ -436,7 +467,7 @@ async def _answer(
     finally:
         reset_store_scope(token)
 
-    await set_cached_answer(message, store_id, content, model=model)
+    await set_cached_answer(message, store_id, content, model=model, version=version)
     return content, False
 
 
@@ -604,6 +635,10 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             return
         metrics.incr("cache_misses")
 
+        # See _answer(): pin the version we answer against, so an ingest that
+        # lands mid-stream invalidates this answer instead of being masked by it.
+        version = await get_data_version()
+
         if get_settings().fast_path_enabled:
             facts = await fastpath.answer(req.message, store_id)
             if facts is not None:
@@ -632,7 +667,9 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     yield f"event: error\ndata: {json.dumps({'detail': str(exc)})}\n\n"
                 if full:
                     await log_chat(req.message, full, store_id, False, int((_t.time() - t0) * 1000))
-                    await set_cached_answer(req.message, store_id, full, model=req.model)
+                    await set_cached_answer(
+                        req.message, store_id, full, model=req.model, version=version
+                    )
                 yield "data: [DONE]\n\n"
                 return
 
@@ -686,7 +723,9 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             reset_store_scope(scope)
             if full:
                 await log_chat(req.message, full, store_id, False, int((_t.time() - t0) * 1000))
-                await set_cached_answer(req.message, store_id, full, model=req.model)
+                await set_cached_answer(
+                    req.message, store_id, full, model=req.model, version=version
+                )
             yield "data: [DONE]\n\n"
 
     return StreamingResponse(gen(), media_type="text/event-stream")
