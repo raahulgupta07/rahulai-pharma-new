@@ -1,7 +1,7 @@
 <script>
   import { API_BASE } from '$lib/apiBase.js';
   import { onMount } from 'svelte';
-  import { Trash2, Plus } from '@lucide/svelte';
+  import { Trash2, Plus, Check, ShieldCheck } from '@lucide/svelte';
   import PageHeader from '$lib/PageHeader.svelte';
   import Badge from '$lib/Badge.svelte';
   import Modal from '$lib/aurora/Modal.svelte';
@@ -210,6 +210,7 @@
               <th>Name</th>
               <th>Role</th>
               <th>Sources</th>
+              <th>Access</th>
               <th>Active</th>
               <th>Last login</th>
               <th style="text-align:right">Actions</th>
@@ -223,6 +224,26 @@
                 <td><Badge tone={roleTone(u.role)}>{u.role}</Badge></td>
                 <td class="text-[12px] text-ink-3">
                   {(u.auth_sources ?? []).join(', ') || '–'}
+                </td>
+                <td>
+                  {#if u.approved}
+                    <button
+                      onclick={() => patch(u.id, { approved: false })}
+                      disabled={u.role === 'super_admin'}
+                      class="inline-flex items-center gap-1 rounded-lg bg-success-soft px-2 py-0.5 text-[11px] font-medium text-success transition-colors disabled:cursor-not-allowed disabled:opacity-60"
+                      title={u.role === 'super_admin' ? 'super_admin is always approved' : 'Approved — click to revoke access'}
+                    >
+                      <Check size={12} /> approved
+                    </button>
+                  {:else}
+                    <button
+                      onclick={() => { patch(u.id, { approved: true }); toast(`Approved ${u.email}`); }}
+                      class="inline-flex items-center gap-1 rounded-lg bg-accent px-2.5 py-0.5 text-[11px] font-semibold text-on-accent transition-colors hover:bg-accent-hover"
+                      title="Grant this account access to the console"
+                    >
+                      <ShieldCheck size={12} /> Approve
+                    </button>
+                  {/if}
                 </td>
                 <td>
                   <button

@@ -573,6 +573,7 @@ class NewUser(BaseModel):
 class UserPatch(BaseModel):
     role: Optional[str] = None
     active: Optional[bool] = None
+    approved: Optional[bool] = None
     password: Optional[str] = None
 
 
@@ -598,7 +599,8 @@ async def users_update(user_id: int, p: UserPatch) -> Dict:
     from app import auth
 
     try:
-        return await auth.update_user(user_id, role=p.role, active=p.active, password=p.password)
+        return await auth.update_user(user_id, role=p.role, active=p.active,
+                                      approved=p.approved, password=p.password)
     except auth.AuthError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 

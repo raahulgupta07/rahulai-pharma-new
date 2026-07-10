@@ -40,11 +40,24 @@ async def ensure_users_table() -> None:
             role          TEXT NOT NULL DEFAULT 'user',
             auth_sources  TEXT[] NOT NULL DEFAULT '{}',
             active        BOOLEAN NOT NULL DEFAULT TRUE,
+            approved      BOOLEAN NOT NULL DEFAULT FALSE,  -- admin must approve access
             created_at    TIMESTAMPTZ DEFAULT now(),
             last_login    TIMESTAMPTZ
         )
         """
     )
+    # Migration for tables created before the approval gate existed. Add the
+    # column, then approve everyone already in the table in the SAME one-time
+    # block — those accounts were usable before the gate, so keep them usable.
+    # Guarding on "column did not exist" is what keeps this from re-approving
+    # pending users on every boot.
+    exists = await q(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name='users' AND column_name='approved'"
+    )
+    if not exists:
+        await execute("ALTER TABLE users ADD COLUMN approved BOOLEAN NOT NULL DEFAULT FALSE")
+        await execute("UPDATE users SET approved=TRUE")
 
 
 async def seed_super_admin() -> None:
@@ -58,8 +71,8 @@ async def seed_super_admin() -> None:
     if existing:
         return
     await execute(
-        """INSERT INTO users (email, name, password_hash, role, auth_sources, active)
-           VALUES ($1,$2,$3,'super_admin', ARRAY['local'], TRUE)""",
+        """INSERT INTO users (email, name, password_hash, role, auth_sources, active, approved)
+           VALUES ($1,$2,$3,'super_admin', ARRAY['local'], TRUE, TRUE)""",
         email, "Super Admin", hash_password(s.admin_password),
     )
 
@@ -105,6 +118,7 @@ def _public(u: Dict) -> Dict:
     return {
         "id": u["id"], "email": u["email"], "name": u.get("name"),
         "role": u["role"], "active": u["active"],
+        "approved": bool(u.get("approved")),
         "auth_sources": list(u.get("auth_sources") or []),
     }
 
@@ -551,7 +565,8 @@ async def list_users() -> List[Dict]:
     return [_public(u) | {"last_login": str(u["last_login"]) if u["last_login"] else None} for u in rows]
 
 
-async def create_user(email: str, name: str, password: Optional[str], role: str) -> Dict:
+async def create_user(email: str, name: str, password: Optional[str], role: str,
+                      approved: bool = False) -> Dict:
     email = email.strip().lower()
     if role not in ROLES:
         raise AuthError("invalid role")
@@ -559,15 +574,15 @@ async def create_user(email: str, name: str, password: Optional[str], role: str)
         raise AuthError("email already exists")
     sources = ["local"] if password else []
     rows = await q(
-        """INSERT INTO users (email, name, password_hash, role, auth_sources)
-           VALUES ($1,$2,$3,$4,$5) RETURNING *""",
-        email, name, hash_password(password) if password else None, role, sources,
+        """INSERT INTO users (email, name, password_hash, role, auth_sources, approved)
+           VALUES ($1,$2,$3,$4,$5,$6) RETURNING *""",
+        email, name, hash_password(password) if password else None, role, sources, approved,
     )
     return _public(rows[0])
 
 
 async def update_user(user_id: int, *, role: str = None, active: bool = None,
-                      password: str = None) -> Dict:
+                      approved: bool = None, password: str = None) -> Dict:
     sets, params = [], []
     if role is not None:
         if role not in ROLES:
@@ -575,6 +590,8 @@ async def update_user(user_id: int, *, role: str = None, active: bool = None,
         params.append(role); sets.append(f"role=${len(params)}")
     if active is not None:
         params.append(active); sets.append(f"active=${len(params)}")
+    if approved is not None:
+        params.append(approved); sets.append(f"approved=${len(params)}")
     if password:
         params.append(hash_password(password)); sets.append(f"password_hash=${len(params)}")
         sets.append("auth_sources = (SELECT ARRAY(SELECT DISTINCT unnest(auth_sources || ARRAY['local'])))")

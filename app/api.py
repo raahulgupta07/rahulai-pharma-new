@@ -196,12 +196,21 @@ async def current_user(authorization: str = Header(default="")) -> Dict[str, Any
 
 
 async def require_admin(authorization: str = Header(default="")) -> Dict[str, Any]:
-    """Gate /admin/* — requires a valid JWT with role admin or super_admin."""
+    """Gate /admin/* — a valid JWT whose account is admin, active AND approved.
 
-    user = await current_user(authorization)
-    if user.get("role") not in ("admin", "super_admin"):
+    Approval is re-checked against the DB on every call, not read from the token,
+    so revoking approval takes effect immediately rather than at token expiry.
+    """
+
+    claims = await current_user(authorization)
+    u = await authmod.get_by_email(claims.get("email", ""))
+    if not u or not u["active"]:
+        raise HTTPException(status_code=401, detail="account inactive")
+    if not u.get("approved"):
+        raise HTTPException(status_code=403, detail="account pending administrator approval")
+    if u["role"] not in ("admin", "super_admin"):
         raise HTTPException(status_code=403, detail="admin access required")
-    return user
+    return claims
 
 
 # ---- auth routes -----------------------------------------------------------
@@ -245,7 +254,8 @@ async def me(authorization: str = Header(default="")) -> Dict[str, Any]:
     if not u or not u["active"]:
         raise HTTPException(status_code=401, detail="account inactive")
     return {"id": u["id"], "email": u["email"], "name": u.get("name"),
-            "role": u["role"], "auth_sources": list(u.get("auth_sources") or [])}
+            "role": u["role"], "approved": bool(u.get("approved")),
+            "auth_sources": list(u.get("auth_sources") or [])}
 
 
 @app.get("/auth/sso/login")

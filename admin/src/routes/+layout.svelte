@@ -27,7 +27,9 @@
     Bell,
     Pill,
     Brain,
-    KeyRound
+    KeyRound,
+    ShieldCheck,
+    Loader2
   } from '@lucide/svelte';
   import ToastHost from '$lib/aurora/ToastHost.svelte';
 
@@ -54,6 +56,42 @@
   let loginErr = $state('');
   let ssoEnabled = $state(false);
   let ssoName = $state('SSO');
+
+  // Approval gate: an authenticated account only reaches the console once an
+  // admin has approved it. `me` is null until /auth/me answers; a pending
+  // account is held on the CMHL notice screen and re-checked on a timer, so the
+  // moment an admin approves, the held session lets itself in with no re-login.
+  let me = $state(null);
+  let meLoaded = $state(false);
+
+  async function refreshMe() {
+    if (!browser || !authToken) {
+      meLoaded = true;
+      return;
+    }
+    try {
+      const r = await fetch(API + '/auth/me');
+      if (r.status === 401) {
+        localStorage.removeItem('auth_token');
+        authToken = '';
+        me = null;
+      } else if (r.ok) {
+        me = await r.json();
+      }
+    } catch {
+      /* backend offline — keep the current view, try again on the next tick */
+    } finally {
+      meLoaded = true;
+    }
+  }
+
+  if (browser && authToken) {
+    refreshMe();
+    // While pending, poll so approval lands without the user doing anything.
+    setInterval(() => {
+      if (authToken && me && !me.approved) refreshMe();
+    }, 5000);
+  }
 
   if (browser && !window.__authFetchPatched) {
     window.__authFetchPatched = true;
@@ -270,6 +308,48 @@
       <p class="mt-4 text-[11px] text-ink-3">
         No self-signup — accounts are created by an administrator.
       </p>
+    </div>
+  </div>
+{:else if meLoaded && me && !me.approved}
+  <!-- Authenticated, but access is held until an admin approves this account. -->
+  <div class="flex min-h-screen items-center justify-center bg-page px-4">
+    <div class="elev w-[440px] max-w-[94vw] rounded-[20px] border border-line bg-surface p-9 text-center">
+      <span
+        class="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-full bg-accent-soft text-accent"
+      >
+        <ShieldCheck size={28} />
+      </span>
+      <div class="page-title text-[19px] text-ink">CMHL Secure Platform</div>
+      <p class="mx-auto mt-3 max-w-[340px] text-[13.5px] leading-relaxed text-ink-2">
+        You are accessing a restricted City Medical Health &amp; Logistics system. Activity is
+        logged. Access to pharmacy stock data is granted only to authorised staff.
+      </p>
+
+      <div class="mt-6 rounded-[13px] border border-line bg-page px-4 py-3.5 text-left">
+        <div class="flex items-center gap-2 text-[13px] font-medium text-ink">
+          <span class="relative flex h-2 w-2">
+            <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-70"></span>
+            <span class="relative inline-flex h-2 w-2 rounded-full bg-amber-500"></span>
+          </span>
+          Awaiting administrator approval
+        </div>
+        <p class="mt-1.5 text-[12px] text-ink-3">
+          Signed in as <span class="text-ink-2">{me.email}</span>. An administrator has been
+          notified. This screen unlocks itself the moment your access is approved — you do not
+          need to sign in again.
+        </p>
+      </div>
+
+      <div class="mt-6 flex items-center justify-center gap-2 text-[12px] text-ink-3">
+        <Loader2 size={14} class="animate-spin" /> Checking for approval…
+      </div>
+
+      <button
+        onclick={signOut}
+        class="mt-6 inline-flex items-center gap-1.5 text-[13px] font-medium text-ink-2 hover:text-ink"
+      >
+        <LogOut size={14} /> Sign out
+      </button>
     </div>
   </div>
 {:else}
