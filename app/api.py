@@ -413,6 +413,16 @@ def _scoped_message(message: str, store_id: Optional[str]) -> str:
     return "\n".join(lines) + f"\n\n{message}"
 
 
+def _conversational(client_session: Optional[str]) -> bool:
+    """True when this client keeps a multi-turn conversation we must preserve.
+
+    Only a real, client-supplied session id counts. The embed widget sends none,
+    so it stays single-turn — and keeps the fast path.
+    """
+
+    return bool(client_session) and get_settings().history_enabled
+
+
 async def _is_follow_up(client_session: Optional[str]) -> bool:
     """True when this is turn 2+ of a real client conversation.
 
@@ -470,9 +480,15 @@ async def _answer(
     # filing stale stock under the new version.
     version = await get_data_version()
 
-    # The fast path resolves the drug from THIS message alone. A follow-up names
-    # no drug, so it must go to the agent, which can see the conversation.
-    if get_settings().fast_path_enabled and not follow_up:
+    # The fast path is STATELESS: it answers with its own tool-less phrasing
+    # agent, which has no db and no session, so its turn is never written to the
+    # conversation. Let it answer turn 1 of a conversation and turn 2 reads an
+    # empty history — "which other shop?" then has no idea what "it" is.
+    #
+    # So a client that keeps a conversation does not get the fast path. Clients
+    # that don't (the embed widget, the benchmarks) keep it and stay fast. The
+    # ~1.3s it saves is not worth a chat that forgets what it just said.
+    if get_settings().fast_path_enabled and not _conversational(client_session):
         facts = await fastpath.answer(message, store_id)
         if facts is not None:
             phrase_prompt = fastpath.build_phrasing_input(
@@ -679,7 +695,9 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
         # lands mid-stream invalidates this answer instead of being masked by it.
         version = await get_data_version()
 
-        if get_settings().fast_path_enabled and not follow_up:
+        # See _answer(): the fast path never records its turn, so a conversation
+        # that used it would forget the turn it just answered.
+        if get_settings().fast_path_enabled and not _conversational(req.session_id):
             facts = await fastpath.answer(req.message, store_id)
             if facts is not None:
                 step = json.dumps({"label": facts["tool"], "icon": "search"})
