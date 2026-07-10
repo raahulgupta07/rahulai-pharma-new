@@ -27,7 +27,7 @@ graph, then cites the source in its answer.
 
 ## What matters most
 
-Four things, if you read nothing else.
+Five things, if you read nothing else.
 
 **1. Numbers come from tools, never from the model.**
 Text-to-SQL was rejected deliberately. Twelve hand-written tools in `app/tools.py`
@@ -53,6 +53,21 @@ One `gemini-3.5-flash` call through OpenRouter costs **~5 seconds** by itself. T
 deterministic fast path deletes two of three LLM legs and still only saves
 ~1,300 ms. Any optimization plan whose argument is "N round trips → 1 round trip"
 is wrong on this stack. The lever that remains is a **cheaper model per call**.
+
+**5. Anything that writes stock must bump `data_version`.**
+Answers are cached in Redis under a key containing a `data_version` counter;
+bumping it invalidates every cached answer at once. **A writer that forgets to
+bump serves stale stock for up to `CACHE_TTL_SECONDS` (600).** The watcher,
+`/api/embed/reload`, `/admin/sync/mysql`, and `/admin/graph/rebuild` all bump.
+Writes made directly to Postgres — `psql`, cron, another service — bump nothing,
+and the app cannot detect them.
+
+Related and easy to get wrong: a writer must pin the version it *read*, not the
+version at write time. An agent run takes seconds; an ingest can land inside that
+window, and an answer computed against old stock would otherwise be filed under
+the new version, where it looks fresh. `set_cached_answer(..., version=…)` drops
+such an answer instead of caching it. Pinned by
+`tests/test_cache.py::test_ingest_during_run_does_not_poison_cache`.
 
 ---
 
@@ -243,6 +258,29 @@ safe. Fixing it requires keying the cache on the **resolved `article_code`**
 
 ---
 
+## Cache freshness
+
+Answers live in Redis for `CACHE_TTL_SECONDS` (default 600), keyed by
+`(data_version, model, store_id, normalised_message)`. Freshness is therefore
+entirely a question of who bumps `data_version`.
+
+| writer | bumps? |
+|---|---|
+| SFTP watcher / `scan_once` | yes |
+| `POST /api/embed/reload` | yes |
+| `POST /api/embed/ingest` | yes (via `scan_once`) |
+| `POST /admin/upload` | yes (via `scan_once`) |
+| `POST /admin/sync/mysql` | yes |
+| `POST /admin/graph/rebuild` | yes |
+| direct SQL against Postgres | **no** |
+
+**If you write `inventory` outside the app, the cache will not notice.** Call
+`POST /api/embed/reload` afterwards, or accept up to 10 minutes of stale stock.
+Lowering `CACHE_TTL_SECONDS` bounds the damage but does not fix it, and cache hits
+are what hide the ~5 s per-call LLM latency — so that trade is not free.
+
+---
+
 ## Embedding the chat widget
 
 ```html
@@ -262,6 +300,17 @@ pasted into live HTML:
 
 Full contract (HMAC signing rules, Laravel/PHP example) →
 **[INTEGRATION.md](INTEGRATION.md)**.
+
+**Known gaps vs the admin chat** (`app/static/widget.js`), if you go to close them:
+
+- It renders answers with `textContent`, so Markdown tables arrive as raw `|` pipes.
+- It parses `event: step` and `event: result` frames and then discards them — the
+  structured tool rows never reach the DOM.
+- It has no source drawer, and **cannot reuse the admin one**. The drawer calls
+  `GET /admin/catalog/{code}`, which is admin-authenticated *and* returns every
+  branch's stock and price with no store scoping. Wiring that into a store-scoped
+  widget would leak sibling branches' inventory to a scoped user. A widget drawer
+  needs its own session-scoped endpoint that filters through `_site_clause()`.
 
 ## Admin console (`/admin`)
 
