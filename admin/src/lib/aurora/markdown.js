@@ -14,24 +14,49 @@ const esc = (s) =>
 const chip = (c) =>
   `<button type="button" class="md-code-chip" data-code="${c}">${c}</button>`;
 
+// Sentinel for already-emitted HTML. `esc()` strips <, >, &, " from the source,
+// and \x00 cannot survive JSON transport, so this can never collide with content.
+const HOLE = (i) => `\x00${i}\x00`;
+
 function inline(s) {
-  return (
-    s
-      // inline code — render long digit runs (article codes) as clickable chips
-      .replace(/`([^`]+)`/g, (_m, c) =>
-        /^\d{10,14}$/.test(c) ? chip(c) : `<code class="md-code">${c}</code>`
-      )
-      // bold then italic
-      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-      .replace(/(^|[^*])\*([^*]+)\*/g, '$1<em>$2</em>')
-      // links [t](u)
-      .replace(
-        /\[([^\]]+)\]\((https?:[^)\s]+)\)/g,
-        '<a href="$1" target="_blank" rel="noopener" class="md-link">$1</a>'
-      )
-      // bare article codes (10–14 digits) not already wrapped in a tag
-      .replace(/(^|[\s(>])(\d{10,14})(?=[\s).,<]|$)/g, (_m, pre, c) => pre + chip(c))
-  );
+  // Emitted HTML is parked in `held` and restored last. Without this, the
+  // bare-article-code pass below re-scans the digits inside a chip we just
+  // emitted (they sit right after a `>`), producing nested <button> elements.
+  const held = [];
+  const park = (html) => {
+    held.push(html);
+    return HOLE(held.length - 1);
+  };
+
+  let out = s
+    // Inline code — article codes render as clickable chips.
+    //
+    // The content may not contain `*` or whitespace. 53% of this catalog's
+    // product names use a backtick as an apostrophe ("PARACAP PARACETAMOL
+    // 10`S"), so a permissive [^`]+ pairs that stray backtick with the one
+    // opening the article code that follows, swallowing the bold marker and
+    // the paren between them:
+    //     **NAME 10`S** (`1000000380965`)
+    //   -> <strong>NAME 10<code>S</strong> (</code>1000000380965`)
+    // Excluding `*` and whitespace makes that span unmatchable, so the regex
+    // skips ahead and pairs the real code delimiters instead. The apostrophe
+    // backtick is then left as the literal character it is meant to be.
+    .replace(/`([^`\s*]+)`/g, (_m, c) =>
+      park(/^\d{10,14}$/.test(c) ? chip(c) : `<code class="md-code">${c}</code>`)
+    )
+    // bold then italic
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[^*])\*([^*]+)\*/g, '$1<em>$2</em>')
+    // links [t](u)
+    .replace(
+      /\[([^\]]+)\]\((https?:[^)\s]+)\)/g,
+      '<a href="$1" target="_blank" rel="noopener" class="md-link">$1</a>'
+    )
+    // bare article codes (10–14 digits) not already wrapped in a tag
+    .replace(/(^|[\s(>])(\d{10,14})(?=[\s).,<]|$)/g, (_m, pre, c) => pre + park(chip(c)));
+
+  // Restore innermost-last; parked HTML never contains a sentinel itself.
+  return out.replace(/\x00(\d+)\x00/g, (_m, i) => held[Number(i)]);
 }
 
 export function renderMarkdown(src) {

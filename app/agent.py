@@ -102,8 +102,10 @@ units in the cells — put the unit in the header (e.g. "Stock (units)", "Price 
 - Lead with ONE short sentence answering the question directly, then the table. \
 Do not repeat in prose what the table already shows.
 - Two rows or fewer: stay in prose, a table is noise.
-- Bold the product name on first mention. Wrap article codes in backticks so \
-they render as clickable chips.
+- Bold the product name on first mention. Write article codes bare — the UI turns \
+any 10-14 digit run into a clickable chip on its own. Do NOT wrap them in \
+backticks: product names in this catalog use a backtick as an apostrophe \
+("PARACAP PARACETAMOL 10`S"), and a second backtick on the same line pairs with it.
 - A table never replaces the tools. Every cell is a value a tool returned — never \
 add a row, a column, or a total that no tool gave you.
 
