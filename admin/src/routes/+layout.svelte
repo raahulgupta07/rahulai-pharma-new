@@ -1,4 +1,5 @@
 <script>
+  import { API_BASE } from '$lib/apiBase.js';
   import '../app.css';
   import { page } from '$app/stores';
   import { base } from '$app/paths';
@@ -31,7 +32,7 @@
 
   let { children } = $props();
 
-  const API = 'http://localhost:8088';
+  const API = API_BASE;
 
   // capture SSO token handed back via ?sso_token= (Keycloak callback redirect)
   if (browser) {

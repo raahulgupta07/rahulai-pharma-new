@@ -1,4 +1,5 @@
 <script>
+  import { API_BASE } from '$lib/apiBase.js';
   import { onMount } from 'svelte';
   import { Trash2, Plus } from '@lucide/svelte';
   import PageHeader from '$lib/PageHeader.svelte';
@@ -9,7 +10,7 @@
   let delTarget = $state(null);
   let delOpen = $state(false);
 
-  const BASE = 'http://localhost:8088';
+  const BASE = API_BASE;
   const ROLES = ['user', 'admin', 'super_admin'];
 
   let loading = $state(true);
@@ -128,7 +129,7 @@
   <div class="rounded-xl border border-line bg-surface px-5 py-6 text-[14px] text-ink-2">
     <p class="font-medium text-ink">Backend offline</p>
     <p class="mt-1">
-      Could not reach the agent at <span class="text-ink">localhost:8088</span>. Start the
+      Could not reach the agent at <span class="text-ink">{API_BASE}</span>. Start the
       backend and reload.
     </p>
     <button

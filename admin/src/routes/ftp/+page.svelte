@@ -1,10 +1,11 @@
 <script>
+  import { API_BASE } from '$lib/apiBase.js';
   import { onMount, onDestroy } from 'svelte';
   import { Upload, RefreshCw, Server, Check, AlertTriangle, Clock, FileSpreadsheet } from '@lucide/svelte';
   import PageHeader from '$lib/PageHeader.svelte';
   import Badge from '$lib/Badge.svelte';
 
-  const base = 'http://localhost:8088';
+  const base = API_BASE;
 
   let status = $state(null);
   let error = $state(null);
@@ -108,7 +109,7 @@
 {#if error}
   <div class="rounded-xl border border-line bg-surface px-5 py-4 text-[14px] text-ink-2">
     <p class="font-medium text-ink">Backend offline</p>
-    <p class="mt-1">Could not reach the agent at localhost:8088.</p>
+    <p class="mt-1">Could not reach the agent at {API_BASE}.</p>
   </div>
 {:else if loading}
   <p class="text-[14px] text-ink-2">Loading…</p>

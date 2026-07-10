@@ -1,8 +1,9 @@
 <script>
+  import { API_BASE } from '$lib/apiBase.js';
   import { onMount } from 'svelte';
   import PageHeader from '$lib/PageHeader.svelte';
 
-  const base = 'http://localhost:8088';
+  const base = API_BASE;
 
   // Fixed relation colors that read in both light and dark modes.
   const REL = {

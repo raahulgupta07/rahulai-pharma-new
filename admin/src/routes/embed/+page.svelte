@@ -1,8 +1,9 @@
 <script>
+  import { API_BASE } from '$lib/apiBase.js';
   import { Copy, Check, Play } from '@lucide/svelte';
   import PageHeader from '$lib/PageHeader.svelte';
 
-  const base = 'http://localhost:8088';
+  const base = API_BASE;
 
   const widgetSnippet = `<script src="${base}/api/embed/widget.js"
   data-embed-id="web"

@@ -1,4 +1,5 @@
 <script>
+  import { API_BASE } from '$lib/apiBase.js';
   import { onMount } from 'svelte';
   import PageHeader from '$lib/PageHeader.svelte';
   import {
@@ -12,7 +13,7 @@
   } from '@lucide/svelte';
   import { toast } from '$lib/aurora/toast.js';
 
-  const base = 'http://localhost:8088';
+  const base = API_BASE;
 
   let view = $state('memories'); // 'memories' | 'feedback'
 

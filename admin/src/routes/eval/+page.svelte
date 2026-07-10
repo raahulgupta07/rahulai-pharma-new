@@ -1,9 +1,10 @@
 <script>
+  import { API_BASE } from '$lib/apiBase.js';
   import { onMount } from 'svelte';
   import { Play, Check, X, Loader } from '@lucide/svelte';
   import PageHeader from '$lib/PageHeader.svelte';
 
-  const base = 'http://localhost:8088';
+  const base = API_BASE;
 
   let running = $state(false);
   let error = $state(null);
@@ -65,7 +66,7 @@
     <p class="font-medium text-ink">Eval could not run</p>
     <p class="mt-1">
       {#if error === 'backend offline'}
-        Could not reach the agent at <span class="text-ink">localhost:8088</span
+        Could not reach the agent at <span class="text-ink">{API_BASE}</span
         >. Start the backend and try again.
       {:else}
         {error}

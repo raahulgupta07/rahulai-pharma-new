@@ -1,10 +1,11 @@
 <script>
+  import { API_BASE } from '$lib/apiBase.js';
   import { onMount } from 'svelte';
   import { Cpu, ShieldAlert, Network, Layers, Check } from '@lucide/svelte';
   import SettingRow from '$lib/aurora/SettingRow.svelte';
   import { toast } from '$lib/aurora/toast.js';
 
-  const base = 'http://localhost:8088';
+  const base = API_BASE;
 
   let loading = $state(true);
   let error = $state(null);
@@ -218,7 +219,7 @@
 {#if error}
   <div class="rounded-xl border border-line bg-surface px-5 py-5 text-[13.5px] text-ink-2">
     <p class="font-medium text-ink">Backend offline</p>
-    <p class="mt-1">Could not reach <span class="text-ink">localhost:8088</span>.</p>
+    <p class="mt-1">Could not reach <span class="text-ink">{API_BASE}</span>.</p>
     <button
       onclick={load}
       class="mt-3 rounded-lg border border-line px-3 py-1.5 text-[13px] text-ink hover:bg-surface-2"

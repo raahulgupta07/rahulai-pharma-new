@@ -1,9 +1,10 @@
 <script>
+  import { API_BASE } from '$lib/apiBase.js';
   import { onMount } from 'svelte';
   import PageHeader from '$lib/PageHeader.svelte';
   import Badge from '$lib/Badge.svelte';
 
-  const base = 'http://localhost:8088';
+  const base = API_BASE;
 
   let loading = $state(true);
   let error = $state(null);
@@ -81,7 +82,7 @@
   <div class="rounded-xl border border-line bg-surface px-5 py-6 text-[14px] text-ink-2">
     <p class="font-medium text-ink">Backend offline</p>
     <p class="mt-1">
-      Could not reach the agent at <span class="text-ink">localhost:8088</span>.
+      Could not reach the agent at <span class="text-ink">{API_BASE}</span>.
       Start the backend and reload.
     </p>
     <button

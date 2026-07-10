@@ -1,4 +1,5 @@
 <script>
+  import { API_BASE } from '$lib/apiBase.js';
   import { onMount, tick } from 'svelte';
   import {
     Plus,
@@ -11,7 +12,6 @@
     ThumbsUp,
     ThumbsDown,
     ArrowUp,
-    Paperclip,
     Store,
     Languages,
     PanelLeft,
@@ -37,9 +37,11 @@
   import { renderMarkdown } from '$lib/aurora/markdown.js';
   import { toast } from '$lib/aurora/toast.js';
 
-  const base = 'http://localhost:8088';
+  const base = API_BASE;
   const LS = 'citcare_chat_threads';
   const LS_MODEL = 'citcare_chat_model';
+  const LS_STORE = 'citcare_chat_store';
+  const LS_LANG = 'citcare_chat_lang';
 
   // Stable per-page-load id so the backend can tie feedback/learning to this conversation.
   const sessionId = crypto.randomUUID();
@@ -99,11 +101,64 @@
     return { destroy: () => node.removeEventListener('click', h) };
   }
 
-  const FOLLOWUPS = [
-    { icon: Store, label: 'Stock at a branch', q: 'stock at branch ' },
-    { icon: DollarSign, label: 'Compare prices', q: 'compare prices of ' },
-    { icon: Languages, label: 'မြန်မာ', q: 'အထက်ပါ အချက်အလက်ကို မြန်မာလို ပြန်ပြောပြပါ' }
-  ];
+  // ---- follow-up chips -------------------------------------------------------
+  // These used to drop a half-finished sentence ("compare prices of ") into the
+  // composer and leave the user to type the subject. They now read the article
+  // codes out of the answer's own tool results and send a complete question, so
+  // a chip is one click. A chip that has no subject to act on is not rendered.
+
+  const MY_RE = /[က-႟]/; // Burmese block
+
+  /** Article codes the agent actually returned for this message. */
+  function codesFrom(msg) {
+    const codes = new Set();
+    for (const res of msg?.results ?? []) {
+      for (const row of res.rows ?? []) {
+        for (const [k, v] of Object.entries(row)) {
+          if (/code/i.test(k) && /^\d{10,14}$/.test(String(v))) codes.add(String(v));
+        }
+      }
+    }
+    return [...codes];
+  }
+
+  function followupsFor(msg) {
+    const codes = codesFrom(msg);
+    const chips = [];
+
+    if (codes.length) {
+      chips.push({
+        icon: Store,
+        label: 'Stock at a branch',
+        run: () => send(`Which branches stock ${codes[0]}?`)
+      });
+      chips.push({
+        icon: DollarSign,
+        label: codes.length > 1 ? 'Compare prices' : 'Price',
+        run: () =>
+          send(
+            codes.length > 1
+              ? `Compare the prices of ${codes.slice(0, 4).join(', ')}.`
+              : `What is the price of ${codes[0]}?`
+          )
+      });
+    }
+
+    // Offer the language the answer is NOT already in.
+    const isMy = MY_RE.test(msg?.text ?? '');
+    chips.push({
+      icon: Languages,
+      label: isMy ? 'English' : 'မြန်မာ',
+      run: () =>
+        send(
+          isMy
+            ? 'Translate your previous answer into English.'
+            : 'အထက်ပါ အချက်အလက်ကို မြန်မာလို ပြန်ပြောပြပါ'
+        )
+    });
+
+    return chips;
+  }
 
   function copyMsg(text) {
     navigator.clipboard?.writeText(text);
@@ -221,11 +276,75 @@
   let messages = $derived(active?.messages ?? []);
 
   const suggestions = [
-    { icon: PackageSearch, title: 'Check stock', q: 'total stock of 1000000024029 across all sites' },
-    { icon: Replace, title: 'Find substitutes', q: 'substitutes for ALAXAN' },
-    { icon: TrendingUp, title: 'Top sellers', q: 'top 5 by stock at CCBHSC' },
+    { icon: PackageSearch, title: 'Check stock', q: 'Do we have ROYAL-D 25G?' },
+    { icon: Replace, title: 'Find substitutes', q: 'What can I use instead of ALAXAN?' },
+    { icon: TrendingUp, title: 'Top by stock', q: 'Top 5 items by stock at 20024-CC73' },
     { icon: Languages, title: 'Burmese query', q: 'ဖျားနာ အတွက် ဘာဆေး ရှိလဲ' }
   ];
+
+  // ---- branch + language pickers ---------------------------------------------
+  // NOTE ON SCOPE: a *security* store lock only ever comes from the HMAC-signed
+  // `user.store_id` in the session token (see app/api.py). This picker is a
+  // convenience filter for an already-unscoped admin session — it phrases the
+  // branch into the question. It grants no access the admin does not have, and
+  // it must never be mistaken for the enforced scope.
+  let stores = $state([]); // [{site_code, skus, units, value}]
+  let storeCode = $state(''); // '' = all branches
+  let storeOpen = $state(false);
+  let storeFilter = $state('');
+
+  let lang = $state('auto'); // auto | en | my
+  let langOpen = $state(false);
+
+  const LANGS = [
+    { id: 'auto', label: 'Auto', hint: 'match the question' },
+    { id: 'en', label: 'English', hint: 'always answer in English' },
+    { id: 'my', label: 'မြန်မာ', hint: 'always answer in Burmese' }
+  ];
+  let curLang = $derived(LANGS.find((l) => l.id === lang) ?? LANGS[0]);
+
+  let shownStores = $derived(
+    storeFilter.trim()
+      ? stores.filter((s) => s.site_code.toLowerCase().includes(storeFilter.trim().toLowerCase()))
+      : stores
+  );
+
+  async function loadStores() {
+    try {
+      // '/admin/' URLs get the Bearer header from the app-wide fetch wrapper.
+      const r = await fetch(base + '/admin/stores');
+      stores = r.ok ? await r.json() : [];
+    } catch {
+      stores = [];
+    }
+    const saved = localStorage.getItem(LS_STORE);
+    if (saved && stores.some((s) => s.site_code === saved)) storeCode = saved;
+  }
+
+  function pickStore(code) {
+    storeCode = code;
+    storeOpen = false;
+    storeFilter = '';
+    localStorage.setItem(LS_STORE, code);
+    toast(code ? 'Branch: ' + code : 'All branches');
+  }
+
+  function pickLang(id) {
+    lang = id;
+    langOpen = false;
+    localStorage.setItem(LS_LANG, id);
+    toast('Language: ' + (LANGS.find((l) => l.id === id)?.label ?? id));
+  }
+
+  /** What we actually send. The thread stores the user's raw text; the branch and
+   *  language selections are appended here so the transcript stays readable. */
+  function decorate(msg) {
+    let out = msg;
+    if (storeCode) out += `\n\nOnly consider branch ${storeCode}.`;
+    if (lang === 'en') out += `\n\nAnswer in English.`;
+    else if (lang === 'my') out += `\n\nမြန်မာဘာသာဖြင့် ဖြေပါ။`;
+    return out;
+  }
 
   function save() {
     try {
@@ -357,7 +476,12 @@
         fetch(base + '/api/embed/chat/stream', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ session_token: token, session_id: sessionId, message: msg, model: selectedModel })
+          body: JSON.stringify({
+            session_token: token,
+            session_id: sessionId,
+            message: decorate(msg),
+            model: selectedModel
+          })
         });
       let r = await doFetch();
       if (r.status === 401) {
@@ -442,6 +566,9 @@
     load();
     makeSession();
     loadModels();
+    loadStores();
+    const savedLang = localStorage.getItem(LS_LANG);
+    if (savedLang && LANGS.some((l) => l.id === savedLang)) lang = savedLang;
   });
 </script>
 
@@ -645,32 +772,61 @@
                           {/each}
                           {#if m.results?.length}
                             {#each m.results as res}
+                              {@const cols = Object.keys(res.rows[0] ?? {})}
+                              {@const shown = res.expanded ? res.rows : res.rows.slice(0, 5)}
                               <div class="mt-2 overflow-hidden rounded-lg border-[0.5px] border-line bg-surface">
                                 <div class="border-b border-line px-2.5 py-1.5 text-[10.5px] font-bold uppercase tracking-[0.04em] text-ink-3">
                                   {stepLabel(res.tool)} · {res.rows.length} row{res.rows.length > 1 ? 's' : ''}
                                 </div>
-                                <table class="w-full text-[12px]">
-                                  <tbody>
-                                    {#each res.rows.slice(0, 5) as row}
-                                      <tr class="border-t border-line first:border-0">
-                                        {#each Object.entries(row).slice(0, 4) as [k, v]}
-                                          <td class="px-2.5 py-1.5 text-ink-2">
-                                            {#if /code/i.test(k) && /^\d{10,14}$/.test(String(v))}
-                                              <button
-                                                type="button"
-                                                onclick={() => openSource(String(v))}
-                                                class="rounded bg-accent-soft px-1.5 font-mono text-[11px] font-semibold text-accent hover:bg-accent hover:text-on-accent"
-                                                >{v}</button
-                                              >
-                                            {:else}
-                                              <span class="text-ink">{v}</span>
-                                            {/if}
-                                          </td>
+                                <div class="overflow-x-auto">
+                                  <table class="w-full text-[12px]">
+                                    <thead>
+                                      <tr class="border-b border-line">
+                                        {#each cols as k}
+                                          <th class="whitespace-nowrap px-2.5 py-1.5 text-left text-[10.5px] font-bold uppercase tracking-[0.04em] text-ink-3">
+                                            {k.replace(/_/g, ' ')}
+                                          </th>
                                         {/each}
                                       </tr>
-                                    {/each}
-                                  </tbody>
-                                </table>
+                                    </thead>
+                                    <tbody>
+                                      {#each shown as row}
+                                        <tr class="border-t border-line first:border-0">
+                                          {#each cols as k}
+                                            {@const v = row[k]}
+                                            <td class="px-2.5 py-1.5 text-ink-2">
+                                              {#if /code/i.test(k) && /^\d{10,14}$/.test(String(v))}
+                                                <button
+                                                  type="button"
+                                                  onclick={() => openSource(String(v))}
+                                                  class="rounded bg-accent-soft px-1.5 font-mono text-[11px] font-semibold text-accent hover:bg-accent hover:text-on-accent"
+                                                  >{v}</button
+                                                >
+                                              {:else if v === null || v === undefined}
+                                                <!-- NULL means "unknown", not zero. Never render it as 0. -->
+                                                <span class="text-ink-3 italic">unknown</span>
+                                              {:else if typeof v === 'number'}
+                                                <span class="tnum text-ink">{v.toLocaleString()}</span>
+                                              {:else}
+                                                <span class="text-ink">{v}</span>
+                                              {/if}
+                                            </td>
+                                          {/each}
+                                        </tr>
+                                      {/each}
+                                    </tbody>
+                                  </table>
+                                </div>
+                                {#if res.rows.length > 5}
+                                  <button
+                                    onclick={() => (res.expanded = !res.expanded)}
+                                    class="w-full border-t border-line px-2.5 py-1.5 text-left text-[11.5px] font-medium text-accent hover:bg-surface-2"
+                                  >
+                                    {res.expanded
+                                      ? 'Show fewer'
+                                      : `Show all ${res.rows.length} rows (${res.rows.length - 5} hidden)`}
+                                  </button>
+                                {/if}
                               </div>
                             {/each}
                           {/if}
@@ -768,19 +924,19 @@
 
                     <!-- follow-up chips on the latest answer -->
                     {#if !busy && m === messages[messages.length - 1]}
-                      <div class="mt-3.5 flex flex-wrap gap-2 border-t border-line pt-3.5">
-                        {#each FOLLOWUPS as f}
-                          <button
-                            onclick={() => {
-                              input = f.q;
-                              tick().then(() => ta?.focus());
-                            }}
-                            class="flex items-center gap-1.5 rounded-[9px] border border-line bg-surface px-3 py-1.5 text-[13px] text-ink-2 transition-colors hover:border-accent hover:bg-accent-soft hover:text-accent"
-                          >
-                            <f.icon size={14} />{f.label}
-                          </button>
-                        {/each}
-                      </div>
+                      {@const chips = followupsFor(m)}
+                      {#if chips.length}
+                        <div class="mt-3.5 flex flex-wrap gap-2 border-t border-line pt-3.5">
+                          {#each chips as f}
+                            <button
+                              onclick={f.run}
+                              class="flex items-center gap-1.5 rounded-[9px] border border-line bg-surface px-3 py-1.5 text-[13px] text-ink-2 transition-colors hover:border-accent hover:bg-accent-soft hover:text-accent"
+                            >
+                              <f.icon size={14} />{f.label}
+                            </button>
+                          {/each}
+                        </div>
+                      {/if}
                     {/if}
                   {/if}
                 </div>
@@ -807,15 +963,87 @@
           class="max-h-[200px] w-full resize-none border-0 bg-transparent px-3 pb-1 pt-2.5 text-[15.5px] leading-relaxed text-ink outline-none placeholder:text-ink-3"
         ></textarea>
         <div class="flex items-center gap-1.5 px-1 pb-0.5">
-          <button aria-label="Attach" class="flex items-center gap-1.5 rounded-[10px] px-2.5 py-2 text-[13px] text-ink-2 hover:bg-surface-2">
-            <Paperclip size={16} />
-          </button>
-          <button class="flex items-center gap-1.5 rounded-[10px] px-2.5 py-2 text-[13px] text-ink-2 hover:bg-surface-2">
-            <Store size={16} /> All stores
-          </button>
-          <button class="flex items-center gap-1.5 rounded-[10px] px-2.5 py-2 text-[13px] text-ink-2 hover:bg-surface-2">
-            <Languages size={16} /> Auto
-          </button>
+          <!-- branch filter -->
+          <div class="relative">
+            <button
+              onclick={() => (storeOpen = !storeOpen)}
+              aria-expanded={storeOpen}
+              class="flex items-center gap-1.5 rounded-[10px] px-2.5 py-2 text-[13px] transition-colors
+                {storeCode ? 'bg-accent-soft text-accent' : 'text-ink-2 hover:bg-surface-2'}"
+            >
+              <Store size={16} />
+              {storeCode || 'All branches'}
+              <ChevronDown size={13} class="opacity-60" />
+            </button>
+            {#if storeOpen}
+              <button class="fixed inset-0 z-30 cursor-default" aria-label="Close menu" onclick={() => (storeOpen = false)}></button>
+              <div class="absolute bottom-full left-0 z-40 mb-1.5 w-[300px] overflow-hidden rounded-xl border border-line bg-surface shadow-[var(--shadow-pop)]">
+                <div class="border-b border-line px-3 py-2">
+                  <input
+                    bind:value={storeFilter}
+                    placeholder="Filter branches…"
+                    aria-label="Filter branches"
+                    class="w-full bg-transparent text-[13px] text-ink outline-none placeholder:text-ink-3"
+                  />
+                </div>
+                <div class="max-h-[280px] overflow-y-auto">
+                  <button
+                    onclick={() => pickStore('')}
+                    class="flex w-full items-center gap-2.5 px-3 py-2.5 text-left transition-colors hover:bg-surface-2 {storeCode === '' ? 'bg-accent-soft/50' : ''}"
+                  >
+                    <Check size={15} class={storeCode === '' ? 'text-accent' : 'text-transparent'} />
+                    <span class="text-[13px] font-semibold text-ink">All branches</span>
+                  </button>
+                  {#each shownStores as s (s.site_code)}
+                    <button
+                      onclick={() => pickStore(s.site_code)}
+                      class="flex w-full items-center gap-2.5 px-3 py-2 text-left transition-colors hover:bg-surface-2 {storeCode === s.site_code ? 'bg-accent-soft/50' : ''}"
+                    >
+                      <Check size={15} class={storeCode === s.site_code ? 'text-accent' : 'text-transparent'} />
+                      <span class="flex-1 truncate font-mono text-[12.5px] text-ink">{s.site_code}</span>
+                      <span class="tnum text-[11px] text-ink-3">{s.skus.toLocaleString()} SKUs</span>
+                    </button>
+                  {:else}
+                    <p class="px-3 py-4 text-center text-[12.5px] text-ink-3">
+                      {stores.length ? 'No branch matches.' : 'No branches loaded.'}
+                    </p>
+                  {/each}
+                </div>
+              </div>
+            {/if}
+          </div>
+
+          <!-- answer language -->
+          <div class="relative">
+            <button
+              onclick={() => (langOpen = !langOpen)}
+              aria-expanded={langOpen}
+              class="flex items-center gap-1.5 rounded-[10px] px-2.5 py-2 text-[13px] transition-colors
+                {lang !== 'auto' ? 'bg-accent-soft text-accent' : 'text-ink-2 hover:bg-surface-2'}"
+            >
+              <Languages size={16} />
+              {curLang.label}
+              <ChevronDown size={13} class="opacity-60" />
+            </button>
+            {#if langOpen}
+              <button class="fixed inset-0 z-30 cursor-default" aria-label="Close menu" onclick={() => (langOpen = false)}></button>
+              <div class="absolute bottom-full left-0 z-40 mb-1.5 w-[240px] overflow-hidden rounded-xl border border-line bg-surface shadow-[var(--shadow-pop)]">
+                {#each LANGS as l}
+                  <button
+                    onclick={() => pickLang(l.id)}
+                    class="flex w-full items-center gap-2.5 px-3 py-2.5 text-left transition-colors hover:bg-surface-2 {l.id === lang ? 'bg-accent-soft/50' : ''}"
+                  >
+                    <Check size={15} class={l.id === lang ? 'text-accent' : 'text-transparent'} />
+                    <div class="min-w-0 flex-1">
+                      <div class="text-[13px] font-semibold text-ink">{l.label}</div>
+                      <div class="text-[11px] text-ink-3">{l.hint}</div>
+                    </div>
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          </div>
+
           <button
             onclick={() => send()}
             disabled={busy || !token || !input.trim()}

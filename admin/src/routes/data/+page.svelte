@@ -1,4 +1,5 @@
 <script>
+  import { API_BASE } from '$lib/apiBase.js';
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import { base as appBase } from '$app/paths';
@@ -24,7 +25,7 @@
   import { reload as reloadData } from '$lib/api.js';
   import { toast } from '$lib/aurora/toast.js';
 
-  const base = 'http://localhost:8088';
+  const base = API_BASE;
 
   let tab = $state('catalog');
 

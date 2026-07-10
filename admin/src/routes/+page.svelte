@@ -1,4 +1,5 @@
 <script>
+  import { API_BASE } from '$lib/apiBase.js';
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import { base } from '$app/paths';
@@ -27,13 +28,13 @@
       metrics = m ?? {};
       ready = r ?? {};
       try {
-        const res = await fetch('http://localhost:8088/admin/overview?limit=6');
+        const res = await fetch(API_BASE + '/admin/overview?limit=6');
         overview = res.ok ? ((await res.json()) ?? []) : [];
       } catch {
         overview = [];
       }
       try {
-        const res = await fetch('http://localhost:8088/metrics/history');
+        const res = await fetch(API_BASE + '/metrics/history');
         const json = res.ok ? await res.json() : {};
         hist = json.buckets ?? [];
       } catch {
@@ -100,7 +101,7 @@
   <div class="rounded-xl border-[0.5px] border-line bg-surface-2 px-5 py-6 text-[14px] text-ink-2">
     <p class="font-medium text-ink">Backend offline</p>
     <p class="mt-1">
-      Could not reach the agent at <span class="text-ink">localhost:8088</span>. Start the backend
+      Could not reach the agent at <span class="text-ink">{API_BASE}</span>. Start the backend
       and reload.
     </p>
     <button

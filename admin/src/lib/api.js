@@ -1,7 +1,9 @@
 // API client for the CitCare pharmacy agent backend.
-// Backend runs at http://localhost:8088 with open CORS.
+// Same-origin: the backend serves this build. See apiBase.js.
 
-export const base = 'http://localhost:8088';
+import { API_BASE } from './apiBase.js';
+
+export const base = API_BASE;
 
 /**
  * Internal fetch wrapper. Returns parsed JSON on success.
