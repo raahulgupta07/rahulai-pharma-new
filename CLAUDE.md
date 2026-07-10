@@ -22,6 +22,16 @@ ingest-worker healthy), real data loaded (5,292 catalog · 111,654 inventory). R
 UI (Overview/Settings/Chat/Data), Claude-style chat with tool-use trace + rich
 rendering, redesigned Data page, GraphRAG, auth, embed API — all live + verified.
 
+**2026-07-10 session (on `feature/optimize`, baked into `:8091`, verified live):**
+Keycloak SSO + LDAP existed since baseline but shipped with two auth bypasses —
+fixed (`ec5c35d`, live-tested against a real OpenLDAP). SSO/LDAP now
+UI-configurable (`386f41b`, `/admin/auth`). Admin-approval gate on console access
+(`da1d819`, CMHL hold screen). Chat follow-ups became suggested *questions*
+(`8b5115a`); agentic trace — plan line, distinct arg-bearing step labels, timing
+fold, prompt-level self-correction (`8ac2bb2`). One blank-page regression from an
+unimported icon, fixed + guarded (`a9a83be`). Nobody has still opened the authed
+UI in a browser except via my curl checks.
+
 **Accuracy is UNMEASURED.** `evals/bench.py` grades nothing — it measures latency
 only. `evals/run_eval.py` (the accuracy eval, `RUN_LIVE=1`) has **never been run
 in this repo**, so there is no per-question pass/fail record anywhere. Three
@@ -136,12 +146,14 @@ The agent is a **router**: per question it picks among three retrieval modes —
 
 | Path | Role |
 |------|------|
-| `app/api.py` | FastAPI app, lifespan, auth routes, embed chat + **SSE stream** (`event: step` tool-trace, `event: result` rows, `data:` deltas) |
-| `app/agent.py` | `build_agent()` / `build_history_agent()` / `build_learning_agent()` — OpenRouter model, 12 tools, bilingual system prompt |
+| `app/api.py` | FastAPI app, lifespan, auth routes, embed chat + **SSE stream** (`event: plan`, `event: step` tool-trace w/ `args`, `event: result` rows, `data:` deltas), `_plan_line`/`_step_detail`, `require_admin` approval gate |
+| `app/agent.py` | `build_agent()` / `build_history_agent()` / `build_learning_agent()` — OpenRouter model, 12 tools, bilingual system prompt (FORMATTING + SEARCH STRATEGY) |
 | `app/history.py` | `record_turn()` — writes a fast-path / cache-hit turn into the Agno session (private agno APIs; see landmine) |
 | `app/tools.py` | the 12 agent tools (store-scope contextvar) |
-| `app/admin.py` | admin router: catalog/inventory/categories, stores, conversations, graph, users, upload, sftp |
-| `app/auth.py` | users table, bcrypt, JWT, local + LDAP + OIDC, merge-by-email |
+| `app/admin.py` | admin router: catalog/inventory/categories, stores, conversations, graph, users (+approval), upload, sftp, `GET/PUT /admin/auth-config` |
+| `app/auth.py` | users table (+`approved`), bcrypt, JWT, local + LDAP + OIDC, merge-by-email, `effective_auth()` (env+Redis override), `make_state`/`verify_state` (OIDC CSRF) |
+| `docs/SSO.md` | operator guide: Keycloak client setup, LDAP/AD, the failure modes |
+| `scripts/check_svelte_icons.py` | static guard: unimported `.svelte` component/icon → blank page (see landmine); run by `tests/test_svelte_builds.py` |
 | `app/graph.py` | `drug_edges`, `build_edges`, recursive `related()`, LLM `build_treats_edges` |
 | `app/security.py` | HMAC canonical-JSON signer (matches PHP `json_encode` flags) |
 | `app/config.py` | pydantic-settings (`extra="ignore"`) |
@@ -336,6 +348,56 @@ collapses** — you'd then have to verify against the realm JWKS.
 
 Roles live in the `users` table, never in the token, and `_merge_external` never
 INSERTs. So a Keycloak realm admin cannot mint a pharmacy admin. Keep it that way.
+
+**SSO/LDAP are now UI-configurable** (2026-07-10). `ldap_*`/`oidc_*` read from an
+*effective* layer — env defaults overlaid with a Redis override hash (`auth.*`
+keys in `pharmacy:config`), read fresh every login so a change needs no restart.
+`app/auth.py::effective_auth()` builds it; the ldap/oidc helpers take an explicit
+`cfg`, not `get_settings()`. Admin page: **Configuration → Authentication**
+(`/admin/auth`), backed by `GET/PUT /admin/auth-config`. Secrets are write-only:
+GET masks `oidc_client_secret`/`ldap_bind_password` to `""` + a `_set` bool; PUT
+skips a secret sent empty (blank field = keep current). `.env` still works as the
+boot default.
+
+## ⚠️ Console access needs admin approval (2026-07-10)
+
+`users.approved` gates the admin console. A new account authenticates but is held
+on the **CMHL Secure Platform** notice until an admin approves it (Users page →
+**Access** column → Approve). Enforcement is server-side: `require_admin`
+re-checks `approved`+`active` against the DB **per request**, not from the token,
+so approval takes effect on the account's existing session (no re-login) and
+revocation is immediate. The hold screen polls `/auth/me` every 5s.
+
+- **Migration must not lock out the current admin.** `ensure_users_table` adds the
+  column AND `UPDATE users SET approved=TRUE` for every existing row, in a block
+  guarded on "column did not exist" so it runs exactly once. Skip that guard and
+  either everyone gets re-approved every boot, or the existing super_admin is
+  locked out. `seed_super_admin` inserts `approved=TRUE`.
+- Admin-created users default to **pending**, so the gate is exercised. If you'd
+  rather they be auto-approved, flip the `create_user(approved=…)` default.
+
+## ⚠️ An unimported icon blanks the WHOLE SPA — and the build won't catch it
+
+Referencing a component/icon in a `.svelte` file without importing it (e.g.
+`icon: KeyRound` in a nav entry) is **not** a Vite build error: it becomes an
+undefined global, the bundle builds clean, then the SPA throws `ReferenceError`
+at startup and **every page renders blank**. `svelte-check` does not catch it
+either (a plain-JS `<script>` is not checked for undefined identifiers — verified:
+0 errors with the bug present). `scripts/check_svelte_icons.py` does; it runs as
+`tests/test_svelte_builds.py`. After editing any `.svelte`, and always after a
+rebuild, **open the page in a browser** — a 200 on `/admin/` is only the HTML
+shell and says nothing about whether the JS runs.
+
+## ⚠️ The SSE trace is additive-only — don't touch the frozen fields
+
+The chat stream now also emits `event: plan` (a one-line template plan, chosen by
+intent+language in `app.api._plan_line`, **no LLM call**) and an `args` object on
+`event: step` (the tool's argument, for distinct labels like "Searching for X").
+Both are **additive** — the embed widget ignores unknown events and JSON fields.
+The frozen contract — `event: step`/`event: result`, `data:{delta}`, `[DONE]`,
+`\n\n` frame split, every `data-*` widget attribute — must not change. Store scope
+is NOT in `args` (it rides a contextvar), so a step label cannot leak a sibling
+branch.
 
 ## ⚠️ Product names contain backticks
 
