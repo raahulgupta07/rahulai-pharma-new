@@ -26,7 +26,8 @@
     Menu,
     Bell,
     Pill,
-    Brain
+    Brain,
+    KeyRound
   } from '@lucide/svelte';
   import ToastHost from '$lib/aurora/ToastHost.svelte';
 

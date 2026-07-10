@@ -31,6 +31,7 @@
     DollarSign,
     ChevronDown,
     Sparkles,
+    CornerDownRight,
     Pencil
   } from '@lucide/svelte';
   import { base as appBase } from '$app/paths';
