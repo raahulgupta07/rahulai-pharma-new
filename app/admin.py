@@ -10,7 +10,7 @@ import json
 import time
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, Body, File, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from app import cache
@@ -283,6 +283,36 @@ async def put_config(c: ConfigUpdate) -> Dict:
     if c.system_prompt is not None:
         await cache.set_config_override("system_prompt", c.system_prompt)
     return {"status": "ok", "note": "applied on next agent rebuild/restart"}
+
+
+# ---- authentication config (Keycloak SSO + LDAP) ---------------------------
+
+
+@router.get("/auth-config")
+async def get_auth_config() -> Dict:
+    """Effective LDAP/OIDC config for the admin page. Secrets are masked.
+
+    A secret value is never returned; the client only learns whether one is set
+    (``ldap_bind_password_set`` / ``oidc_client_secret_set``).
+    """
+
+    from app import auth as authmod
+
+    return await authmod.get_auth_config()
+
+
+@router.put("/auth-config")
+async def put_auth_config(updates: Dict = Body(...)) -> Dict:
+    """Persist a partial LDAP/OIDC update. Takes effect on the next login.
+
+    An empty secret field is treated as "keep the current value", so the masked
+    password box can be saved without wiping the stored secret.
+    """
+
+    from app import auth as authmod
+
+    await authmod.set_auth_config(updates)
+    return {"status": "ok", "note": "applied on next login; no restart needed"}
 
 
 # ---- evaluation ------------------------------------------------------------

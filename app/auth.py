@@ -140,34 +140,149 @@ async def login_local(email: str, password: str) -> Dict:
     return make_token(u) | {"user": _public(u)}
 
 
+# ---- runtime-editable auth config (env defaults, Redis overrides) ----------
+#
+# ldap_* / oidc_* start from .env (pydantic Settings) but an admin may override
+# them at runtime from the panel. Overrides live in the same Redis hash as
+# system_prompt, under an "auth." prefix, and are read fresh on every login — so
+# a change takes effect without a restart. Secrets are write-only from the UI:
+# they are stored but never sent back (see get_auth_config).
+
+from types import SimpleNamespace
+
+# key -> (python type, is_secret)
+AUTH_KEYS = {
+    "ldap_enabled": (bool, False),
+    "ldap_host": (str, False),
+    "ldap_port": (int, False),
+    "ldap_use_ssl": (bool, False),
+    "ldap_start_tls": (bool, False),
+    "ldap_validate_cert": (bool, False),
+    "ldap_ca_cert_file": (str, False),
+    "ldap_bind_dn": (str, False),
+    "ldap_bind_password": (str, True),
+    "ldap_base_dn": (str, False),
+    "ldap_user_filter": (str, False),
+    "ldap_email_attr": (str, False),
+    "ldap_name_attr": (str, False),
+    "oidc_enabled": (bool, False),
+    "oidc_provider_name": (str, False),
+    "oidc_discovery_url": (str, False),
+    "oidc_client_id": (str, False),
+    "oidc_client_secret": (str, True),
+    "oidc_redirect_uri": (str, False),
+    "oidc_scopes": (str, False),
+}
+_AUTH_PREFIX = "auth."
+
+
+def _coerce(raw: str, typ):
+    if typ is bool:
+        return str(raw).strip().lower() in ("1", "true", "yes", "on")
+    if typ is int:
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return 0
+    return raw
+
+
+async def effective_auth() -> SimpleNamespace:
+    """Env defaults overlaid with any Redis override, as attributes.
+
+    Reads Redis every call on purpose — enabling SSO from the panel must not
+    need a process restart, and get_settings() is lru_cached against env only.
+    """
+
+    from app import cache
+
+    s = get_settings()
+    try:
+        ov = await cache.get_config_overrides()
+    except Exception:   # noqa: BLE001 — Redis down must fall back to env, never 500 a login
+        ov = {}
+    out = {}
+    for key, (typ, _secret) in AUTH_KEYS.items():
+        raw = ov.get(_AUTH_PREFIX + key)
+        out[key] = _coerce(raw, typ) if raw is not None else getattr(s, key)
+    return SimpleNamespace(**out)
+
+
+async def auth_config_public() -> Dict:
+    """What the login screen needs — no secrets, no infra detail."""
+
+    cfg = await effective_auth()
+    return {
+        "ldap_enabled": cfg.ldap_enabled,
+        "oidc_enabled": cfg.oidc_enabled,
+        "oidc_provider_name": cfg.oidc_provider_name,
+    }
+
+
+async def get_auth_config() -> Dict:
+    """Full config for the admin page. Secrets are masked to a boolean."""
+
+    cfg = await effective_auth()
+    out = {}
+    for key, (_typ, secret) in AUTH_KEYS.items():
+        val = getattr(cfg, key)
+        if secret:
+            out[key] = ""                      # never send the secret back
+            out[key + "_set"] = bool(val)      # only whether one exists
+        else:
+            out[key] = val
+    return out
+
+
+async def set_auth_config(updates: Dict) -> None:
+    """Persist a partial update from the admin page.
+
+    A secret sent empty is left untouched (blank field == "keep current"), so the
+    UI can render an unfilled password box without wiping the stored value.
+    """
+
+    from app import cache
+
+    for key, value in (updates or {}).items():
+        if key not in AUTH_KEYS:
+            continue                            # ignore anything not whitelisted
+        typ, secret = AUTH_KEYS[key]
+        if secret and (value is None or value == ""):
+            continue
+        if typ is bool:
+            stored = "true" if _coerce(str(value), bool) or value is True else "false"
+        else:
+            stored = str(value)
+        await cache.set_config_override(_AUTH_PREFIX + key, stored)
+
+
 # ---- LDAP login (merge by email) -------------------------------------------
 
 
-def _ldap_server():
+def _ldap_server(cfg):
     """Build the ldap3 Server, with real certificate validation when TLS is on."""
 
     import ssl
 
     import ldap3
 
-    s = get_settings()
     tls = None
-    if s.ldap_use_ssl or s.ldap_start_tls:
+    if cfg.ldap_use_ssl or cfg.ldap_start_tls:
         tls = ldap3.Tls(
-            validate=ssl.CERT_REQUIRED if s.ldap_validate_cert else ssl.CERT_NONE,
-            ca_certs_file=s.ldap_ca_cert_file or None,
+            validate=ssl.CERT_REQUIRED if cfg.ldap_validate_cert else ssl.CERT_NONE,
+            ca_certs_file=cfg.ldap_ca_cert_file or None,
         )
     return ldap3.Server(
-        s.ldap_host,
-        port=s.ldap_port,
-        use_ssl=s.ldap_use_ssl,
+        cfg.ldap_host,
+        port=cfg.ldap_port,
+        use_ssl=cfg.ldap_use_ssl,
         tls=tls,
         get_info=ldap3.NONE,
-        connect_timeout=s.ldap_timeout_seconds,
+        connect_timeout=get_settings().ldap_timeout_seconds,
     )
 
 
-def _ldap_connect(server, user, password, *, authentication=None):
+def _ldap_connect(server, user, password, cfg, *, authentication=None):
     """Open a connection, StartTLS if configured, and bind. Returns the bound conn.
 
     ``auto_bind=False`` on purpose: with ``auto_bind=True`` a failed bind raises,
@@ -178,7 +293,6 @@ def _ldap_connect(server, user, password, *, authentication=None):
 
     import ldap3
 
-    s = get_settings()
     conn = ldap3.Connection(
         server,
         user or None,
@@ -186,17 +300,17 @@ def _ldap_connect(server, user, password, *, authentication=None):
         authentication=authentication or (ldap3.SIMPLE if user else ldap3.ANONYMOUS),
         auto_bind=False,
         raise_exceptions=False,
-        receive_timeout=s.ldap_timeout_seconds,
+        receive_timeout=get_settings().ldap_timeout_seconds,
     )
     conn.open()
-    if s.ldap_start_tls and not s.ldap_use_ssl:
+    if cfg.ldap_start_tls and not cfg.ldap_use_ssl:
         conn.start_tls()          # must precede bind, or the password crosses in clear
     if not conn.bind() or not conn.bound:
         return None
     return conn
 
 
-def _ldap_authenticate(username: str, password: str) -> tuple[str, str]:
+def _ldap_authenticate(username: str, password: str, cfg) -> tuple[str, str]:
     """Service-bind → search → rebind as the user. Returns (email, name).
 
     Blocking; ldap3's sync API is used, so callers must push this to a thread.
@@ -206,32 +320,31 @@ def _ldap_authenticate(username: str, password: str) -> tuple[str, str]:
     from ldap3.core.exceptions import LDAPException
     from ldap3.utils.conv import escape_filter_chars
 
-    s = get_settings()
-    server = _ldap_server()
+    server = _ldap_server(cfg)
 
     try:
-        svc = _ldap_connect(server, s.ldap_bind_dn, s.ldap_bind_password)
+        svc = _ldap_connect(server, cfg.ldap_bind_dn, cfg.ldap_bind_password, cfg)
         if svc is None:
             raise AuthError("ldap service account bind failed")
         try:
-            flt = s.ldap_user_filter.format(username=escape_filter_chars(username))
-            svc.search(s.ldap_base_dn, flt, attributes=[s.ldap_email_attr, s.ldap_name_attr])
+            flt = cfg.ldap_user_filter.format(username=escape_filter_chars(username))
+            svc.search(cfg.ldap_base_dn, flt, attributes=[cfg.ldap_email_attr, cfg.ldap_name_attr])
             if not svc.entries:
                 raise AuthError("invalid credentials")
             entry = svc.entries[0]
             user_dn = entry.entry_dn
             # mail/cn are multi-valued in the schema; ldap3 hands back a list.
-            mails = entry[s.ldap_email_attr].values if s.ldap_email_attr in entry else []
+            mails = entry[cfg.ldap_email_attr].values if cfg.ldap_email_attr in entry else []
             if not mails:
-                raise AuthError(f"ldap entry has no {s.ldap_email_attr} attribute")
+                raise AuthError(f"ldap entry has no {cfg.ldap_email_attr} attribute")
             email = str(mails[0]).strip().lower()
-            names = entry[s.ldap_name_attr].values if s.ldap_name_attr in entry else []
+            names = entry[cfg.ldap_name_attr].values if cfg.ldap_name_attr in entry else []
             name = str(names[0]) if names else username
         finally:
             svc.unbind()
 
         # Rebind as the located user. This — and only this — proves the password.
-        user_conn = _ldap_connect(server, user_dn, password, authentication=ldap3.SIMPLE)
+        user_conn = _ldap_connect(server, user_dn, password, cfg, authentication=ldap3.SIMPLE)
         if user_conn is None:
             raise AuthError("invalid credentials")
         user_conn.unbind()
@@ -246,8 +359,8 @@ def _ldap_authenticate(username: str, password: str) -> tuple[str, str]:
 async def login_ldap(username: str, password: str) -> Dict:
     import asyncio
 
-    s = get_settings()
-    if not s.ldap_enabled:
+    cfg = await effective_auth()
+    if not cfg.ldap_enabled:
         raise AuthError("ldap disabled")
 
     # ⚠️ A blank password makes the user rebind below an RFC 4513 §5.1.2
@@ -263,7 +376,7 @@ async def login_ldap(username: str, password: str) -> Dict:
     if not username or not username.strip():
         raise AuthError("invalid credentials")
 
-    email, name = await asyncio.to_thread(_ldap_authenticate, username.strip(), password)
+    email, name = await asyncio.to_thread(_ldap_authenticate, username.strip(), password, cfg)
     user = await _merge_external(email, name, "ldap")
     return make_token(user) | {"user": _public(user)}
 
@@ -274,7 +387,7 @@ async def login_ldap(username: str, password: str) -> Dict:
 _DISCOVERY: Dict[str, Any] = {}   # {url: (expires_at_monotonic, metadata)}
 
 
-async def _oidc_metadata() -> Dict[str, Any]:
+async def _oidc_metadata(cfg) -> Dict[str, Any]:
     """Fetch (and briefly cache) the realm's .well-known document.
 
     Keycloak's discovery doc changes only when the realm is reconfigured, so
@@ -283,17 +396,16 @@ async def _oidc_metadata() -> Dict[str, Any]:
 
     import httpx
 
-    s = get_settings()
-    if not s.oidc_discovery_url:
-        raise AuthError("oidc: OIDC_DISCOVERY_URL is not set")
+    if not cfg.oidc_discovery_url:
+        raise AuthError("oidc: discovery URL is not set")
 
-    hit = _DISCOVERY.get(s.oidc_discovery_url)
+    hit = _DISCOVERY.get(cfg.oidc_discovery_url)
     if hit and hit[0] > time.monotonic():
         return hit[1]
 
     try:
         async with httpx.AsyncClient(timeout=15) as c:
-            r = await c.get(s.oidc_discovery_url)
+            r = await c.get(cfg.oidc_discovery_url)
             r.raise_for_status()
             meta = r.json()
     except httpx.HTTPError as exc:
@@ -303,9 +415,9 @@ async def _oidc_metadata() -> Dict[str, Any]:
         if not meta.get(key):
             raise AuthError(f"oidc: discovery document has no {key}")
 
-    if s.oidc_discovery_ttl_seconds > 0:
-        _DISCOVERY[s.oidc_discovery_url] = (
-            time.monotonic() + s.oidc_discovery_ttl_seconds, meta,
+    if get_settings().oidc_discovery_ttl_seconds > 0:
+        _DISCOVERY[cfg.oidc_discovery_url] = (
+            time.monotonic() + get_settings().oidc_discovery_ttl_seconds, meta,
         )
     return meta
 
@@ -349,15 +461,15 @@ def verify_state(state: str, cookie_nonce: str) -> None:
 
 
 async def oidc_authorize_url(state: str) -> str:
-    s = get_settings()
-    if not s.oidc_enabled:
+    cfg = await effective_auth()
+    if not cfg.oidc_enabled:
         raise AuthError("oidc disabled")
-    meta = await _oidc_metadata()
+    meta = await _oidc_metadata(cfg)
     from urllib.parse import urlencode
 
     qs = urlencode({
-        "client_id": s.oidc_client_id, "response_type": "code",
-        "scope": s.oidc_scopes, "redirect_uri": s.oidc_redirect_uri, "state": state,
+        "client_id": cfg.oidc_client_id, "response_type": "code",
+        "scope": cfg.oidc_scopes, "redirect_uri": cfg.oidc_redirect_uri, "state": state,
     })
     return f"{meta['authorization_endpoint']}?{qs}"
 
@@ -376,19 +488,19 @@ async def oidc_callback(code: str) -> Dict:
 
     import httpx
 
-    s = get_settings()
-    if not s.oidc_enabled:
+    cfg = await effective_auth()
+    if not cfg.oidc_enabled:
         raise AuthError("oidc disabled")
     if not code:
         raise AuthError("sso: no authorization code")
-    meta = await _oidc_metadata()
+    meta = await _oidc_metadata(cfg)
 
     try:
         async with httpx.AsyncClient(timeout=15) as c:
             tr = await c.post(meta["token_endpoint"], data={
                 "grant_type": "authorization_code", "code": code,
-                "redirect_uri": s.oidc_redirect_uri,
-                "client_id": s.oidc_client_id, "client_secret": s.oidc_client_secret,
+                "redirect_uri": cfg.oidc_redirect_uri,
+                "client_id": cfg.oidc_client_id, "client_secret": cfg.oidc_client_secret,
             })
             tok = tr.json() if tr.content else {}
             access = tok.get("access_token")
@@ -490,4 +602,6 @@ __all__ = [
     "make_state", "verify_state", "SSO_NONCE_COOKIE",
     "make_token", "decode_token", "list_users", "create_user", "update_user",
     "delete_user", "get_by_email", "AuthError",
+    "AUTH_KEYS", "effective_auth", "auth_config_public",
+    "get_auth_config", "set_auth_config",
 ]

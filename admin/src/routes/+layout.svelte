@@ -159,6 +159,7 @@
       label: 'Configuration',
       items: [
         { href: '/settings', label: 'Answer behaviour', icon: SlidersHorizontal },
+        { href: '/auth', label: 'Authentication', icon: KeyRound },
         { href: '/agent', label: 'Agent', icon: Bot },
         { href: '/embed', label: 'Embed widget', icon: Code2 }
       ]

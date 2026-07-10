@@ -119,14 +119,16 @@ def test_ldap_tls_validates_certificates_by_default():
     """LDAPS without cert validation is MITM-able; the default must be strict."""
 
     import ssl
+    from types import SimpleNamespace
 
     s = get_settings()
     assert s.ldap_validate_cert is True
 
-    from unittest.mock import patch
-
-    with patch.object(s, "ldap_use_ssl", True):
-        server = authmod._ldap_server()
+    cfg = SimpleNamespace(
+        ldap_host="ldap.example.com", ldap_port=636, ldap_use_ssl=True,
+        ldap_start_tls=False, ldap_validate_cert=True, ldap_ca_cert_file="",
+    )
+    server = authmod._ldap_server(cfg)
     assert server.tls is not None, "TLS enabled but no Tls object -> no validation"
     assert server.tls.validate == ssl.CERT_REQUIRED
 
@@ -192,6 +194,76 @@ def test_oidc_callback_rejects_a_missing_code(monkeypatch):
 
 
 # ---- merge policy: SSO must not be able to provision an account -------------
+
+
+# ---- runtime auth-config overrides ------------------------------------------
+
+
+def test_get_auth_config_never_returns_a_secret():
+    """The admin GET must mask secrets to a boolean, never echo the value."""
+
+    async def go():
+        await authmod.set_auth_config({
+            "oidc_client_secret": "top-secret-value",
+            "ldap_bind_password": "svc-pw-value",
+            "oidc_client_id": "pharmacy-agent",
+        })
+        try:
+            return await authmod.get_auth_config()
+        finally:
+            await _scrub()
+
+    out = run(go())
+    # values masked, presence exposed
+    assert out["oidc_client_secret"] == ""
+    assert out["ldap_bind_password"] == ""
+    assert out["oidc_client_secret_set"] is True
+    assert out["ldap_bind_password_set"] is True
+    # non-secret round-trips normally
+    assert out["oidc_client_id"] == "pharmacy-agent"
+    # the raw secret must appear NOWHERE in the payload
+    assert "top-secret-value" not in repr(out)
+    assert "svc-pw-value" not in repr(out)
+
+
+def test_empty_secret_save_keeps_the_stored_value():
+    """A blank password field means 'keep current', not 'wipe'."""
+
+    async def go():
+        await authmod.set_auth_config({"oidc_client_secret": "keep-me"})
+        await authmod.set_auth_config({"oidc_client_secret": "", "oidc_provider_name": "KC"})
+        cfg = await authmod.effective_auth()
+        try:
+            return cfg.oidc_client_secret, cfg.oidc_provider_name
+        finally:
+            await _scrub()
+
+    secret, name = run(go())
+    assert secret == "keep-me"       # not wiped by the empty save
+    assert name == "KC"              # the non-secret in the same save applied
+
+
+def test_override_toggles_enabled_live():
+    async def go():
+        await authmod.set_auth_config({"oidc_enabled": True})
+        on = (await authmod.auth_config_public())["oidc_enabled"]
+        await _scrub()
+        off = (await authmod.auth_config_public())["oidc_enabled"]
+        return on, off
+
+    on, off = run(go())
+    assert on is True and off is False
+
+
+async def _scrub():
+    """Remove every auth.* override so a test never leaks SSO into other tests."""
+
+    from app import cache
+
+    c = cache.get_client()
+    keys = [k for k in (await c.hgetall(cache._CONFIG_KEY)).keys() if k.startswith("auth.")]
+    if keys:
+        await c.hdel(cache._CONFIG_KEY, *keys)
 
 
 def test_external_login_cannot_create_a_user():

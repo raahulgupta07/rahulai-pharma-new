@@ -214,14 +214,13 @@ class LoginRequest(BaseModel):
 
 @app.get("/auth/config")
 async def auth_config() -> Dict[str, Any]:
-    """Public — tells the login screen which methods are available."""
+    """Public — tells the login screen which methods are available.
 
-    s = get_settings()
-    return {
-        "ldap_enabled": s.ldap_enabled,
-        "oidc_enabled": s.oidc_enabled,
-        "oidc_provider_name": s.oidc_provider_name,
-    }
+    Reads the effective config (env + runtime overrides) so toggling SSO from
+    the admin panel shows the button without a restart.
+    """
+
+    return await authmod.auth_config_public()
 
 
 @app.post("/auth/login")
