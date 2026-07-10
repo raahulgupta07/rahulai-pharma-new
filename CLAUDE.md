@@ -14,13 +14,20 @@ SvelteKit admin SPA ("Aurora" UI) is served at `/admin`.
   Flash variants, A/B picker). Override with `OPENROUTER_MODEL` env.
 - **Embeddings:** `google/gemini-embedding-2` (3072-dim, pgvector, exact scan).
 
-## Status (2026-07-09)
+## Status (2026-07-10)
 
 **Functionally complete + running locally.** Services up (api/postgres/redis/sftp/
-ingest-worker healthy), real data loaded (5,292 catalog · 111,654 inventory),
-**81 tests pass** (4 skipped — live/network-gated). Aurora UI
-(Overview/Settings/Chat/Data), Claude-style chat with tool-use trace + rich
+ingest-worker healthy), real data loaded (5,292 catalog · 111,654 inventory). Run
+`pytest -q` for the test count; 4 skip without a live `OPENROUTER_API_KEY`. Aurora
+UI (Overview/Settings/Chat/Data), Claude-style chat with tool-use trace + rich
 rendering, redesigned Data page, GraphRAG, auth, embed API — all live + verified.
+
+**Accuracy is UNMEASURED.** `evals/bench.py` grades nothing — it measures latency
+only. `evals/run_eval.py` (the accuracy eval, `RUN_LIVE=1`) has **never been run
+in this repo**, so there is no per-question pass/fail record anywhere. Three
+recent changes alter what the model *says* (the `FORMATTING` prompt block, the
+fast path, `NULLS LAST`) and none has been graded. Do not cite a correctness
+number; there isn't one.
 
 **Git:** repo under version control since 2026-07-09. `main` holds the
 pre-optimization baseline (`1610801`); `feature/optimize` holds the speed +
@@ -102,14 +109,15 @@ derived, not reviewed (see "Design").
 
 ```
 SvelteKit admin (admin/)  ──serves──>  /admin  (built into the api image)
-        │ fetch
+        │ fetch, SAME-ORIGIN (apiBase.js) — never a hardcoded port
         ▼
-FastAPI (app/api.py) :8088 ──> Agno agent (app/agent.py, 12 tools)
-        │                            │
-        ▼                            ▼
-Postgres 16 + pgvector         Redis (cache, sessions, rate limit)
-(catalog, inventory,           (app/cache.py)
- drug_edges, MVs)
+FastAPI (app/api.py)  ──────> Agno agent (app/agent.py, 12 tools)
+   :8088 baseline             │
+   :8091 optimize             ▼
+        │              Redis (cache, sessions, rate limit)
+        ▼              (app/cache.py — answers keyed by data_version)
+Postgres 16 + pgvector
+(catalog, inventory, drug_edges, MVs)
 ```
 
 The agent is a **router**: per question it picks among three retrieval modes —
@@ -153,20 +161,29 @@ RUN_LIVE=1 ./venv/bin/python -m evals.run_eval   # live accuracy (costs $)
 RUN_LIVE=1 ./venv/bin/python -m evals.bench      # live latency p50/p95 (costs $)
 ```
 
-## ⚠️ Deploy gotcha — backend code is BAKED into the image
+## ⚠️ Deploy gotcha — backend AND admin SPA are BAKED into the image
 
-`docker-compose.yml` has **no source volume mount** for `api` — `app/` is copied
-in at build. After editing any `app/*.py`, the running container does NOT pick it
-up on its own. Fast path (avoids a full multi-stage rebuild):
+`docker-compose.yml` has **no source volume mount** for `api` — both `app/` and
+the built `admin/build` are copied in at image build. Editing either on the host
+changes nothing in a running container.
+
+**Always rebuild.** Never touch the baseline stack unless you mean to — it is the
+benchmark's control:
 
 ```bash
-docker cp app/api.py pharmacy-agent-api-1:/app/app/api.py
-docker restart pharmacy-agent-api-1
-until [ "$(curl -s -o /dev/null -w '%{http_code}' localhost:8088/health)" = 200 ]; do sleep 1; done
+cd admin && ./node_modules/.bin/vite build && cd ..   # only if admin/src changed
+docker compose -p pharmacy-opt -f docker-compose.yml -f docker-compose.optimized.yml \
+  build api ingest-worker
+docker compose -p pharmacy-opt -f docker-compose.yml -f docker-compose.optimized.yml \
+  up -d api ingest-worker
 ```
 
-Admin SPA changes are picked up by the vite dev server (HMR) at :5173, but the
-docker-served `/admin` needs a rebuild.
+`docker cp app/x.py pharmacy-agent-api-1:/app/app/x.py && docker restart …` works
+for a quick probe but is **debug-only**: the next rebuild silently erases it, and
+it will not update `/app/admin_build` at all.
+
+The vite dev server (`:5173`, HMR) picks up `admin/src` changes; the docker-served
+`/admin` does not.
 
 ## ⚠️ Site scoping — always go through `_site_clause`
 
@@ -186,6 +203,49 @@ where the token is a user's search string, not a scope.
 
 Scope reaches tools via the `_STORE_SCOPE` contextvar. Never bypass
 `set_store_scope`.
+
+## ⚠️ Cache freshness — anything that writes stock must bump `data_version`
+
+Answers are cached in Redis under a key containing `data_version`; bumping it
+invalidates every cached answer at once. **A writer that forgets to bump serves
+stale stock for up to `CACHE_TTL_SECONDS` (600).**
+
+Bumps: the SFTP watcher / `scan_once`, `POST /api/embed/reload`,
+`POST /api/embed/ingest`, `POST /admin/upload`, `POST /admin/sync/mysql`,
+`POST /admin/graph/rebuild`. **Does not bump: any direct SQL write to Postgres**
+— psql, cron, another service. The app cannot detect it. Call
+`POST /api/embed/reload` afterwards.
+
+**The subtle half.** A writer must pin the version it *read*, not the version at
+write time. `set_cached_answer` used to key on `get_data_version()` at write time;
+an agent run takes ~5s, so an ingest landing inside that window filed an
+old-stock answer under the *new* version, where it looked fresh and survived a
+full TTL. A bump could not evict it — the entry was written *after* the bump. Now
+callers pass `version=` captured before the run, and the answer is dropped rather
+than cached if the data moved. Pinned by
+`tests/test_cache.py::test_ingest_during_run_does_not_poison_cache`.
+
+⚠️ **That test was vacuous on the first attempt.** The fix has two independent
+halves (pin the key, skip the write); disabling one left the other covering for
+it, and the test still passed. To verify a guard like this, revert **all** of the
+fix, not part of it.
+
+## ⚠️ Admin SPA — same-origin, and deep links need a fallback
+
+Two bugs, both fixed, both easy to reintroduce:
+
+- The build **hardcoded `http://localhost:8088` in 16 files**, so the SPA served
+  from the optimize stack on `:8091` drove the **baseline** backend. Every UI
+  observation of the optimize stack was really of baseline, and the fast path was
+  never once exercised from a browser. The base now comes from
+  `admin/src/lib/apiBase.js` (`window.location.origin`) — the backend serves this
+  build, so same-origin is always right. Do not reintroduce a literal port.
+- `/admin/<route>` **404'd on reload.** `adapter-static` emits one `index.html`
+  and no per-route file; the mount was plain `StaticFiles`, which has no SPA
+  fallback, so deep links worked only if you never refreshed. `SPAStatics`
+  (`app/api.py`) falls back to the shell for extensionless misses; a missing `.js`
+  must still 404, or a broken asset returns HTML and fails confusingly. The
+  `/admin/*` API routes are registered **before** the mount, so they win.
 
 ## Two stacks — side-by-side benchmarking
 
@@ -272,6 +332,32 @@ touches the baseline's.
 - A catalog upsert must set `embedding = NULL` when the embedded source text
   changes, or `embed_catalog(only_missing=True)` will keep answering semantic
   searches from a stale vector.
+- **The system prompt is the only thing that asks for tables.** `renderMarkdown()`
+  has always parsed GFM pipe tables and `app.css` has always styled them; before
+  the `FORMATTING` block in `BILINGUAL_SYSTEM_PROMPT`, the only style rule was
+  "be concise", which the model read as "write a sentence". A rendering gap in
+  chat is usually a *prompt* gap, so check there before touching the renderer.
+
+## Ground truth (verified against the running `:8091` DB, 2026-07-10)
+
+Check facts here before writing a test fixture or an example question.
+
+- Tables are **`catalog`** and **`inventory`** — there is no `articles` or `sites`
+  table. Catalog columns: `article_code, brand_name, generic_name, composition,
+  category, indication, dosage, side_effect, mm_reg, mm_label, status, embedding`.
+- Admin login: `admin@citcare.local` / `Admin123!` (the only user, `super_admin`).
+- Real site codes: `20003-CCJ8`, `20005-CCYK`, `20024-CC73`, `20026-CC19`,
+  `20052-CCTLKK`, `20059-CCGMPMTN`, …
+- Real quantities: `RELYTE ORAL REHYDRATION SALTS 20.5G` @ `20026-CC19` = **6533**;
+  `ROYAL-D 25G` @ `20052-CCTLKK` = **4154**, @ `20024-CC73` = **2298**.
+- **`0` of 111,654 inventory rows have a NULL `stock_qty`.** Migration 0001 made
+  the column nullable, but the existing data was ingested with blanks already
+  coerced to `0`. `NULLS LAST` is correct and currently **untested against real
+  NULLs** — they appear only after a re-ingest.
+- **There is no Panadol in this catalog** (nearest: `PARAGEN`, `PARASAFE`,
+  `P-125`). "Do you have Panadol?" is therefore the best probe for a fast-path
+  false positive: the correct answer is "no Panadol", and silently resolving to a
+  paracetamol sibling and reporting its stock is the failure mode to watch for.
 
 ## The embed widget (`app/static/widget.js`)
 
@@ -293,6 +379,24 @@ Three things must never change without breaking production embeds:
 The design mock's tool-trace chips, citation pills, typing indicator, and quick
 replies were **deliberately skipped** — each needs new SSE parsing or state, and
 the contract above outranks the design.
+
+**Known gaps vs the admin chat** (unfixed, in rough order of effort):
+
+1. Answers render with `textContent`, so Markdown tables arrive as literal `|`
+   pipes. The admin's `renderMarkdown` is an ES module and the widget is a
+   dependency-free classic script — copy-pasting it guarantees drift; prefer
+   serving `widget.js` as a concatenation of one shared source.
+2. The SSE loop reads only `j.delta`. It parses `event: step` and `event: result`
+   and **discards** them, so the structured tool rows never reach the DOM.
+3. **The admin source drawer cannot be reused.** It calls
+   `GET /admin/catalog/{code}`, which is admin-authenticated *and* returns every
+   branch's stock and price with **no store scoping** (`app/admin.py`,
+   `catalog_one`). Wiring it into a store-scoped widget would hand a scoped
+   pharmacist every sibling branch's inventory — the same leak class already fixed
+   in `search_by_meaning` / `related_drugs`. A widget drawer needs its own
+   session-scoped endpoint filtering through `_site_clause()`. While there, note
+   `catalog_one` computes `total_stock` as `sum(s["stock_qty"] or 0)`, which
+   coerces NULL (unknown) to zero and contradicts the `NULLS LAST` invariant.
 
 ## Conventions
 
