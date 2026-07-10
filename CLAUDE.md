@@ -81,7 +81,13 @@ were not running.
 **Built but OFF by default:** the semantic answer cache and the router/answer
 model split are coded behind flags defaulting to `False`. The fast path is also
 OFF by default; `docker-compose.optimized.yml` sets `FAST_PATH_ENABLED=true` on
-the `:8091` stack so it can be benched.
+the `:8091` stack so it can be benched. **`HISTORY_ENABLED` defaults ON** — it
+adds no LLM call, only prompt tokens for `HISTORY_TURNS` (3) replayed turns.
+
+**Conversational latency (`:8091`, streaming, measured 2026-07-10):** turn 1 via
+fast path **8.3s**; a conversational cache hit **25ms**; the widget (no
+`session_id`) 7.3s cold / 3ms cached. Before `record_turn`, a conversational turn
+1 cost **15.7s**, because conversations could not use the fast path at all.
 
 **Blocking production (operator-only, NOT code):**
 1. Rotate the OpenRouter key (was shared in chat).
@@ -131,7 +137,8 @@ The agent is a **router**: per question it picks among three retrieval modes —
 | Path | Role |
 |------|------|
 | `app/api.py` | FastAPI app, lifespan, auth routes, embed chat + **SSE stream** (`event: step` tool-trace, `event: result` rows, `data:` deltas) |
-| `app/agent.py` | `build_agent()` — OpenRouter model, 12 tools, bilingual system prompt |
+| `app/agent.py` | `build_agent()` / `build_history_agent()` / `build_learning_agent()` — OpenRouter model, 12 tools, bilingual system prompt |
+| `app/history.py` | `record_turn()` — writes a fast-path / cache-hit turn into the Agno session (private agno APIs; see landmine) |
 | `app/tools.py` | the 12 agent tools (store-scope contextvar) |
 | `app/admin.py` | admin router: catalog/inventory/categories, stores, conversations, graph, users, upload, sftp |
 | `app/auth.py` | users table, bcrypt, JWT, local + LDAP + OIDC, merge-by-email |
@@ -246,6 +253,63 @@ Two bugs, both fixed, both easy to reintroduce:
   (`app/api.py`) falls back to the shell for extensionless misses; a missing `.js`
   must still 404, or a broken asset returns HTML and fails confusingly. The
   `/admin/*` API routes are registered **before** the mount, so they win.
+
+## ⚠️ Conversation history — three ways a turn disappears
+
+`HISTORY_ENABLED` (default ON) gives the chat multi-turn memory: `build_history_agent`
+adds `add_history_to_context` + `db`, and nothing else — no LearningMachine, no
+second extraction model. Only clients that send a **real `session_id`** get it
+(`_conversational()`); the embed widget sends none and stays single-turn.
+
+**1. `agent_id=None` stores the turn and then loses it, silently.**
+`AgentSession.from_dict` only revives a stored run when the key `"agent_id"` is
+present, and `RunOutput.to_dict` drops `None` fields. Agno assigns `agent.id`
+*during* a run, so an agent that has not run yet writes `agent_id=None` — the row
+lands in `agno_sessions` and `get_messages()` steps straight over it. No error.
+Hence `build_history_agent` pins `id=HISTORY_AGENT_ID` ("city-pharma-agent")
+instead of Agno's per-process uuid. This also makes a session written by one
+worker readable by another, and survives a restart; before it, history was
+leaning on Agno's **in-process session cache**.
+
+Two sibling invariants, same silent failure, both pinned by `tests/test_history.py`:
+a run whose `status` is not `completed`, or whose `parent_run_id` is set, is
+stored and never replayed.
+
+**2. The fast path and a cache hit record nothing.**
+The fast path answers with a tool-less phrasing agent that has no `db` and no
+`session_id`; a cache hit runs no agent at all. Both used to leave the
+conversation empty, so the next turn ("which other shop has it?") had nothing to
+resolve "it" against. `app/history.py::record_turn` now writes those turns —
+called from `_remember()` at every such exit in `app/api.py`.
+
+Do **not** "simplify" this by giving the phrasing agent a `db`. Agno persists what
+it is given, and that is `build_phrasing_input()`: a language directive plus a
+FACTS JSON blob of every row the SQL returned. It would replay as a user turn the
+user never sent, and carry a 53-row payload into the next three prompts.
+
+**3. A follow-up must never touch the shared answer cache.**
+The cache key is `(data_version, model, store_id, message)` — no conversation in
+it. Cache "which other shop" and the next conversation to type those three words
+is served an answer about a different drug. `bump_session_turn()` makes turn 1
+cacheable and turn 2+ bypass. The fast path is likewise skipped on follow-ups: it
+resolves the drug from the message alone, and a follow-up names none.
+
+`record_turn` calls agno's **private** `_session` / `_storage`. Funnelled through
+one function; every failure degrades to "the chat forgot this turn", never a
+failed answer. Re-verify after any agno upgrade.
+
+## ⚠️ Product names contain backticks
+
+2,790 of 5,292 catalog rows use a backtick as an apostrophe (`PARACAP
+PARACETAMOL 10`S`). That is Markdown's inline-code delimiter. A permissive
+`` `([^`]+)` `` pairs the apostrophe with the backtick opening an article code
+later on the line and eats the bold marker between them. `renderMarkdown()`
+(`admin/src/lib/aurora/markdown.js`) therefore forbids `*` and whitespace inside a
+code span, and the system prompt tells the model to write article codes **bare**
+— `inline()` chips any 10–14 digit run on its own. Emitted HTML is parked behind a
+sentinel before the bare-code pass, or that pass re-wraps digits inside a chip it
+just made and produces nested `<button>`s. Pinned by `tests/test_markdown_render.py`
+(runs the real module through `node`; skips if node is absent).
 
 ## Two stacks — side-by-side benchmarking
 
