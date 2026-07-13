@@ -89,12 +89,7 @@ timestamped into `./backups/<ts>/` with a per-snapshot `RESTORE.md`.
 
 ## B. Local development
 
-Two side-by-side stacks for benchmarking:
-
-| Stack | Compose | Admin | Postgres | Redis | SFTP |
-|-------|---------|-------|----------|-------|------|
-| baseline | `docker-compose.yml` | :8088 | :5433 | :6380 | :2222 |
-| optimize | `+ docker-compose.optimized.yml` | :8091 | :5434 | :6381 | :2223 |
+One stack, fast path enabled — `admin` on **:8091**, Postgres :5434, Redis :6381, SFTP :2223.
 
 ### 1. Config
 
@@ -103,14 +98,7 @@ cp .env.example .env
 # edit .env: set OPENROUTER_API_KEY=sk-or-... (the rest have working dev defaults)
 ```
 
-### 2. Bring up the baseline stack
-
-```bash
-docker compose up -d --build
-# admin at http://localhost:8088/admin
-```
-
-### Optimize stack (fast-path enabled)
+### 2. Bring it up
 
 ```bash
 docker compose -p pharmacy-opt \
@@ -118,7 +106,7 @@ docker compose -p pharmacy-opt \
 # admin at http://localhost:8091/admin
 ```
 
-Default dev login: `admin@citcare.local` / `changeme` (set in `.env`).
+Default dev login: `admin@citcare.local` / the `ADMIN_PASSWORD` in `.env`.
 
 ### Deploy a code change (dev)
 
@@ -130,6 +118,9 @@ cd admin && ./node_modules/.bin/vite build && cd ..
 docker compose -p pharmacy-opt -f docker-compose.yml -f docker-compose.optimized.yml build api
 docker compose -p pharmacy-opt -f docker-compose.yml -f docker-compose.optimized.yml up -d api
 ```
+
+> The old `docker-compose.yml`-only baseline (`:8088`) was a benchmarking control
+> and is no longer used. Production runs a single stack too — see Path A.
 
 ### Run the tests
 
