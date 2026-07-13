@@ -2,6 +2,7 @@
 
 import asyncio
 import uuid
+from unittest import mock
 
 import pytest
 
@@ -118,23 +119,98 @@ def test_rate_limit_blocks_after_quota():
     assert allowed == [True, True, True, False, False]
 
 
-def test_credentials_open_then_strict():
+def test_credentials_fail_closed_when_store_is_empty():
+    """An EMPTY credential store must reject everything, not accept everything.
+
+    This is the regression that matters. The old implementation returned True for
+    any (embed_id, public_key) whenever the `pharmacy:credentials` hash was empty
+    — "open dev mode" — so a production deploy that never seeded a credential
+    accepted every embed on the internet. Empty now means nobody is authorised.
+    """
+
     async def go():
-        # fresh: ensure no creds -> open mode allows anything
-        await cache.get_client().delete("pharmacy:credentials")
-        open_ok = await cache.is_valid_credential("any", "any")
-        # register one -> strict
+        await cache.get_client().delete(cache._CRED_KEY)
+        empty_store = await cache.is_valid_credential("any", "any")
+        await cache.close_client()
+        return empty_store
+
+    assert run(go()) is False
+
+
+def test_credentials_strict_match():
+    async def go():
+        await cache.get_client().delete(cache._CRED_KEY)
         await cache.register_credential("emb1", "pk1")
         good = await cache.is_valid_credential("emb1", "pk1")
-        bad = await cache.is_valid_credential("emb1", "wrong")
-        await cache.get_client().delete("pharmacy:credentials")  # cleanup
+        wrong_key = await cache.is_valid_credential("emb1", "wrong")
+        unknown_id = await cache.is_valid_credential("nobody", "pk1")
+        blank = await cache.is_valid_credential("", "")
+        await cache.get_client().delete(cache._CRED_KEY)
         await cache.close_client()
-        return open_ok, good, bad
+        return good, wrong_key, unknown_id, blank
 
-    open_ok, good, bad = run(go())
-    assert open_ok is True
+    good, wrong_key, unknown_id, blank = run(go())
     assert good is True
-    assert bad is False
+    assert wrong_key is False
+    assert unknown_id is False   # a registered KEY does not authorise another ID
+    assert blank is False
+
+
+def test_dev_credential_seeds_only_into_an_empty_store():
+    """The seed exists so fail-closed doesn't brick the documented web/web snippet.
+
+    It must fire on an empty store, and must NOT add itself to an operator's set —
+    once any real credential is registered, an operator owns the store and we do
+    not quietly widen it.
+    """
+
+    async def go():
+        await cache.get_client().delete(cache._CRED_KEY)
+        seeded = await cache.ensure_dev_credential()
+        settings = get_settings()
+        works = await cache.is_valid_credential(
+            settings.embed_dev_credential_id, settings.embed_dev_credential_key
+        )
+        # A second call is a no-op: the store is no longer empty.
+        again = await cache.ensure_dev_credential()
+
+        # An operator's own credential must not attract the seed either.
+        await cache.get_client().delete(cache._CRED_KEY)
+        await cache.register_credential("real-tenant", "real-key")
+        not_seeded = await cache.ensure_dev_credential()
+        creds = await cache.list_credentials()
+
+        await cache.get_client().delete(cache._CRED_KEY)
+        await cache.close_client()
+        return seeded, works, again, not_seeded, creds
+
+    seeded, works, again, not_seeded, creds = run(go())
+    assert seeded == get_settings().embed_dev_credential_id
+    assert works is True
+    assert again is None
+    assert not_seeded is None
+    assert set(creds) == {"real-tenant"}   # the seed did not join an owned store
+
+
+def test_dev_credential_can_be_disabled_for_prod():
+    """EMBED_DEV_CREDENTIAL=false leaves the store empty, i.e. fully closed."""
+
+    from app.config import Settings
+
+    async def go():
+        await cache.get_client().delete(cache._CRED_KEY)
+        off = Settings(**{**get_settings().model_dump(), "embed_dev_credential": False})
+        with mock.patch("app.cache.get_settings", return_value=off):
+            seeded = await cache.ensure_dev_credential()
+            still_closed = await cache.is_valid_credential("web", "web")
+        n = await cache.get_client().hlen(cache._CRED_KEY)
+        await cache.close_client()
+        return seeded, still_closed, n
+
+    seeded, still_closed, n = run(go())
+    assert seeded is None
+    assert still_closed is False
+    assert n == 0
 
 
 def test_reload_endpoint_bumps_version(api_client):

@@ -1,0 +1,60 @@
+# Caddy — TLS terminator + reverse proxy for the City Pharma Agent API.
+#
+# PHARMA_DOMAIN and ACME_EMAIL are injected as container env by
+# docker-compose.prod.yml; Caddy expands {$VAR} at load time. Certificates are
+# obtained automatically from Let's Encrypt (HTTP-01 on :80) and stored in the
+# caddy_data volume — back that volume up, or a redeploy re-issues and can hit
+# Let's Encrypt rate limits (5 duplicate certs per week).
+
+{
+	email {$ACME_EMAIL}
+}
+
+{$PHARMA_DOMAIN} {
+	log {
+		output stdout
+		format console
+	}
+
+	# ---- THE STREAMING RULE — do not "tidy" this away --------------------
+	# /api/embed/chat/stream is Server-Sent Events: the browser must receive
+	# `event: step` / `data: {...}` frames AS THEY ARE PRODUCED. Anything that
+	# accumulates the response body turns a live tool-trace into a single blob
+	# that lands ~7 seconds later, and the widget looks broken rather than slow.
+	#
+	# Two separate things have to be off:
+	#   flush_interval -1      -> flush every write downstream immediately,
+	#                             instead of Go's default buffered copy.
+	#   compression off        -> do not gzip the upstream hop; a compressor
+	#                             holds bytes back waiting for its window.
+	# Caddy usually infers flush_interval -1 from `Content-Type:
+	# text/event-stream`, but this is load-bearing enough to state outright
+	# rather than inherit from a heuristic.
+	@sse path /api/embed/chat/stream
+	handle @sse {
+		reverse_proxy api:8000 {
+			flush_interval -1
+			transport http {
+				compression off
+			}
+		}
+	}
+
+	# Everything else: admin SPA, admin API, /health, widget.js, embed session.
+	# `encode` is deliberately scoped to this block and kept away from the SSE
+	# route above.
+	handle {
+		encode zstd gzip
+		reverse_proxy api:8000 {
+			flush_interval -1
+		}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+}

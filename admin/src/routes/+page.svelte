@@ -273,8 +273,15 @@
             >
               <td class="tnum text-ink">{row.article_code}</td>
               <td class="text-ink">{row.brand_name}</td>
-              <td class="num tnum text-ink">{(row.total_stock ?? 0).toLocaleString()}</td>
-              <td class="num tnum text-ink">{(row.weighted_avg_price ?? 0).toLocaleString()} MMK</td>
+              <!-- null = unknown, never 0: a blank count is not a count of zero. -->
+              <td class="num tnum {row.total_stock == null ? 'text-ink-3 italic' : 'text-ink'}"
+                >{row.total_stock == null ? 'unknown' : row.total_stock.toLocaleString()}</td
+              >
+              <td class="num tnum {row.weighted_avg_price == null ? 'text-ink-3 italic' : 'text-ink'}"
+                >{row.weighted_avg_price == null
+                  ? 'unknown'
+                  : row.weighted_avg_price.toLocaleString() + ' MMK'}</td
+              >
               <td class="num tnum text-ink">{(row.site_count ?? 0).toLocaleString()}</td>
             </tr>
           {/each}

@@ -1,0 +1,111 @@
+# Production overlay — AWS / any single Docker host with a public domain.
+#
+#   docker compose -p pharmacy --env-file .env.prod \
+#     -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Use deploy/aws/install.sh instead of running this by hand: it generates every
+# secret, writes .env.prod, seeds the SFTP key volume and mints a real embed
+# credential. This file on its own will refuse to start without .env.prod
+# (the `${VAR:?}` guards below are deliberate — fail loudly, never half-boot).
+#
+# What this overlay changes vs the dev compose:
+#   * Caddy in front, terminating TLS (Let's Encrypt) and proxying to api:8000.
+#   * NOTHING but Caddy is published to the world. Postgres/Redis stop publishing
+#     entirely; the api binds to 127.0.0.1 only (health checks + local debug).
+#     The one exception is SFTP, which partners must reach.
+#   * SFTP is KEY-AUTH ONLY (see the `command:` note on the sftp service).
+#   * Redis is persisted. Embed credentials live in Redis, and with
+#     EMBED_DEV_CREDENTIAL=false nothing re-seeds them — losing the volume means
+#     every embedded widget stops authenticating.
+#   * Secrets come from .env.prod, not .env.
+
+services:
+  api:
+    # Named explicitly so update.sh can tag a rollback point before rebuilding.
+    image: pharmacy-agent:${IMAGE_TAG:-latest}
+    # env_file is a SEQUENCE: compose would otherwise APPEND .env.prod to the
+    # dev .env and let the dev defaults win/lose unpredictably. !override replaces.
+    env_file: !override
+      - .env.prod
+    environment:
+      POSTGRES_URL: postgresql://pharmacy:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD missing — run deploy/aws/install.sh}@postgres:5432/pharmacy
+      REDIS_URL: redis://redis:6379/0
+      INCOMING_DIR: /incoming
+      # Where the admin API writes partner public keys. Shared volume with sftp.
+      SFTP_KEYS_DIR: /sftp_ssh
+    ports: !override
+      - "127.0.0.1:8088:8000"   # loopback only — Caddy reaches it over the compose network
+    restart: unless-stopped
+
+  postgres:
+    environment:
+      POSTGRES_USER: pharmacy
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD missing — run deploy/aws/install.sh}
+      POSTGRES_DB: pharmacy
+    ports: !override []        # not published — reachable only inside the compose network
+
+  redis:
+    # Default redis has no volume: a container recreate would silently drop every
+    # registered embed credential (they live in the `pharmacy:credentials` hash)
+    # and, with EMBED_DEV_CREDENTIAL=false, nothing re-seeds them.
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    ports: !override []        # not published
+
+  sftp:
+    # KEY AUTH ONLY. The password field between the two colons is EMPTY on
+    # purpose: atmoz/sftp's create-sftp-user runs `usermod -p "*"` when the
+    # password is blank, which disables password login for the account. (Verified
+    # against the image's own /usr/local/bin/create-sftp-user, not assumed.)
+    # The dev compose keeps a password so local testing stays easy.
+    command: "${SFTP_USERNAME:-pharma}::1001:1001:upload"
+    ports: !override
+      - "${SFTP_PUBLIC_PORT:-2222}:22"
+    volumes:
+      # atmoz generates host keys on first boot into /etc/ssh. Without a volume
+      # they are regenerated whenever the container is recreated, and every
+      # partner's sftp client then refuses to connect with
+      # "REMOTE HOST IDENTIFICATION HAS CHANGED". A named volume is seeded from
+      # the image's /etc/ssh on first use, so this keeps the fingerprint stable.
+      - sftp_hostkeys:/etc/ssh
+      # Belt and braces on top of the empty-password user: hard-disable password
+      # auth in sshd_config itself. Prod only.
+      - ./sftp/sshd_harden.sh:/etc/sftp.d/10-sshd-harden.sh:ro
+    restart: unless-stopped
+
+  ingest-worker:
+    image: pharmacy-agent:${IMAGE_TAG:-latest}
+    env_file: !override
+      - .env.prod
+    environment:
+      POSTGRES_URL: postgresql://pharmacy:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD missing — run deploy/aws/install.sh}@postgres:5432/pharmacy
+      REDIS_URL: redis://redis:6379/0
+      INCOMING_DIR: /incoming
+    restart: unless-stopped
+
+  # ---- TLS terminator -------------------------------------------------------
+  # Automatic Let's Encrypt certs for PHARMA_DOMAIN. The chat API is SSE, so the
+  # proxy must not buffer — see deploy/aws/Caddyfile.
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"      # ACME HTTP-01 challenge + redirect to https
+      - "443:443"
+      - "443:443/udp"  # HTTP/3
+    environment:
+      PHARMA_DOMAIN: ${PHARMA_DOMAIN:?PHARMA_DOMAIN missing — run deploy/aws/install.sh}
+      ACME_EMAIL: ${ACME_EMAIL:?ACME_EMAIL missing — run deploy/aws/install.sh}
+    volumes:
+      - ./deploy/aws/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data        # certificates + ACME account key. Back this up.
+      - caddy_config:/config
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  caddy_data:
+  caddy_config:
+  sftp_hostkeys:

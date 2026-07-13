@@ -42,7 +42,8 @@ from app.cache import (
     set_cached_answer,
 )
 from app import fastpath
-from app.config import get_settings
+from app.cache import ensure_dev_credential
+from app.config import Settings, get_settings
 from app.db import close_pool, counts, get_pool
 from app.embeddings import close as close_embeddings
 from app.ingest import reload_from_data_dir
@@ -78,6 +79,52 @@ def _step_detail(tool_args) -> str:
         if isinstance(v, str) and v.strip():
             return v.strip()[:20]
     return ""
+
+
+_CODE_RE = _re.compile(r"^\d{10,14}$")
+
+
+def _subject_of(rows: list, tool_args) -> Optional[Dict[str, str]]:
+    """The drug an answer is ABOUT — code + display name — or ``None``.
+
+    Sent as the additive ``subject`` field on an SSE ``result`` frame so the UI
+    can offer follow-up questions ("price of X?", "substitutes for X?"). It
+    cannot be read off the rows alone: ``get_stock`` and ``find_at_other_stores``
+    select ``site_code, site_name, stock_qty`` — branch rows, no drug. The row
+    scan below therefore falls back to the tool's own ``code`` argument.
+    """
+
+    for row in rows[:8]:
+        if not isinstance(row, dict):
+            continue
+        code = next(
+            (
+                str(v)
+                for k, v in row.items()
+                if "code" in k.lower() and _CODE_RE.match(str(v or ""))
+            ),
+            None,
+        )
+        if not code:
+            continue
+        name = next(
+            (
+                v.strip()
+                for k, v in row.items()
+                if isinstance(v, str)
+                and _re.search(r"name|brand|product|desc", k, _re.I)
+                and len(v.strip()) > 2
+            ),
+            None,
+        )
+        return {"code": code, "name": name or code}
+
+    if isinstance(tool_args, dict):
+        for k in ("code", "article_code"):
+            v = tool_args.get(k)
+            if v and _CODE_RE.match(str(v)):
+                return {"code": str(v), "name": str(v)}
+    return None
 
 
 def _plan_line(message: str) -> str:
@@ -161,6 +208,22 @@ async def lifespan(_app: FastAPI):
         await seed_super_admin()
     except Exception as exc:  # noqa: BLE001
         logger.warning("user auth init skipped: %s", exc)
+    # After ensure_users_table: adds users.store_id (branch-scoped admins) and
+    # drug_alias. Ordering matters — the column is added to a table that must
+    # already exist.
+    try:
+        from app.admin import ensure_admin_schema
+
+        await ensure_admin_schema()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("admin schema init skipped: %s", exc)
+    # The embed credential check is fail-closed, so an empty store rejects every
+    # embed. Seed the documented dev credential — flag-gated, and only into an
+    # empty store. Never silently: it logs a warning when it fires.
+    try:
+        await ensure_dev_credential()
+    except Exception as exc:  # noqa: BLE001 — Redis down must not block startup
+        logger.warning("embed credential seed skipped: %s", exc)
     try:
         from app.admin import prune_chat_logs
 
@@ -177,10 +240,51 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="CitCare Pharmacy Agent", lifespan=lifespan)
 
-_origins = [o.strip() for o in get_settings().allowed_origins.split(",") if o.strip()]
+
+def cors_origins() -> list[str]:
+    """Resolve ALLOWED_ORIGINS to the list handed to CORSMiddleware.
+
+    Two rules, both learned the hard way:
+
+    * ``*`` is honoured only when an operator actually wrote it. It is no longer
+      the default, and — critically — it is no longer the *fallback*. The old
+      code said ``allow_origins=_origins or ["*"]``, so an empty or
+      whitespace-only ALLOWED_ORIGINS silently reopened the API to every site on
+      the internet: the one value an operator is most likely to leave behind
+      while tightening the config was the one that undid the tightening.
+    * An empty/blank setting therefore falls back to the safe localhost default,
+      never to a wildcard.
+
+    A wildcard still logs a warning, because the embed API mints store-scoped
+    session tokens and any origin being allowed to ask for one is a decision, not
+    an accident.
+    """
+
+    raw = get_settings().allowed_origins
+    origins = [o.strip() for o in raw.split(",") if o.strip()]
+    if not origins:
+        origins = [
+            o.strip()
+            for o in Settings.model_fields["allowed_origins"].default.split(",")
+            if o.strip()
+        ]
+        logger.warning(
+            "ALLOWED_ORIGINS is empty; falling back to the dev default %s "
+            "(NOT a wildcard). Set ALLOWED_ORIGINS to your real domains.",
+            origins,
+        )
+    if "*" in origins:
+        logger.warning(
+            "CORS IS OPEN TO ALL ORIGINS (ALLOWED_ORIGINS=*). Any website can call "
+            "the embed API from a visitor's browser. Set ALLOWED_ORIGINS to the "
+            "customer domains before exposing this deployment."
+        )
+    return origins
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_origins or ["*"],   # set ALLOWED_ORIGINS in prod
+    allow_origins=cors_origins(),
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -842,8 +946,17 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 yield f"event: step\ndata: {step}\n\n"
                 rows = fastpath.result_rows(facts)
                 if rows:
-                    result = json.dumps({"tool": facts["tool"], "rows": rows[:8]})
-                    yield f"event: result\ndata: {result}\n\n"
+                    # `subject` is additive: the hot tools (get_stock,
+                    # find_at_other_stores) select only site_code/site_name/
+                    # stock_qty, so the drug the answer is ABOUT appears in no
+                    # row. The UI needs it to offer follow-up questions.
+                    frame: dict = {"tool": facts["tool"], "rows": rows[:8]}
+                    if facts.get("article_code"):
+                        frame["subject"] = {
+                            "code": facts["article_code"],
+                            "name": facts.get("brand_name") or facts["article_code"],
+                        }
+                    yield f"event: result\ndata: {json.dumps(frame)}\n\n"
                 phrase_prompt = fastpath.build_phrasing_input(
                     _scoped_message(req.message, store_id), facts
                 )
@@ -874,6 +987,10 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
 
         scope = set_store_scope(store_id)
         full = ""
+        # Last drug seen in a tool result, carried across steps: get_stock and
+        # find_at_other_stores return branch rows only, so a turn that ends on
+        # one of them would otherwise name no subject at all.
+        subject: Optional[Dict[str, str]] = None
         metrics.incr("llm_calls")
         metrics.record_llm()
         try:
@@ -916,8 +1033,11 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     if isinstance(rows, dict):
                         rows = [rows]
                     if isinstance(rows, list) and rows and isinstance(rows[0], dict):
-                        frame = json.dumps({"tool": tname, "rows": rows[:8]})
-                        yield f"event: result\ndata: {frame}\n\n"
+                        subject = _subject_of(rows, getattr(tool_obj, "tool_args", None)) or subject
+                        payload: dict = {"tool": tname, "rows": rows[:8]}
+                        if subject:
+                            payload["subject"] = subject
+                        yield f"event: result\ndata: {json.dumps(payload)}\n\n"
                 elif name == "RunContentEvent":
                     delta = getattr(event, "content", None)
                     if isinstance(delta, str) and delta:

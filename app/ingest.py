@@ -19,13 +19,17 @@ Inventory load uses asyncpg ``copy_records_to_table`` so 100k+ rows load fast.
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 
 from app.db import apply_schema, counts, execute, get_pool, q
+
+logger = logging.getLogger(__name__)
 
 # Column maps from source headers -> our schema fields.
 _CATALOG_MAP = {
@@ -163,16 +167,46 @@ def parse_inventory(path: str) -> List[Tuple]:
 # ---- loading ---------------------------------------------------------------
 
 
-async def ingest_catalog(path: str) -> int:
-    """Upsert catalog rows (merge: add new, update existing). Returns row count."""
+async def ingest_catalog(path: str, mode: str = "full_sync") -> Dict:
+    """Load catalog rows from one file. Returns ``{"rows": upserted, "deleted": removed}``.
 
+    Every upserted row is stamped ``last_seen = <run_start>`` (one timestamp
+    captured at the top of the call, shared by every row from this file).
+
+    * ``mode="full_sync"`` (default): the file is authoritative. After the upsert, any row
+      whose ``last_seen`` is not this run's timestamp was absent from the file, so
+      it is discontinued and deleted — ``DELETE ... WHERE last_seen IS DISTINCT
+      FROM <run_start>``. This is the "replace the world" semantic WITHOUT a
+      ``TRUNCATE``: a truncate would cascade the ``drug_alias`` FK and blow away
+      unrelated rows; this touches only the rows the file dropped.
+    * ``mode="merge"``: upsert only — add new, update existing, delete NOTHING.
+      The historical behaviour; select it on the SFTP page to keep discontinued
+      drugs.
+
+    Guard: if the file parses to ZERO rows (empty or partial upload), full_sync
+    deletes NOTHING — a delete keyed on a timestamp no row carries would match
+    every row and wipe the whole catalog. Upsert + delete run in ONE transaction.
+    """
+
+    run_start = datetime.now(timezone.utc)
     # Parsing 100k+ rows with pandas is CPU-bound; keep it off the event loop.
     rows = await asyncio.to_thread(parse_catalog, path)
     if not rows:
-        return 0
-    cols = ", ".join(_CATALOG_FIELDS)
-    placeholders = ", ".join(f"${i+1}" for i in range(len(_CATALOG_FIELDS)))
-    updates = ", ".join(f"{f} = EXCLUDED.{f}" for f in _CATALOG_FIELDS if f != "article_code")
+        # An empty/partial upload is never authoritative. Skipping the delete here
+        # is the guard that stops a bad file from emptying the catalog in
+        # full_sync — see tests/test_catalog_full_sync.py.
+        if mode == "full_sync":
+            logger.warning(
+                "full_sync: parsed 0 catalog rows from %s; skipping delete "
+                "(empty/partial upload guard)", Path(path).name,
+            )
+        return {"rows": 0, "deleted": 0}
+
+    fields = _CATALOG_FIELDS
+    cols = ", ".join(fields) + ", last_seen"
+    placeholders = ", ".join(f"${i+1}" for i in range(len(fields))) + f", ${len(fields)+1}"
+    updates = ", ".join(f"{f} = EXCLUDED.{f}" for f in fields if f != "article_code")
+    updates += ", last_seen = EXCLUDED.last_seen"
     # Reset the vector to NULL only when embedded source text actually changed,
     # so embed_catalog(only_missing=True) re-embeds it. IS DISTINCT FROM treats
     # NULLs sanely; unchanged rows keep their embedding (no needless re-embed).
@@ -183,11 +217,23 @@ async def ingest_catalog(path: str) -> int:
         f"ON CONFLICT (article_code) DO UPDATE SET {updates}, "
         f"embedding = CASE WHEN {changed} THEN NULL ELSE catalog.embedding END"
     )
+    params = [tuple(r[f] for f in fields) + (run_start,) for r in rows]
+
     pool = await get_pool()
+    deleted = 0
     async with pool.acquire() as conn:
         async with conn.transaction():
-            await conn.executemany(sql, [tuple(r[f] for f in _CATALOG_FIELDS) for r in rows])
-    return len(rows)
+            await conn.executemany(sql, params)
+            if mode == "full_sync":
+                gone = await conn.fetch(
+                    "DELETE FROM catalog WHERE last_seen IS DISTINCT FROM $1 "
+                    "RETURNING article_code",
+                    run_start,
+                )
+                deleted = len(gone)
+    if deleted:
+        logger.info("full_sync removed %s discontinued catalog rows", deleted)
+    return {"rows": len(rows), "deleted": deleted}
 
 
 async def ingest_inventory(path: str) -> int:
@@ -289,13 +335,34 @@ async def embed_catalog(only_missing: bool = True, batch_size: int = 64) -> int:
     return total
 
 
-async def ingest_file(path: str) -> Dict:
-    """Dispatch one file to the right loader based on its name."""
+async def build_edges_safe() -> Optional[int]:
+    """Rebuild the drug graph. Returns the edge count, or None if it failed.
+
+    The graph is an optional enrichment (substitutes, generics), so a failure
+    here must not fail an ingest that already landed its rows.
+    """
+
+    try:
+        from app.graph import build_edges
+
+        return int((await build_edges()).get("total", 0))
+    except Exception:  # noqa: BLE001 - graph optional
+        logger.exception("graph rebuild failed after ingest")
+        return None
+
+
+async def ingest_file(path: str, catalog_mode: str = "full_sync") -> Dict:
+    """Dispatch one file to the right loader based on its name.
+
+    ``catalog_mode`` ('merge' | 'full_sync') is applied only to a catalog file;
+    inventory is always a full snapshot replace regardless.
+    """
 
     kind = detect_kind(path)
     if kind == "catalog":
-        n = await ingest_catalog(path)
-        return {"file": Path(path).name, "kind": "catalog", "rows": n}
+        res = await ingest_catalog(path, mode=catalog_mode)
+        return {"file": Path(path).name, "kind": "catalog",
+                "rows": res["rows"], "deleted": res["deleted"]}
     if kind == "inventory":
         n = await ingest_inventory(path)
         return {"file": Path(path).name, "kind": "inventory", "rows": n}
@@ -336,7 +403,7 @@ async def reload_from_data_dir(data_dir: Optional[str] = None) -> Dict:
     result: Dict = {"catalog_file": Path(cat).name if cat else None,
                     "inventory_file": Path(inv).name if inv else None}
     if cat:
-        result["catalog_loaded"] = await ingest_catalog(cat)
+        result["catalog_loaded"] = (await ingest_catalog(cat))["rows"]
     if inv:
         result["inventory_loaded"] = await ingest_inventory(inv)
     await refresh_views()
@@ -374,7 +441,7 @@ async def ingest_paths(catalog_path: Optional[str], inventory_path: Optional[str
 
     result: Dict = {}
     if catalog_path:
-        result["catalog"] = await ingest_catalog(catalog_path)
+        result["catalog"] = (await ingest_catalog(catalog_path))["rows"]
     if inventory_path:
         result["inventory"] = await ingest_inventory(inventory_path)
     result.update(await counts())

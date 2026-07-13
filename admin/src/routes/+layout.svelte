@@ -29,7 +29,14 @@
     Brain,
     KeyRound,
     ShieldCheck,
-    Loader2
+    Loader2,
+    ArrowRight,
+    Eye,
+    EyeOff,
+    Package,
+    Sparkles,
+    Lock,
+    Building
   } from '@lucide/svelte';
   import ToastHost from '$lib/aurora/ToastHost.svelte';
 
@@ -51,11 +58,44 @@
   }
 
   let authToken = $state(browser ? localStorage.getItem('auth_token') || '' : '');
-  let email = $state('');
+  let email = $state(browser ? localStorage.getItem('login_email') || '' : '');
   let password = $state('');
   let loginErr = $state('');
   let ssoEnabled = $state(false);
   let ssoName = $state('SSO');
+  let ldapEnabled = $state(false);
+  let showPw = $state(false);
+  let remember = $state(browser ? localStorage.getItem('login_email') != null : true);
+  let signingIn = $state(false);
+
+  // Time-of-day greeting for the sign-in headline (browser-local clock).
+  const greeting = browser
+    ? (() => {
+        const h = new Date().getHours();
+        return h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening';
+      })()
+    : 'Welcome';
+
+  // Login showcase animation: a "worked step" walks 1→5 on a loop, the example
+  // question rotates, and the answer counts up — so the right panel reads live,
+  // not a static screenshot. Pure decoration; only the login DOM consumes it.
+  const demoQueries = [
+    { en: 'Do we have Relyte in stock?', my: 'ဖျားနာ ဆေး ရှိလား?' },
+    { en: "What can I give instead of Alaxan?", my: 'Alaxan အစား ဘာပေးလို့ရလဲ?' },
+    { en: 'Show Royal-D stock at Yankin', my: 'Royal-D ဘယ်လောက် ကျန်လဲ?' }
+  ];
+  let activeStep = $state(0);
+  let demoIdx = $state(0);
+  let answerCount = $state(0);
+  if (browser) {
+    setInterval(() => {
+      activeStep = (activeStep + 1) % 5;
+      if (activeStep === 0) demoIdx = (demoIdx + 1) % demoQueries.length;
+      // count settles on the "Answer" step, resets when the walk restarts
+      if (activeStep === 4) answerCount = 8 + ((demoIdx * 5 + 4) % 20);
+      else if (activeStep === 0) answerCount = 0;
+    }, 1400);
+  }
 
   // Approval gate: an authenticated account only reaches the console once an
   // admin has approved it. `me` is null until /auth/me answers; a pending
@@ -70,7 +110,12 @@
       return;
     }
     try {
-      const r = await fetch(API + '/auth/me');
+      // Send the token explicitly: this can fire before the global fetch
+      // Authorization patch is installed, so relying on it would 401 the first
+      // /auth/me and bounce a freshly-logged-in user straight back to login.
+      const r = await fetch(API + '/auth/me', {
+        headers: { Authorization: `Bearer ${authToken}` }
+      });
       if (r.status === 401) {
         localStorage.removeItem('auth_token');
         authToken = '';
@@ -116,12 +161,15 @@
       .then((c) => {
         ssoEnabled = !!c.oidc_enabled;
         ssoName = c.oidc_provider_name || 'SSO';
+        ldapEnabled = !!c.ldap_enabled;
       })
       .catch(() => {});
   }
 
   async function signIn() {
+    if (signingIn) return;
     loginErr = '';
+    signingIn = true;
     try {
       const r = await fetch(API + '/auth/login', {
         method: 'POST',
@@ -130,13 +178,17 @@
       });
       if (!r.ok) {
         loginErr = (await r.json().catch(() => ({}))).detail || 'invalid credentials';
+        signingIn = false;
         return;
       }
       const d = await r.json();
+      if (remember) localStorage.setItem('login_email', email.trim());
+      else localStorage.removeItem('login_email');
       localStorage.setItem('auth_token', d.token);
       location.reload();
     } catch {
       loginErr = 'backend offline';
+      signingIn = false;
     }
   }
   function ssoLogin() {
@@ -252,62 +304,191 @@
 <svelte:window onkeydown={onGlobalKey} />
 
 {#if !authToken}
-  <div class="flex min-h-screen items-center justify-center bg-page">
-    <div class="elev w-[380px] max-w-[92vw] rounded-[18px] border border-line bg-surface p-8">
-      <div class="mb-[22px] flex items-center gap-3">
+  <div class="grid min-h-screen grid-cols-1 bg-page lg:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)]">
+    <!-- LEFT · sign-in (theme-aware) -->
+    <div class="flex flex-col justify-between px-6 py-8 sm:px-10 lg:px-14">
+      <div class="flex items-center gap-2.5">
         <span
-          class="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-[11px] bg-accent text-on-accent"
+          class="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-[10px] bg-accent text-on-accent"
         >
-          <Pill size={21} />
+          <Pill size={19} />
         </span>
-        <div>
-          <div class="page-title text-[18px] text-ink">City Pharma admin</div>
-          <div class="text-[12.5px] text-ink-2">Sign in to continue</div>
+        <div class="leading-tight">
+          <div class="page-title text-[15px] text-ink">City Pharma</div>
+          <div class="text-[10.5px] uppercase tracking-[0.14em] text-ink-3">Stock Intelligence</div>
         </div>
       </div>
 
-      <label class="mb-1.5 block text-[12px] text-ink-2" for="email">Email</label>
-      <input
-        id="email"
-        type="email"
-        bind:value={email}
-        onkeydown={(e) => e.key === 'Enter' && signIn()}
-        placeholder="you@citypharma.mm"
-        class="mb-3.5 w-full rounded-[10px] border border-line bg-surface px-3.5 py-2.5 text-[14px] text-ink placeholder:text-ink-3 focus:border-accent"
-      />
-      <label class="mb-1.5 block text-[12px] text-ink-2" for="pw">Password</label>
-      <input
-        id="pw"
-        type="password"
-        bind:value={password}
-        onkeydown={(e) => e.key === 'Enter' && signIn()}
-        placeholder="••••••••"
-        class="w-full rounded-[10px] border border-line bg-surface px-3.5 py-2.5 text-[14px] text-ink placeholder:text-ink-3 focus:border-accent"
-      />
+      <div class="mx-auto w-full max-w-[380px] py-10">
+        <h1 class="page-title text-[30px] leading-[1.18] text-ink sm:text-[34px]">
+          {greeting},<br />sign in to <span class="text-accent">City Pharma</span>
+        </h1>
+        <p class="mt-3 text-[13.5px] leading-relaxed text-ink-2">
+          Ask about stock in plain words — English or Burmese. Read-only by design.
+        </p>
 
-      {#if loginErr}
-        <p class="mt-3 rounded-lg bg-danger-soft px-3 py-2 text-[12px] text-danger">{loginErr}</p>
-      {/if}
+        <label class="mb-1.5 mt-8 block text-[11px] font-medium uppercase tracking-wide text-ink-3" for="email">Email</label>
+        <input
+          id="email"
+          type="email"
+          bind:value={email}
+          onkeydown={(e) => e.key === 'Enter' && signIn()}
+          placeholder="you@citypharma.mm"
+          class="w-full rounded-[11px] border border-line bg-surface px-3.5 py-3 text-[14px] text-ink placeholder:text-ink-3 focus:border-accent focus:outline-none"
+        />
 
-      <button
-        onclick={signIn}
-        class="mt-4 w-full rounded-[10px] bg-accent px-4 py-2.5 text-[14px] font-semibold text-on-accent transition-colors hover:bg-accent-hover"
-      >
-        Sign in
-      </button>
+        <label class="mb-1.5 mt-4 block text-[11px] font-medium uppercase tracking-wide text-ink-3" for="pw">Password</label>
+        <div class="relative">
+          <input
+            id="pw"
+            type={showPw ? 'text' : 'password'}
+            bind:value={password}
+            onkeydown={(e) => e.key === 'Enter' && signIn()}
+            placeholder="••••••••"
+            class="w-full rounded-[11px] border border-line bg-surface px-3.5 py-3 pr-16 text-[14px] text-ink placeholder:text-ink-3 focus:border-accent focus:outline-none"
+          />
+          <button
+            type="button"
+            onclick={() => (showPw = !showPw)}
+            class="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-ink-2 hover:bg-surface-2"
+          >
+            {#if showPw}<EyeOff size={13} />Hide{:else}<Eye size={13} />Show{/if}
+          </button>
+        </div>
 
-      {#if ssoEnabled}
+        <label class="mt-4 flex cursor-pointer items-center gap-2 text-[12.5px] text-ink-2">
+          <input
+            type="checkbox"
+            bind:checked={remember}
+            class="h-4 w-4 rounded border-line text-accent accent-[var(--accent,#c2410c)]"
+          />
+          Remember me
+        </label>
+
+        {#if loginErr}
+          <p class="mt-3 rounded-lg bg-danger-soft px-3 py-2 text-[12px] text-danger">{loginErr}</p>
+        {/if}
+
         <button
-          onclick={ssoLogin}
-          class="mt-2 w-full rounded-[10px] border border-line bg-surface px-4 py-2.5 text-[14px] font-medium text-ink transition-colors hover:bg-surface-2"
+          onclick={signIn}
+          disabled={signingIn}
+          class="mt-5 flex w-full items-center justify-center gap-2 rounded-[11px] bg-accent px-4 py-3 text-[14px] font-semibold text-on-accent transition-colors hover:bg-accent-hover disabled:opacity-60"
         >
-          Sign in with {ssoName}
+          {#if signingIn}<Loader2 size={16} class="animate-spin" /> Signing in…{:else}Continue with email <ArrowRight size={16} />{/if}
         </button>
-      {/if}
 
-      <p class="mt-4 text-[11px] text-ink-3">
-        No self-signup — accounts are created by an administrator.
-      </p>
+        {#if ssoEnabled || ldapEnabled}
+          <div class="my-6 flex items-center gap-3 text-[10.5px] uppercase tracking-[0.14em] text-ink-3">
+            <span class="h-px flex-1 bg-line"></span>Or continue with<span class="h-px flex-1 bg-line"></span>
+          </div>
+
+          <div class="rounded-[13px] border border-line bg-surface p-3">
+            <div class="mb-2.5 flex items-center gap-1.5 px-1 text-[10.5px] font-semibold uppercase tracking-[0.12em] text-ink-3">
+              <ShieldCheck size={13} /> Enterprise sign-in
+            </div>
+            {#if ssoEnabled}
+              <button
+                onclick={ssoLogin}
+                class="flex w-full items-center justify-center gap-2 rounded-[10px] border border-line bg-page px-4 py-3 text-[13.5px] font-medium text-ink transition-colors hover:bg-surface-2"
+              >
+                <KeyRound size={16} class="text-accent" /> Sign in with {ssoName}
+              </button>
+            {/if}
+            {#if ldapEnabled}
+              <p class="mt-2 flex items-center justify-center gap-1.5 rounded-[10px] bg-page px-4 py-2.5 text-[12px] text-ink-2">
+                <Building size={13} class="text-accent" /> Directory (LDAP) sign-in is enabled — use your work email above.
+              </p>
+            {/if}
+          </div>
+        {/if}
+
+        <p class="mt-6 flex items-center gap-1.5 text-[11px] text-ink-3">
+          <Lock size={11} /> No self-signup — accounts are created by an administrator.
+        </p>
+      </div>
+
+      <div class="text-[11px] text-ink-3">© 2026 City Medical Health &amp; Logistics · Read-only</div>
+    </div>
+
+    <!-- RIGHT · live showcase (deliberately dark, single-look product panel) -->
+    <div class="relative hidden overflow-hidden bg-[#141110] p-8 lg:flex lg:items-center lg:justify-center">
+      <div
+        class="pointer-events-none absolute -right-24 -top-24 h-96 w-96 rounded-full bg-accent/20 blur-3xl"
+      ></div>
+      <div class="relative w-full max-w-[520px] rounded-[20px] border border-white/10 bg-[#1b1613]/80 p-6 shadow-2xl backdrop-blur">
+        <div class="flex items-center gap-2 text-[12px] text-zinc-400">
+          <span class="relative flex h-2 w-2">
+            <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75"></span>
+            <span class="relative inline-flex h-2 w-2 rounded-full bg-emerald-500"></span>
+          </span>
+          <span class="font-semibold uppercase tracking-wide text-emerald-400">Live</span>
+          How City Pharma turns a question into an answer
+        </div>
+
+        <div class="mt-4 rounded-xl border border-white/10 bg-black/30 px-4 py-3 text-[13px] text-zinc-500">
+          Read-only by design — your stock stays untouched.
+        </div>
+        {#key demoIdx}
+          <p class="demo-q mt-2 pl-1 text-[12px] italic text-zinc-500">
+            “{demoQueries[demoIdx].en}” · “{demoQueries[demoIdx].my}”
+          </p>
+        {/key}
+
+        <div class="mt-5 space-y-1">
+          {#each [
+            { n: 1, icon: Search, t: 'Understand', s: 'Reads the question — English or Burmese.', m: 'name → code' },
+            { n: 2, icon: Package, t: 'Find product', s: 'Resolves the drug, brand or alias.', m: 'RELYTE' },
+            { n: 3, icon: ShieldCheck, t: 'Check stock', s: 'Looks up live inventory for your branch.', m: 'read-only' },
+            { n: 4, icon: Sparkles, t: 'Suggest', s: 'Offers a substitute if it is out.', m: '3 options' },
+            { n: 5, icon: ArrowRight, t: 'Answer', s: 'Delivered with the branch and count.', m: '12 units' }
+          ] as st}
+            {@const active = st.n - 1 === activeStep}
+            {@const done = st.n - 1 < activeStep}
+            <div
+              class="flex items-center gap-3 rounded-xl border px-3.5 py-2.5 transition-all duration-300 {active
+                ? 'border-accent/50 bg-accent/10'
+                : done
+                  ? 'border-transparent opacity-60'
+                  : 'border-transparent opacity-35'}"
+            >
+              <span
+                class="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg transition-colors duration-300 {active
+                  ? 'bg-accent text-white'
+                  : done
+                    ? 'bg-emerald-500/20 text-emerald-400'
+                    : 'bg-white/5 text-zinc-400'}"
+              >
+                {#if active}
+                  <Loader2 size={14} class="animate-spin" />
+                {:else}
+                  <st.icon size={14} />
+                {/if}
+              </span>
+              <div class="min-w-0 flex-1">
+                <div class="text-[13px] font-medium text-zinc-100">{st.t}</div>
+                <div class="truncate text-[11.5px] text-zinc-500">{st.s}</div>
+              </div>
+              <span
+                class="flex-shrink-0 font-mono text-[11px] {active ? 'text-accent' : 'text-zinc-400'}"
+                >{st.n === 5 && answerCount ? answerCount + ' units' : st.m}</span
+              >
+            </div>
+          {/each}
+        </div>
+
+        <div class="mt-5 flex flex-wrap gap-1.5">
+          {#each ['Bilingual EN · မြန်မာ', 'Read-only guard', 'SSO / LDAP', 'Store scope', 'Substitutes'] as chip}
+            <span class="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] text-zinc-300"
+              >{chip}</span
+            >
+          {/each}
+        </div>
+
+        <div class="mt-5 flex items-center justify-between border-t border-white/10 pt-3 text-[11px] text-zinc-500">
+          <span><span class="font-semibold text-zinc-300">37</span> agents · <span class="font-semibold text-zinc-300">multi-branch</span></span>
+          <span class="flex items-center gap-1.5"><span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span> SSO ready</span>
+        </div>
+      </div>
     </div>
   </div>
 {:else if meLoaded && me && !me.approved}
@@ -520,3 +701,19 @@
 
   <ToastHost />
 {/if}
+
+<style>
+  .demo-q {
+    animation: demoFade 0.5s ease-out;
+  }
+  @keyframes demoFade {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+</style>

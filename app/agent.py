@@ -80,6 +80,10 @@ code using prior knowledge. If the tool returns nothing for that code, say the \
 code was not found; do NOT guess the product.
 - Answer strictly from tool results. If no tool returned data, say you could not \
 find it rather than filling the answer from general knowledge.
+- A null stock_qty or price means UNKNOWN — the branch reported nothing. Say \
+"unknown", never "0" and never "out of stock". A pharmacy reads 0 as "do not \
+dispense", so reporting a blank as zero is a factual error, not a rounding \
+choice. Same rule in a table cell: write "unknown", not 0 or an empty cell.
 
 RESPONSE STYLE
 - Be concise and fast. Lead with the product name, article code, stock, and \

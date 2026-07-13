@@ -13,8 +13,13 @@ services:
       POSTGRES_URL: postgresql://pharmacy:pharmacy@postgres:5432/pharmacy
       REDIS_URL: redis://redis:6379/0
       INCOMING_DIR: /incoming
+      # Partner public keys the admin API registers land here; the sftp container
+      # sees the same volume as /home/pharma/.ssh, and sshd re-reads
+      # authorized_keys on every connection — so a new key is live with no restart.
+      SFTP_KEYS_DIR: /sftp_ssh
     volumes:
       - sftp_data:/incoming          # shared with sftp + worker (manual /ingest)
+      - sftp_ssh:/sftp_ssh           # rw — admin API writes authorized_keys + keys/*.pub
     depends_on:
       postgres:
         condition: service_healthy
@@ -61,8 +66,14 @@ services:
     command: "pharma:${SFTP_PASSWORD:-pharma}:1001:1001:upload"
     volumes:
       - sftp_data:/home/pharma/upload
-      - ./sftp/keys:/home/pharma/.ssh/keys:ro
-      - ./sftp/chown.sh:/etc/sftp.d/chown.sh:ro   # fix upload dir ownership on boot
+      # THE shared key volume. The api writes /sftp_ssh/authorized_keys (+ mirrors
+      # each .pub into /sftp_ssh/keys/); the same volume is this user's ~/.ssh.
+      # It replaces the old read-only ./sftp/keys bind — a bind mounted *inside*
+      # this volume would shadow the keys the api writes, and the feature would
+      # silently do nothing. Drop-a-file-on-the-host key registration is gone;
+      # register keys through the admin UI / POST /admin/sftp/keys instead.
+      - sftp_ssh:/home/pharma/.ssh
+      - ./sftp/chown.sh:/etc/sftp.d/chown.sh:ro   # fix ownership/perms on boot
     restart: unless-stopped
 
   # Ingest worker: watches the SFTP upload dir, loads new files, busts cache.
@@ -91,3 +102,8 @@ services:
 volumes:
   pgdata:
   sftp_data:
+  # /home/pharma/.ssh in the sftp container, /sftp_ssh in the api container.
+  # Holds authorized_keys + keys/*.pub. atmoz rebuilds authorized_keys from
+  # keys/* whenever the container is recreated, which is why the api mirrors
+  # each key into keys/ as well as appending it to authorized_keys.
+  sftp_ssh:

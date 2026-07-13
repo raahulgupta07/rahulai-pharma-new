@@ -12,7 +12,9 @@
     ThumbsUp,
     ThumbsDown,
     ArrowUp,
+    ArrowLeft,
     Store,
+    Table2,
     Languages,
     PanelLeft,
     PackageSearch,
@@ -22,7 +24,6 @@
     Loader2,
     Check,
     Wrench,
-    ChevronRight,
     Clock,
     Zap,
     X,
@@ -71,13 +72,31 @@
     toast('Model: ' + (models.find((m) => m.id === id)?.name ?? id));
   }
 
-  // ---- source drawer (clickable article codes) ----
+  // ---- drawer: 'source' (one article) or 'data' (the rows a turn's tools saw)
+  // The trace no longer expands inline — the thread stays the answer, and the
+  // evidence behind it lives one click away in this panel.
   let drawerOpen = $state(false);
+  let drawerMode = $state('source');
   let drawerCode = $state('');
   let drawerData = $state(null);
   let drawerLoading = $state(false);
+  let drawerResults = $state([]);
+  let drawerSteps = $state([]);
+
+  /** Total rows a bot turn's tools returned — the "View data (N rows)" count. */
+  function rowCount(msg) {
+    return (msg?.results ?? []).reduce((n, r) => n + (r.rows?.length ?? 0), 0);
+  }
+
+  function openData(msg) {
+    drawerMode = 'data';
+    drawerResults = msg.results ?? [];
+    drawerSteps = msg.steps ?? [];
+    drawerOpen = true;
+  }
 
   async function openSource(code) {
+    drawerMode = 'source';
     drawerCode = code;
     drawerOpen = true;
     drawerData = null;
@@ -112,10 +131,18 @@
 
   const MY_RE = /[က-႟]/; // Burmese block
 
-  /** The subject drugs (name + code) the agent actually returned. */
+  /** The subject drugs (name + code) the agent actually returned.
+   *
+   *  `res.subject` is authoritative and comes from the backend, which knows the
+   *  resolved drug even when the rows don't carry it: get_stock and
+   *  find_at_other_stores select site_code/site_name/stock_qty — branch rows,
+   *  no drug — so scanning rows alone yields nothing and the chips vanish. The
+   *  row scan stays as a fallback for tools that DO return a catalog row. */
   function subjectsFrom(msg) {
     const seen = new Map(); // code -> name
     for (const res of msg?.results ?? []) {
+      if (res.subject?.code && !seen.has(res.subject.code))
+        seen.set(res.subject.code, res.subject.name || res.subject.code);
       for (const row of res.rows ?? []) {
         let code = null;
         let name = null;
@@ -157,14 +184,10 @@
       push(my ? `${n} အစားထိုး ဆေးရှိလား?` : `Are there substitutes for ${n}?`);
     }
 
-    // Always offer the answer in the OTHER language.
-    const chips = qs.map((text) => ({ text, run: () => send(text) }));
-    chips.push({
-      text: my ? 'Answer in English' : 'မြန်မာလို ပြန်ဖြေပါ',
-      translate: true,
-      run: () => send(my ? 'Please answer in English.' : 'အထက်ပါအချက်အလက်ကို မြန်မာလို ပြန်ပြောပြပါ')
-    });
-    return chips;
+    // Questions only. No translate chip: the agent already answers in the
+    // language it was asked in, so it was noise — and when no subject resolved
+    // it was the ONLY chip, which is what made the row read as broken.
+    return qs.map((text) => ({ text, run: () => send(text) }));
   }
 
   function copyMsg(text) {
@@ -458,10 +481,6 @@
     const n = typeof s !== 'string' && s?.count > 1 ? ` ×${s.count}` : '';
     return base + n;
   }
-  function fmtSecs(ms) {
-    if (!ms && ms !== 0) return '';
-    return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)}s`;
-  }
 
   async function scrollDown() {
     await tick();
@@ -566,7 +585,10 @@
             } else if (evt === 'result') {
               // structured rows the agent's tool returned; also tag the row count
               // onto the step it belongs to, for the "· N rows" trace hint.
-              const results = [...(thread.messages[idx].results ?? []), { tool: j.tool, rows: j.rows }];
+              const results = [
+                ...(thread.messages[idx].results ?? []),
+                { tool: j.tool, rows: j.rows, subject: j.subject ?? null }
+              ];
               const steps = [...(thread.messages[idx].steps ?? [])];
               if (steps.length) steps[steps.length - 1] = { ...steps[steps.length - 1], rows: j.rows?.length ?? null };
               thread.messages[idx] = { ...thread.messages[idx], results, steps };
@@ -694,6 +716,17 @@
   <div class="flex min-w-0 flex-1 flex-col">
     <!-- chat top bar -->
     <div class="flex items-center gap-2 px-4 py-2.5">
+      <!-- Chat's own sidebar replaces the console nav, so this is the ONLY way
+           back to the rest of the admin. -->
+      <a
+        href="{appBase}/"
+        aria-label="Back to console"
+        title="Back to console"
+        class="flex h-9 items-center gap-1.5 rounded-lg px-2 text-[13px] text-ink-3 hover:bg-surface-2 hover:text-ink"
+      >
+        <ArrowLeft size={18} />
+        <span class="hidden sm:inline">Console</span>
+      </a>
       <button
         onclick={() => (sideOpen = !sideOpen)}
         aria-label="Toggle history"
@@ -796,113 +829,26 @@
                     </div>
                   {/if}
 
-                  {#if m.steps?.length}
-                    {#if m.text === ''}
-                      <!-- live tool-use trace while the agent works -->
-                      <div class="mb-2 rounded-xl border-[0.5px] border-line bg-surface-2 p-2.5">
-                        <div class="mb-1 flex items-center gap-1.5 px-1 text-[11px] font-bold uppercase tracking-[0.05em] text-ink-3">
-                          <Wrench size={12} /> Working
-                        </div>
+                  {#if m.steps?.length && m.text === ''}
+                      <!-- Live status only. The steps say WHAT it is doing; they
+                           are transient by design and leave no dropdown behind
+                           once the answer lands. The rows the agent saw stay
+                           reachable from the footer's "View data". -->
+                      <div class="mb-2 flex flex-col gap-1">
                         {#each m.steps as s, i}
-                          <div class="flex items-center gap-2 px-1 py-1 text-[13px] text-ink">
+                          <div class="flex items-center gap-2 text-[13px] text-ink-2">
                             {#if i === m.steps.length - 1}
-                              <Loader2 size={14} class="animate-spin text-accent" />
+                              <Loader2 size={14} class="shrink-0 animate-spin text-accent" />
                             {:else}
-                              <Check size={14} class="text-success" />
+                              <Check size={14} class="shrink-0 text-success" />
                             {/if}
-                            <span class="flex-1">{stepText(s)}</span>
+                            <span class="flex-1">{stepText(s)}{i === m.steps.length - 1 ? '…' : ''}</span>
                             {#if s.rows != null}
                               <span class="text-[11px] tabular-nums text-ink-3">{s.rows} row{s.rows === 1 ? '' : 's'}</span>
                             {/if}
                           </div>
                         {/each}
                       </div>
-                    {:else}
-                      <!-- collapsed trace once the answer is in -->
-                      <details class="group/d mb-2.5 rounded-xl border-[0.5px] border-line bg-surface-2">
-                        <summary class="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-[12.5px] font-medium text-ink-2">
-                          <ChevronRight size={14} class="transition-transform group-open/d:rotate-90" />
-                          <Wrench size={13} class="text-accent" />
-                          Worked for {fmtSecs(m.latencyMs)} · {m.steps.length} step{m.steps.length > 1 ? 's' : ''}
-                        </summary>
-                        <div class="px-3 pb-2.5">
-                          {#if m.plan}
-                            <div class="mb-1.5 flex items-start gap-1.5 py-0.5 text-[12.5px] italic text-ink-3">
-                              <Sparkles size={12} class="mt-0.5 shrink-0" />{m.plan}
-                            </div>
-                          {/if}
-                          {#each m.steps as s}
-                            <div class="flex items-center gap-2 py-0.5 text-[12.5px] text-ink-2">
-                              <Check size={13} class="text-success" />
-                              <span class="flex-1">{stepText(s)}</span>
-                              {#if s.rows != null}
-                                <span class="text-[11px] tabular-nums text-ink-3">{s.rows} row{s.rows === 1 ? '' : 's'}</span>
-                              {/if}
-                            </div>
-                          {/each}
-                          {#if m.results?.length}
-                            {#each m.results as res}
-                              {@const cols = Object.keys(res.rows[0] ?? {})}
-                              {@const shown = res.expanded ? res.rows : res.rows.slice(0, 5)}
-                              <div class="mt-2 overflow-hidden rounded-lg border-[0.5px] border-line bg-surface">
-                                <div class="border-b border-line px-2.5 py-1.5 text-[10.5px] font-bold uppercase tracking-[0.04em] text-ink-3">
-                                  {stepLabel(res.tool)} · {res.rows.length} row{res.rows.length > 1 ? 's' : ''}
-                                </div>
-                                <div class="overflow-x-auto">
-                                  <table class="w-full text-[12px]">
-                                    <thead>
-                                      <tr class="border-b border-line">
-                                        {#each cols as k}
-                                          <th class="whitespace-nowrap px-2.5 py-1.5 text-left text-[10.5px] font-bold uppercase tracking-[0.04em] text-ink-3">
-                                            {k.replace(/_/g, ' ')}
-                                          </th>
-                                        {/each}
-                                      </tr>
-                                    </thead>
-                                    <tbody>
-                                      {#each shown as row}
-                                        <tr class="border-t border-line first:border-0">
-                                          {#each cols as k}
-                                            {@const v = row[k]}
-                                            <td class="px-2.5 py-1.5 text-ink-2">
-                                              {#if /code/i.test(k) && /^\d{10,14}$/.test(String(v))}
-                                                <button
-                                                  type="button"
-                                                  onclick={() => openSource(String(v))}
-                                                  class="rounded bg-accent-soft px-1.5 font-mono text-[11px] font-semibold text-accent hover:bg-accent hover:text-on-accent"
-                                                  >{v}</button
-                                                >
-                                              {:else if v === null || v === undefined}
-                                                <!-- NULL means "unknown", not zero. Never render it as 0. -->
-                                                <span class="text-ink-3 italic">unknown</span>
-                                              {:else if typeof v === 'number'}
-                                                <span class="tnum text-ink">{v.toLocaleString()}</span>
-                                              {:else}
-                                                <span class="text-ink">{v}</span>
-                                              {/if}
-                                            </td>
-                                          {/each}
-                                        </tr>
-                                      {/each}
-                                    </tbody>
-                                  </table>
-                                </div>
-                                {#if res.rows.length > 5}
-                                  <button
-                                    onclick={() => (res.expanded = !res.expanded)}
-                                    class="w-full border-t border-line px-2.5 py-1.5 text-left text-[11.5px] font-medium text-accent hover:bg-surface-2"
-                                  >
-                                    {res.expanded
-                                      ? 'Show fewer'
-                                      : `Show all ${res.rows.length} rows (${res.rows.length - 5} hidden)`}
-                                  </button>
-                                {/if}
-                              </div>
-                            {/each}
-                          {/if}
-                        </div>
-                      </details>
-                    {/if}
                   {/if}
 
                   {#if m.text === '' && !m.steps?.length}
@@ -925,6 +871,15 @@
                         {/if}
                         {#if m.modelName}
                           <span class="flex items-center gap-1"><Sparkles size={12} class="text-accent-2" />{m.modelName}</span>
+                        {/if}
+                        {#if m.results?.length}
+                          {@const n = rowCount(m)}
+                          <button
+                            onclick={() => openData(m)}
+                            class="flex cursor-pointer items-center gap-1 rounded text-ink-3 transition-colors hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
+                          >
+                            <Table2 size={12} />View data ({n} row{n === 1 ? '' : 's'})
+                          </button>
                         {/if}
                       </div>
                       <div class="ml-auto flex gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
@@ -1006,7 +961,7 @@
                                 onclick={f.run}
                                 class="flex items-center gap-1.5 rounded-[9px] border border-line bg-surface px-3 py-1.5 text-left text-[13px] text-ink-2 transition-colors hover:border-accent hover:bg-accent-soft hover:text-accent"
                               >
-                                {#if f.translate}<Languages size={13} class="shrink-0" />{:else}<CornerDownRight size={13} class="shrink-0 text-ink-3" />{/if}
+                                <CornerDownRight size={13} class="shrink-0 text-ink-3" />
                                 {f.text}
                               </button>
                             {/each}
@@ -1150,11 +1105,16 @@
   >
     <div class="flex items-center gap-2.5 border-b border-line px-[18px] py-4">
       <span class="flex h-8 w-8 items-center justify-center rounded-lg bg-accent-soft text-accent">
-        <FileText size={15} />
+        {#if drawerMode === 'data'}<Table2 size={15} />{:else}<FileText size={15} />{/if}
       </span>
       <div class="min-w-0 flex-1">
-        <div class="truncate text-[14px] font-semibold text-ink">Source · {drawerCode}</div>
-        <div class="text-[11.5px] text-ink-3">where this answer came from</div>
+        {#if drawerMode === 'data'}
+          <div class="truncate text-[14px] font-semibold text-ink">Data behind this answer</div>
+          <div class="text-[11.5px] text-ink-3">the rows the agent actually read</div>
+        {:else}
+          <div class="truncate text-[14px] font-semibold text-ink">Source · {drawerCode}</div>
+          <div class="text-[11.5px] text-ink-3">where this answer came from</div>
+        {/if}
       </div>
       <button
         onclick={() => (drawerOpen = false)}
@@ -1165,7 +1125,69 @@
       </button>
     </div>
     <div class="flex-1 overflow-y-auto p-[18px]">
-      {#if drawerLoading}
+      {#if drawerMode === 'data'}
+        <!-- steps recap: what it did, one line each -->
+        {#if drawerSteps.length}
+          <div class="mb-3 rounded-lg border-[0.5px] border-line bg-surface-2 p-2.5">
+            {#each drawerSteps as s}
+              <div class="flex items-center gap-2 py-0.5 text-[12.5px] text-ink-2">
+                <Check size={13} class="shrink-0 text-success" />
+                <span class="flex-1">{stepText(s)}</span>
+                {#if s.rows != null}
+                  <span class="text-[11px] tabular-nums text-ink-3">{s.rows}</span>
+                {/if}
+              </div>
+            {/each}
+          </div>
+        {/if}
+        {#each drawerResults as res}
+          {@const cols = Object.keys(res.rows?.[0] ?? {})}
+          <div class="mb-3 overflow-hidden rounded-lg border-[0.5px] border-line bg-surface">
+            <div class="border-b border-line px-2.5 py-1.5 text-[10.5px] font-bold uppercase tracking-[0.04em] text-ink-3">
+              {stepLabel(res.tool)} · {res.rows?.length ?? 0} row{(res.rows?.length ?? 0) === 1 ? '' : 's'}
+            </div>
+            <div class="overflow-x-auto">
+              <table class="w-full text-[12px]">
+                <thead>
+                  <tr class="border-b border-line">
+                    {#each cols as k}
+                      <th class="whitespace-nowrap px-2.5 py-1.5 text-left text-[10.5px] font-bold uppercase tracking-[0.04em] text-ink-3">
+                        {k.replace(/_/g, ' ')}
+                      </th>
+                    {/each}
+                  </tr>
+                </thead>
+                <tbody>
+                  {#each res.rows ?? [] as row}
+                    <tr class="border-t border-line first:border-0">
+                      {#each cols as k}
+                        {@const v = row[k]}
+                        <td class="px-2.5 py-1.5 text-ink-2">
+                          {#if /code/i.test(k) && /^\d{10,14}$/.test(String(v))}
+                            <button
+                              type="button"
+                              onclick={() => openSource(String(v))}
+                              class="rounded bg-accent-soft px-1.5 font-mono text-[11px] font-semibold text-accent hover:bg-accent hover:text-on-accent"
+                              >{v}</button
+                            >
+                          {:else if v === null || v === undefined}
+                            <!-- NULL means "unknown", not zero. Never render it as 0. -->
+                            <span class="text-ink-3 italic">unknown</span>
+                          {:else if typeof v === 'number'}
+                            <span class="tnum text-ink">{v.toLocaleString()}</span>
+                          {:else}
+                            <span class="text-ink">{v}</span>
+                          {/if}
+                        </td>
+                      {/each}
+                    </tr>
+                  {/each}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        {/each}
+      {:else if drawerLoading}
         <div class="space-y-2">
           {#each Array(5) as _}<div class="skel" style="height:16px"></div>{/each}
         </div>
@@ -1180,11 +1202,17 @@
         {/each}
         <div class="flex justify-between gap-3 border-b border-line py-2 text-[13.5px]">
           <span class="text-ink-2">total stock</span>
-          <span class="text-right font-semibold text-ink tnum">{(drawerData.total_stock ?? 0).toLocaleString()}</span>
+          <!-- NULL is UNKNOWN, never 0: a branch that reports no quantity has not
+               reported zero, and "0" reads as "do not dispense". -->
+          <span class="text-right font-semibold tnum {drawerData.total_stock == null ? 'text-ink-3 italic' : 'text-ink'}">
+            {drawerData.total_stock == null ? 'unknown' : drawerData.total_stock.toLocaleString()}
+          </span>
         </div>
         <div class="flex justify-between gap-3 border-b border-line py-2 text-[13.5px]">
           <span class="text-ink-2">in stock at</span>
-          <span class="text-right font-semibold text-ink tnum">{drawerData.site_count ?? 0} sites</span>
+          <span class="text-right font-semibold text-ink tnum">
+            {drawerData.site_count ?? 0} sites{#if drawerData.unknown_site_count}<span class="ml-1 font-normal text-ink-3">· {drawerData.unknown_site_count} unknown</span>{/if}
+          </span>
         </div>
 
         {#if drawerData.sites?.length}
@@ -1194,7 +1222,9 @@
           {#each drawerData.sites.slice(0, 6) as s}
             <div class="flex justify-between gap-3 border-b border-line py-1.5 text-[13px]">
               <span class="font-mono text-ink-2">{s.site_code}</span>
-              <span class="font-semibold text-ink tnum">{(s.stock_qty ?? 0).toLocaleString()}</span>
+              <span class="font-semibold tnum {s.stock_qty == null ? 'text-ink-3 italic' : 'text-ink'}">
+                {s.stock_qty == null ? 'unknown' : s.stock_qty.toLocaleString()}
+              </span>
             </div>
           {/each}
         {/if}

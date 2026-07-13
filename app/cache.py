@@ -13,6 +13,7 @@ Backed by an async redis client built from ``settings.redis_url``. Three jobs:
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 import time
@@ -339,17 +340,59 @@ async def register_credential(embed_id: str, public_key: str) -> None:
 
 
 async def is_valid_credential(embed_id: str, public_key: str) -> bool:
-    """Validate (embed_id, public_key).
+    """Validate (embed_id, public_key). FAIL-CLOSED: unknown pairs are rejected.
 
-    Open dev mode: if NO credentials are registered, allow everything. Once any
-    credential is registered, enforce strict matching.
+    This used to allow *everything* whenever the credential hash was empty ("open
+    dev mode"). That is fail-OPEN: a production deploy that never seeded a
+    credential accepted every embed on the internet, and nothing in the app said
+    so. An empty store now means "nobody is authorised", which is the only safe
+    reading of "no credentials configured".
+
+    :func:`ensure_dev_credential` is what keeps the documented web/web snippet
+    working out of the box — an explicit, logged, flag-gated seed, rather than a
+    silent hole in the check itself.
     """
 
-    client = get_client()
-    if await client.hlen(_CRED_KEY) == 0:
-        return True  # dev: no credentials configured yet
-    stored = await client.hget(_CRED_KEY, embed_id)
-    return stored is not None and stored == public_key
+    if not embed_id or not public_key:
+        return False
+    stored = await get_client().hget(_CRED_KEY, embed_id)
+    if stored is None:
+        return False
+    return hmac.compare_digest(str(stored), str(public_key))
+
+
+async def ensure_dev_credential() -> Optional[str]:
+    """Seed the default embed credential, but only into an EMPTY store.
+
+    Called once from the app lifespan. Returns the seeded embed_id, or ``None``
+    when nothing was seeded (flag off, or a credential already exists — the
+    presence of any real credential means an operator has taken over, and we
+    must never add to their set behind their back).
+
+    Guarded by ``embed_dev_credential`` so a prod deploy can turn it off and get
+    a credential store that is empty and therefore closed.
+    """
+
+    settings = get_settings()
+    if not settings.embed_dev_credential:
+        return None
+    embed_id = settings.embed_dev_credential_id
+    public_key = settings.embed_dev_credential_key
+    if not embed_id or not public_key:
+        return None
+    if await get_client().hlen(_CRED_KEY) != 0:
+        return None
+
+    await register_credential(embed_id, public_key)
+    logger.warning(
+        "SEEDED DEFAULT EMBED CREDENTIAL embed_id=%r — the embed API now accepts this "
+        "public key from anyone who knows it. This exists so the documented widget "
+        "snippet works on a fresh dev stack. BEFORE PRODUCTION: set "
+        "EMBED_DEV_CREDENTIAL=false and register real credentials via "
+        "POST /admin/credentials.",
+        embed_id,
+    )
+    return embed_id
 
 
 async def list_credentials() -> dict:
@@ -362,6 +405,101 @@ async def remove_credential(embed_id: str) -> int:
     """Delete a credential. Returns number removed (0 or 1)."""
 
     return await get_client().hdel(_CRED_KEY, embed_id)
+
+
+# ---- ingest config (shared by the api AND the worker container) -----------
+#
+# The api and the ingest worker are SEPARATE processes, so this cannot live in
+# either one's memory — it lives in Redis, mirroring the credential/data_version
+# helpers above. The worker re-reads poll_seconds every loop iteration and the
+# catalog_mode on every scan, so an operator change takes effect with no restart.
+
+_INGEST_CONFIG_KEY = "pharmacy:ingest_config"
+CATALOG_MODES = ("merge", "full_sync")
+_POLL_MIN, _POLL_MAX = 5, 3600
+
+
+def _clamp_poll(value) -> int:
+    """Coerce ``value`` to an int and clamp to [5, 3600]. Raises on non-numeric."""
+
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("poll_seconds must be an integer")
+    return max(_POLL_MIN, min(_POLL_MAX, n))
+
+
+async def get_poll_seconds() -> int:
+    """Poll cadence from Redis, clamped, falling back to the settings default.
+
+    The worker reads this each loop iteration, so anything unreadable (Redis
+    down, unset, corrupt) must degrade to the configured default rather than
+    stall the loop.
+    """
+
+    default = get_settings().watch_interval_seconds
+    try:
+        raw = await get_client().hget(_INGEST_CONFIG_KEY, "poll_seconds")
+    except Exception:  # noqa: BLE001 — never let a Redis blip stop the watcher
+        return default
+    if raw is None:
+        return default
+    try:
+        return _clamp_poll(raw)
+    except ValueError:
+        return default
+
+
+async def get_catalog_mode() -> str:
+    """Catalog ingest mode from Redis: 'full_sync' (default) or 'merge'.
+
+    Default is 'full_sync' — an article upload is authoritative: it adds the new
+    rows and drops the ones it omits, so the catalog always mirrors the latest
+    file (the same clear-and-replace shape stock files already use). The
+    empty/partial-file guard in ``ingest_catalog`` stops a bad upload from
+    emptying the catalog.
+
+    But a Redis *error* degrades to 'merge', the non-destructive mode: if we
+    cannot even read the config we must not delete rows on a guess. So an unset
+    key returns the full_sync default; only an unreachable Redis falls to merge.
+    """
+
+    try:
+        raw = await get_client().hget(_INGEST_CONFIG_KEY, "catalog_mode")
+    except Exception:  # noqa: BLE001
+        return "merge"
+    return raw if raw in CATALOG_MODES else "full_sync"
+
+
+async def get_ingest_config() -> dict:
+    """The effective ingest config as the admin page reads it."""
+
+    return {
+        "poll_seconds": await get_poll_seconds(),
+        "catalog_mode": await get_catalog_mode(),
+    }
+
+
+async def set_ingest_config(
+    poll_seconds: Optional[int] = None, catalog_mode: Optional[str] = None
+) -> dict:
+    """Validate + persist a partial ingest-config update. Returns the effective config.
+
+    ``poll_seconds`` is clamped; a ``catalog_mode`` outside :data:`CATALOG_MODES`
+    is rejected. Raises ``ValueError`` on bad input so the admin endpoint can turn
+    it into a 400.
+    """
+
+    mapping: dict = {}
+    if poll_seconds is not None:
+        mapping["poll_seconds"] = _clamp_poll(poll_seconds)
+    if catalog_mode is not None:
+        if catalog_mode not in CATALOG_MODES:
+            raise ValueError(f"catalog_mode must be one of {', '.join(CATALOG_MODES)}")
+        mapping["catalog_mode"] = catalog_mode
+    if mapping:
+        await get_client().hset(_INGEST_CONFIG_KEY, mapping=mapping)
+    return await get_ingest_config()
 
 
 # ---- agent config overrides (editable from admin) -------------------------
@@ -395,4 +533,10 @@ __all__ = [
     "check_rate_limit",
     "register_credential",
     "is_valid_credential",
+    "ensure_dev_credential",
+    "get_poll_seconds",
+    "get_catalog_mode",
+    "get_ingest_config",
+    "set_ingest_config",
+    "CATALOG_MODES",
 ]

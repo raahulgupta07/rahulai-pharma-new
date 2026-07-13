@@ -71,12 +71,63 @@ class Settings(BaseSettings):
     data_dir: str = "data"          # where reload looks for article*/balance* xlsx
     incoming_dir: str = "data/incoming"   # SFTP drop dir the watcher ingests from
     watch_interval_seconds: int = 15      # poll cadence for the ingest watcher
+
+    # ---- SFTP handoff (what a PARTNER connects to) --------------------------
+    # The address a partner dials is operator knowledge. Empty means "not
+    # configured": `GET /sftp/connection` then falls back to the hostname the
+    # request itself arrived on (X-Forwarded-Host / Host) and labels it
+    # host_source="detected" — a suggestion the operator confirms, never a fact.
+    # Behind a proxy that rewrites Host, or when the admin console and the sftp
+    # port live on different names, the detected value is simply wrong; setting
+    # this env var is the only authoritative answer.
+    #
+    # sftp_password must MATCH docker-compose's `pharma:${SFTP_PASSWORD:-pharma}`
+    # — the compose default is what the container is actually created with, so
+    # the default here mirrors it rather than inventing a second one. Until now
+    # SFTP_PASSWORD was swallowed by `extra="ignore"` below (it was read only by
+    # compose); declaring it lets the admin API hand the real credential over.
+    sftp_public_host: str = ""
+    sftp_public_port: int = 2222
+    sftp_username: str = "pharma"
+    sftp_password: str = "pharma"
+
+    # Where the api container sees the sftp account's .ssh directory. A shared
+    # docker volume (`sftp_ssh`) is mounted here read-write and into the sftp
+    # container at /home/pharma/.ssh, which is what makes partner-key
+    # registration take effect with NO restart: sshd re-reads authorized_keys on
+    # every connection.
+    #
+    # Both writes matter. `authorized_keys` is what sshd reads NOW;
+    # `keys/<label>.pub` is what atmoz/sftp rebuilds authorized_keys FROM at
+    # boot. A key written only to authorized_keys works until the next restart
+    # and then silently vanishes.
+    sftp_keys_dir: str = "/sftp_ssh"
     cache_ttl_seconds: int = 600
     rate_limit_per_min: int = 30
     log_level: str = "INFO"
-    allowed_origins: str = "*"   # CORS: comma-separated origins, or * (tighten in prod)
+    # CORS. Comma-separated origins. The default is the local dev origins, NOT
+    # "*": a wildcard lets any site on the internet call the embed API from a
+    # victim's browser. "*" is still reachable, but only by setting it here
+    # explicitly (ALLOWED_ORIGINS=*), and app.api logs a warning when it is in
+    # effect. A real embed deployment lists the customer domains instead.
+    allowed_origins: str = "http://localhost:5173,http://localhost:8088,http://localhost:8091"
     chat_log_retention_days: int = 30
     embed_in_background: bool = True   # don't block reload on embedding
+
+    # ---- embed credentials (fail-closed) ----
+    # cache.is_valid_credential rejects every (embed_id, public_key) that is not
+    # registered — including when NO credential is registered at all. It used to
+    # do the opposite (empty store => allow everything), so a prod deploy that
+    # never seeded a credential accepted any embed on earth.
+    #
+    # Fail-closed would brick the documented web/web snippet, so the app seeds
+    # exactly ONE credential on startup — and only when the credential store is
+    # completely empty AND this flag is on. It logs a loud warning when it fires.
+    # In prod: set EMBED_DEV_CREDENTIAL=false and register real credentials via
+    # POST /admin/credentials.
+    embed_dev_credential: bool = True
+    embed_dev_credential_id: str = "web"
+    embed_dev_credential_key: str = "web"
 
     # ---- Agno self-learning (preferences-only memory; see agent.py) ----
     # Off by default: enabling replays 3 prior runs into every prompt and runs a
@@ -138,7 +189,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_prefix="",
         case_sensitive=False,
-        extra="ignore",   # ignore env vars meant for other services (e.g. SFTP_PASSWORD)
+        extra="ignore",   # ignore env vars meant for other services (e.g. POSTGRES_PASSWORD)
     )
 
 

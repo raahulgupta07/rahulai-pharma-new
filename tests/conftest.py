@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 import app.cache as cache
 import app.db as db
+from app.config import get_settings
 
 
 @pytest.fixture(autouse=True)
@@ -26,6 +27,37 @@ def _reset_db_pool():
     yield
     db._pool = None
     cache._client = None
+
+
+# The embed credential check is fail-closed (cache.is_valid_credential), so the
+# emb1/pk1 pair the API and security tests have always used must actually be
+# registered or every /session/create in the suite would 403.
+#
+# Seeded with a SYNCHRONOUS redis client on purpose: the async client in
+# app.cache is bound to whichever event loop first touched it, and this fixture
+# runs outside any test loop. Reaching for asyncio.run() here would bind the
+# module-global client to a loop that is closed before the test body runs.
+TEST_EMBED_ID = "emb1"
+TEST_PUBLIC_KEY = "pk1"
+
+
+@pytest.fixture(autouse=True)
+def _register_test_credential():
+    """Register the suite's embed credential in Redis (fail-closed API needs it)."""
+
+    import redis as _redis_sync
+
+    client = _redis_sync.from_url(get_settings().redis_url, decode_responses=True)
+    try:
+        client.hset(cache._CRED_KEY, TEST_EMBED_ID, TEST_PUBLIC_KEY)
+    except Exception:  # noqa: BLE001 — Redis-less collection must not error here
+        pass
+    finally:
+        try:
+            client.close()
+        except Exception:  # noqa: BLE001
+            pass
+    yield
 
 
 @pytest.fixture

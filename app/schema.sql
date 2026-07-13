@@ -13,6 +13,11 @@
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE EXTENSION IF NOT EXISTS vector;   -- pgvector: semantic search on catalog
 
+-- drug_alias FKs to catalog, so it must go before it. Dropping catalog CASCADE
+-- without this would drop only the FK CONSTRAINT and leave the alias rows behind,
+-- still pointing at article codes that no longer exist — and a later
+-- CREATE TABLE IF NOT EXISTS would not restore the constraint.
+DROP TABLE IF EXISTS drug_alias CASCADE;
 DROP TABLE IF EXISTS inventory CASCADE;
 DROP TABLE IF EXISTS catalog CASCADE;
 
@@ -31,7 +36,11 @@ CREATE TABLE catalog (
     mm_reg       TEXT,               -- Myanmar registration ref
     mm_label     TEXT,               -- MM label flag / text
     status       TEXT,                -- active flag from source
-    embedding    vector(3072)         -- gemini-embedding-2 of name+generic+indication
+    embedding    vector(3072),        -- gemini-embedding-2 of name+generic+indication
+    last_seen    TIMESTAMPTZ          -- run timestamp of the last article file to carry this row;
+                                       -- powers full_sync (delete rows absent from the latest file)
+                                       -- and the manual stale purge. NULL = not seen since the column
+                                       -- was added (legacy rows of unknown age).
 );
 
 COMMENT ON TABLE catalog IS 'Article (SKU) master: one row per product.';
@@ -54,6 +63,25 @@ CREATE TABLE inventory (
 
 COMMENT ON TABLE inventory IS 'Per-site stock and price for each article.';
 COMMENT ON COLUMN inventory.price IS 'weighted_cost_price from balance_stock export.';
+
+-- ----------------------------------------------------------------------------
+-- drug_alias: learned free-text -> article_code mappings (fast-path memory).
+-- When a pharmacist teaches the resolver that a mention means a given article,
+-- the next identical question resolves in ~5ms with no LLM and no trigram scan.
+-- Written by POST /admin/aliases; read by resolver._alias_lookup.
+-- Also shipped as migrations/0002_drug_alias.sql for live databases.
+-- ----------------------------------------------------------------------------
+CREATE TABLE drug_alias (
+    alias        TEXT PRIMARY KEY,                       -- normalised (stripped, lowercased) mention
+    article_code TEXT NOT NULL
+                 REFERENCES catalog(article_code) ON DELETE CASCADE,
+    source       TEXT,                                   -- who taught it ('pharmacist', 'admin', 'seed')
+    created_at   TIMESTAMPTZ DEFAULT now()
+);
+
+COMMENT ON TABLE drug_alias IS 'Learned free-text -> article_code aliases (fast-path memory).';
+
+CREATE INDEX idx_drug_alias_article ON drug_alias (article_code);
 
 -- ----------------------------------------------------------------------------
 -- Indexes for common filter / lookup paths.
