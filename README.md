@@ -118,96 +118,80 @@ OpenRouter calls.
 
 ## Installation
 
-### Requirements
+> Full step-by-step (prerequisites, AWS security-group ports, troubleshooting) is
+> in **[INSTALL.md](INSTALL.md)**. This is the summary.
 
-Docker + Docker Compose. An OpenRouter API key. Nothing else — Postgres, Redis,
-and the SFTP drop zone all come up in the compose stack.
+### Production (AWS) — one command
 
-### 1. Configure
-
-```bash
-cp .env.example .env
-```
-
-Set these three at minimum:
-
-| Var | Notes |
-|---|---|
-| `OPENROUTER_API_KEY` | from https://openrouter.ai/keys |
-| `SECRET_KEY` | 32+ random bytes. Must match the Laravel `CITYAGENT_SECRET_KEY` if you embed the widget with signed users. |
-| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | seeds the first super-admin on first boot |
-
-`.env` is gitignored. Keep it that way — it holds a live key.
-
-### 2. Start
+A fresh Ubuntu box with Docker, a domain with a DNS A record, and an OpenRouter
+key. The installer generates every secret, gets a TLS cert, and comes up ready.
 
 ```bash
-docker compose up -d --build
-# api :8088 · postgres :5433 · redis :6380 · sftp :2222
+git clone git@github.com:raahulgupta07/rahulai-pharma-new.git
+cd rahulai-pharma-new
+export OPENROUTER_API_KEY=sk-or-...
+./deploy/aws/install.sh pharma.yourco.com admin@yourco.com
 ```
 
-`app/schema.sql` is applied automatically on startup (`app/db.py`).
+It runs a single stack behind Caddy (auto Let's Encrypt TLS), generates
+`SECRET_KEY` / admin password / DB + SFTP passwords with `openssl rand`, locks
+`ALLOWED_ORIGINS` to your domain, sets `EMBED_DEV_CREDENTIAL=false`, mints a real
+embed credential, and prints the admin login. Open `https://<domain>/admin` and
+change the password.
 
-### 3. Apply migrations
+Open ports **443, 80 (Let's Encrypt), your SFTP port, 22**.
 
-**Migrations are not auto-applied.** Run them once, in order, against a fresh DB:
+### Local development — one stack
+
+```bash
+cp .env.example .env                 # set OPENROUTER_API_KEY=sk-or-...
+docker compose -p pharmacy-opt \
+  -f docker-compose.yml -f docker-compose.optimized.yml up -d --build
+# admin :8091 · postgres :5434 · redis :6381 · sftp :2223
+```
+
+`app/schema.sql` applies automatically on startup; `app/admin.py:ensure_admin_schema`
+adds the `users.store_id`, `drug_alias`, and `catalog.last_seen` columns on boot.
+Sign in with `ADMIN_EMAIL` / `ADMIN_PASSWORD` from `.env`.
+
+Migrations mirror the same end state for a from-scratch DB and are idempotent:
 
 ```bash
 for f in migrations/*.sql; do
-  docker exec -i pharmacy-agent-postgres-1 \
-    psql -U pharmacy -d pharmacy < "$f"
+  docker exec -i pharmacy-opt-postgres-1 psql -U pharmacy -d pharmacy < "$f"
 done
 ```
 
-Both are idempotent, so re-running is safe.
-
-- `0001_inventory_nullable_stock_price.sql` — `NULL` = unknown stock, not zero
-- `0002_drug_alias.sql` — alias table for the deterministic resolver
-
-### 4. Verify
-
-```bash
-curl localhost:8088/ready     # {catalog_rows, inventory_rows, sites}
-open http://localhost:8088/admin
-```
-
-Sign in with `ADMIN_EMAIL` / `ADMIN_PASSWORD`.
-
-### Local dev (no image rebuild)
-
-```bash
-./venv/bin/uvicorn app.api:app --reload --port 8088   # backend
-cd admin && npm run dev                                # admin SPA :5173, proxies API
-```
+Frontend-only dev loop (no image rebuild): `cd admin && npm run dev` (SPA on :5173,
+proxies the API).
 
 ---
 
 ## Updating
 
-### Updating the application
-
-The backend is **baked into the image — there is no source volume mount.** Editing
-a file on the host changes nothing in a running container.
+### Production
 
 ```bash
-docker compose up -d --build api ingest-worker
+./deploy/aws/update.sh
 ```
 
-For a one-file hotfix during debugging only:
+Pulls (if a remote is set), rebuilds the api + worker images (the admin SPA is
+baked in), restarts, health-checks, and **rolls back** to the previous image if
+health fails.
+
+### Local (rebuild the image)
+
+The backend **and** the built admin SPA are baked into the image — there is no
+source volume mount, so editing a host file changes nothing in a running
+container. After any code change:
 
 ```bash
-docker cp app/tools.py pharmacy-agent-api-1:/app/app/tools.py
-docker restart pharmacy-agent-api-1
+cd admin && ./node_modules/.bin/vite build && cd ..     # only if the SPA changed
+docker compose -p pharmacy-opt -f docker-compose.yml -f docker-compose.optimized.yml build api ingest-worker
+docker compose -p pharmacy-opt -f docker-compose.yml -f docker-compose.optimized.yml up -d
 ```
 
-A `docker cp` is erased by the next rebuild. Never ship one.
-
-### Updating the admin SPA
-
-```bash
-cd admin && npm run build     # → admin/build, copied in at image build
-cd .. && docker compose up -d --build api
-```
+`docker cp` is debug-only and is erased by the next rebuild — never ship one.
 
 ### Updating the data
 
@@ -230,6 +214,18 @@ indication, dosage, side_effect, mm_reg, mm_label, status`.
 Inventory columns: `article_code, site_code, stock_qty, price`.
 Burmese text lives in `indication` / `dosage` / `side_effect` — store as UTF-8.
 A blank `stock_qty` or `price` is ingested as `NULL` (unknown), **not** `0`.
+
+**Load behavior (set on the SFTP page → Ingest settings):**
+
+- **Article file** (name contains `article`) → catalog. Default **full sync**: the
+  file is authoritative and drops any drug it omits (an empty/partial file deletes
+  nothing). Switch to *merge* to only add/update and keep discontinued drugs.
+- **Stock file** (`balance` / `stock`) → inventory, always a full-replace snapshot.
+
+**Partner onboarding (SFTP page):** register a partner's SSH public key in the key
+manager — it works on their next connection with no restart. In production password
+auth is off, so the key is the access. The page also hands over copy-paste snippets
+(sftp / scp / cron / paramiko / WinSCP) and the filename rules.
 
 ### Updating a database schema
 
@@ -346,7 +342,9 @@ stack and per intent.
 
 ### Running two stacks side by side
 
-`docker-compose.optimized.yml` brings up a second, isolated stack for A/B work:
+The benchmark table above compared two stacks. The plain `docker-compose.yml`-only
+**baseline (`:8088`) was the A/B control and is now retired** — the optimized stack
+below is the one you run:
 
 ```bash
 docker compose -p pharmacy-opt \
@@ -355,8 +353,8 @@ docker compose -p pharmacy-opt \
 
 | | api | postgres | redis | sftp |
 |---|---|---|---|---|
-| baseline | 8088 | 5433 | 6380 | 2222 |
 | optimized | 8091 | 5434 | 6381 | 2223 |
+| baseline (retired) | 8088 | 5433 | 6380 | 2222 |
 
 Compose namespaces volumes by project name, so `-p pharmacy-opt` gets its own
 `pgdata` and never touches the baseline's.
@@ -376,22 +374,20 @@ docker compose -p pharmacy-opt \
 
 ## Security checklist (before public deploy)
 
-Two defaults are **open by design for local dev and fatal in production**:
-
-- `is_valid_credential` (`app/cache.py`) returns `True` for **any** credentials when
-  none are registered.
-- `allow_origins` (`app/api.py`) falls back to `["*"]`.
-
-Deployed as-is, anyone can mint a session against your pharmacy data.
+The AWS installer (`deploy/aws/install.sh`) handles most of this automatically —
+generated secrets, `EMBED_DEV_CREDENTIAL=false`, `ALLOWED_ORIGINS` locked to the
+domain, key-auth-only SFTP, TLS. Embed credentials **fail closed** (an
+unregistered credential is a 403) and CORS no longer defaults to `*`. If you
+deploy by hand, confirm each of these:
 
 - [ ] Rotate the OpenRouter API key
-- [ ] Register at least one embed credential (closes the open-dev-mode hole)
+- [ ] `EMBED_DEV_CREDENTIAL=false` and at least one real embed credential registered
 - [ ] `SECRET_KEY` = 32+ random bytes, matching the Laravel `CITYAGENT_SECRET_KEY`
-- [ ] `ALLOWED_ORIGINS` narrowed to the host domain
-- [ ] SFTP key-based auth only (drop pubkeys in `sftp/keys`, unset `SFTP_PASSWORD`)
+- [ ] `ALLOWED_ORIGINS` narrowed to the host domain (not `*`)
+- [ ] SFTP key-based auth only (register partner keys on the SFTP page; unset `SFTP_PASSWORD`)
 - [ ] Deploy behind TLS
 - [ ] Connect real LDAP / Keycloak
-- [ ] Change `ADMIN_PASSWORD` from the seed value
+- [ ] Change `ADMIN_PASSWORD` from the seed value (via the DB row — re-seeding skips an existing account)
 
 ## Docs
 
