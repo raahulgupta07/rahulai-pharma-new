@@ -36,7 +36,8 @@
     Package,
     Sparkles,
     Lock,
-    Building
+    Building,
+    BookOpen
   } from '@lucide/svelte';
   import ToastHost from '$lib/aurora/ToastHost.svelte';
 
@@ -252,7 +253,8 @@
         { href: '/settings', label: 'Answer behaviour', icon: SlidersHorizontal },
         { href: '/auth', label: 'Authentication', icon: KeyRound },
         { href: '/agent', label: 'Agent', icon: Bot },
-        { href: '/embed', label: 'Embed widget', icon: Code2 }
+        { href: '/embed', label: 'Embed widget', icon: Code2 },
+        { href: '/docs', label: 'Integration guide', icon: BookOpen }
       ]
     }
   ];
