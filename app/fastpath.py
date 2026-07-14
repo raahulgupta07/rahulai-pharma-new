@@ -233,15 +233,32 @@ sentence, in the user's language: \
 """
 
 
-def build_phrasing_input(scoped_message: str, facts: Dict[str, Any]) -> str:
+# Answer-length directive for the phrasing call, mirroring agent._STYLE_DIRECTIVE.
+# The fast path answers HOT_HAVE / HOT_WHERE, so "crisp" is a one-liner and
+# "detailed" adds only a short context line — it has no tool to fetch more.
+_PHRASING_STYLE = {
+    "standard": "",
+    "crisp": " Answer in ONE short line: product name, article code, and the number asked. Nothing else.",
+    "detailed": " After the direct answer, you may add one short factual context line from the FACTS only.",
+}
+
+
+def build_phrasing_input(
+    scoped_message: str, facts: Dict[str, Any], style: str = "standard"
+) -> str:
     """Compose the phrasing prompt: the scoped user message + the FACTS block.
 
     ``scoped_message`` already carries the deterministic language directive (and
     store context) from :func:`app.api._scoped_message`; the facts are appended
-    as JSON so the model restates them without inventing anything.
+    as JSON so the model restates them without inventing anything. ``style`` adds
+    the operator's answer-length directive (crisp / standard / detailed).
     """
 
-    return f"{scoped_message}\n\nFACTS (answer from these only):\n{json.dumps(facts, ensure_ascii=False)}"
+    directive = _PHRASING_STYLE.get(style, "")
+    return (
+        f"{scoped_message}{directive}\n\n"
+        f"FACTS (answer from these only):\n{json.dumps(facts, ensure_ascii=False)}"
+    )
 
 
 @lru_cache(maxsize=8)

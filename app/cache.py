@@ -16,6 +16,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re as _re
 import time
 from typing import List, Optional
 
@@ -519,9 +520,104 @@ async def set_config_override(key: str, value: str) -> None:
     await get_client().hset(_CONFIG_KEY, key, value)
 
 
+# ---- CORS allowed origins (runtime-managed, shared across workers) ---------
+#
+# CORS origins used to be ONLY the ALLOWED_ORIGINS env var, read once at startup
+# and baked into the middleware — so adding a customer's site meant editing env
+# and restarting. This is the runtime layer: a Redis set the admin UI writes to,
+# UNIONed with the env origins by the CORS middleware. The middleware refreshes
+# its in-process copy of this set on a short loop, so an added origin takes
+# effect within seconds across every worker, no restart.
+
+_CORS_KEY = "pharmacy:cors_origins"
+_ORIGIN_RE = _re.compile(r"^https?://[^/\s]+$")  # scheme://host[:port], no path/slash
+
+
+def normalize_origin(origin: str) -> str:
+    """Validate + canonicalise a browser Origin. Raises ValueError on junk.
+
+    An Origin is scheme://host[:port] with NO path and NO trailing slash — the
+    browser sends exactly that, so anything else would never match and is a
+    typo. ``*`` is refused here: opening CORS to everyone is an env-level
+    decision (ALLOWED_ORIGINS=*), never a stray click in the UI.
+    """
+
+    o = (origin or "").strip().rstrip("/")
+    if o == "*":
+        raise ValueError("refusing '*' from the UI; set ALLOWED_ORIGINS=* in env if you truly mean it")
+    if not _ORIGIN_RE.match(o):
+        raise ValueError("expected an origin like http://localhost:8000 or https://shop.example.com (scheme + host, no path)")
+    return o.lower()
+
+
+# ---- answer style (crisp / standard / detailed) ----------------------------
+#
+# Operator-tunable answer length, applied to the agent's system prompt and the
+# fast path's phrasing. Global (not per-store), Redis-backed like the ingest
+# config. Changing it bumps data_version at the admin layer so cached answers in
+# the old style are invalidated.
+
+_ANSWER_STYLE_KEY = "pharmacy:answer_style"
+ANSWER_STYLES = ("crisp", "standard", "detailed")
+
+
+async def get_answer_style() -> str:
+    """The configured answer length, defaulting to 'standard'.
+
+    Falls back to 'standard' on anything unexpected (Redis down, unset, corrupt)
+    — the safe middle that matches the baseline system prompt.
+    """
+
+    try:
+        raw = await get_client().get(_ANSWER_STYLE_KEY)
+    except Exception:  # noqa: BLE001
+        return "standard"
+    return raw if raw in ANSWER_STYLES else "standard"
+
+
+async def set_answer_style(style: str) -> str:
+    """Persist the answer style. Raises ValueError on an unknown value."""
+
+    s = (style or "").strip().lower()
+    if s not in ANSWER_STYLES:
+        raise ValueError(f"answer style must be one of {', '.join(ANSWER_STYLES)}")
+    await get_client().set(_ANSWER_STYLE_KEY, s)
+    return s
+
+
+async def get_cors_origins() -> set:
+    """The runtime-added origins from Redis. Empty set on any Redis trouble."""
+
+    try:
+        return set(await get_client().smembers(_CORS_KEY))
+    except Exception:  # noqa: BLE001 — a Redis blip must not widen or crash CORS
+        return set()
+
+
+async def add_cors_origin(origin: str) -> str:
+    """Register an allowed origin. Returns the normalised value."""
+
+    o = normalize_origin(origin)
+    await get_client().sadd(_CORS_KEY, o)
+    return o
+
+
+async def remove_cors_origin(origin: str) -> int:
+    """Remove an allowed origin. Returns count removed (0 or 1)."""
+
+    return await get_client().srem(_CORS_KEY, (origin or "").strip().rstrip("/").lower())
+
+
 __all__ = [
     "get_client",
     "close_client",
+    "normalize_origin",
+    "get_cors_origins",
+    "add_cors_origin",
+    "remove_cors_origin",
+    "get_answer_style",
+    "set_answer_style",
+    "ANSWER_STYLES",
     "get_cached",
     "set_cached",
     "get_data_version",

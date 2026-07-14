@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Embed cross-origin test</title>
+<style>
+  body{font:15px/1.5 system-ui,sans-serif;max-width:640px;margin:40px auto;padding:0 16px;color:#111}
+  h1{font-size:20px}
+  .card{border:1px solid #ddd;border-radius:10px;padding:16px;margin:16px 0}
+  code{background:#f4f4f5;padding:1px 5px;border-radius:4px}
+  .ok{color:#15803d}.bad{color:#b91c1c}
+  input,button{font:inherit;padding:8px 10px;border-radius:8px;border:1px solid #ccc}
+  button{background:#111;color:#fff;cursor:pointer;border:0}
+  pre{white-space:pre-wrap;background:#0b0b0c;color:#e5e7eb;padding:12px;border-radius:8px;overflow:auto}
+</style>
+</head>
+<body>
+  <h1>Pharmacy embed — cross-origin test</h1>
+  <p>This page is served from <code id="origin"></code>. It is a <b>foreign origin</b> to the
+     backend at <code id="base"></code> — exactly like an engineer embedding on their own site (or AWS).</p>
+
+  <div class="card">
+    <label>Backend base URL<br>
+      <input id="baseInput" size="40" value="http://localhost:8091"></label>
+    <p style="margin:8px 0 0">embed_id <code>web</code> · public_key <code>web</code> (no HMAC — open credential)</p>
+  </div>
+
+  <div class="card">
+    <input id="q" size="34" value="do you have ROYAL-D 25G" placeholder="ask a question">
+    <button id="ask">Ask</button>
+    <p id="status"></p>
+    <pre id="out">(no request yet)</pre>
+  </div>
+
+  <script>
+    document.getElementById('origin').textContent = window.location.origin;
+    const baseInput = document.getElementById('baseInput');
+    document.getElementById('base').textContent = baseInput.value;
+    baseInput.oninput = () => document.getElementById('base').textContent = baseInput.value;
+
+    const out = document.getElementById('out');
+    const status = document.getElementById('status');
+
+    document.getElementById('ask').onclick = async () => {
+      const BASE = baseInput.value.replace(/\/$/, '');
+      const q = document.getElementById('q').value;
+      status.textContent = 'creating session...';
+      out.textContent = '';
+      try {
+        const s = await fetch(BASE + '/api/embed/session/create', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({embed_id: 'web', public_key: 'web'})
+        });
+        if (!s.ok) throw new Error('session/create HTTP ' + s.status);
+        const {session_token} = await s.json();
+        status.textContent = 'asking...';
+        const c = await fetch(BASE + '/api/embed/chat', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({session_token, message: q})
+        });
+        if (!c.ok) throw new Error('chat HTTP ' + c.status);
+        const data = await c.json();
+        status.innerHTML = '<span class="ok">OK — CORS passed, query answered</span>';
+        out.textContent = data.content || JSON.stringify(data, null, 2);
+      } catch (e) {
+        status.innerHTML = '<span class="bad">FAILED: ' + e.message +
+          '</span> — if this is a CORS/"Failed to fetch" error, add <b>' +
+          window.location.origin + '</b> in Admin → Tenants → CORS origins.';
+        out.textContent = String(e);
+      }
+    };
+  </script>
+</body>
+</html>

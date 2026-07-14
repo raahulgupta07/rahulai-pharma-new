@@ -160,6 +160,41 @@ sentence (in the user's language): \
 """
 
 
+# ---- answer-length styles --------------------------------------------------
+# Operator-selectable from the admin UI (Settings -> Answer behaviour). Appended
+# to the system prompt as an OVERRIDE, so it re-tunes the RESPONSE STYLE block
+# above without surgery on the middle of a long, landmine-laden string ("crisp"
+# vs "standard" vs "detailed"). "standard" adds nothing — the baseline prompt.
+_STYLE_DIRECTIVE = {
+    "standard": "",
+    "crisp": (
+        "\n\nANSWER LENGTH — CRISP (overrides RESPONSE STYLE above):\n"
+        "- Answer in ONE short line. Give only the product name, article code, and "
+        "the single figure asked for (stock or price). Nothing else.\n"
+        "- Do NOT add a table unless the user explicitly asks to compare branches "
+        "or list several products; then keep it minimal.\n"
+        "- No indication, dosage, or background. Still: never invent a value; if "
+        "you do not have it, say so. Keep the pharmacist safety sentence when the "
+        "answer contains stock or price."
+    ),
+    "detailed": (
+        "\n\nANSWER LENGTH — DETAILED (overrides RESPONSE STYLE above):\n"
+        "- After the direct answer, add a brief line of useful context: the "
+        "indication, and dosage when relevant. Keep it factual and from tool "
+        "results only.\n"
+        "- When listing products you may show up to 8 (not just 3-5).\n"
+        "- Still NO clinical dosing instructions, treatment plans, or long essays, "
+        "and never invent a value."
+    ),
+}
+
+
+def prompt_for_style(style: str, base: str = BILINGUAL_SYSTEM_PROMPT) -> str:
+    """The system prompt with the answer-length override for ``style`` appended."""
+
+    return base + _STYLE_DIRECTIVE.get(style, "")
+
+
 # Selectable chat models for the in-app A/B picker. Only ids in this allowlist
 # may be requested per-message (anything else falls back to the configured
 # default). Prices are USD per 1M tokens (in / out) from OpenRouter.
@@ -250,11 +285,11 @@ def _get_learning_db():
     return _LEARNING_DB
 
 
-def build_agent(model_id: str | None = None) -> Agent:
+def build_agent(model_id: str | None = None, style: str = "standard") -> Agent:
     """Construct and return a configured Agno agent for ``model_id``.
 
     Wires an OpenRouter chat model (``model_id`` or the configured default),
-    the pharmacy tools, and :data:`BILINGUAL_SYSTEM_PROMPT`.
+    the pharmacy tools, and the system prompt for ``style`` (answer length).
     """
 
     settings = get_settings()
@@ -285,13 +320,13 @@ def build_agent(model_id: str | None = None) -> Agent:
     return Agent(
         model=model,
         tools=TOOLS,
-        system_message=BILINGUAL_SYSTEM_PROMPT,
+        system_message=prompt_for_style(style),
         markdown=True,
         **extra,
     )
 
 
-def build_learning_agent(model_id: str | None = None) -> Agent:
+def build_learning_agent(model_id: str | None = None, style: str = "standard") -> Agent:
     """Construct a learning-enabled Agno agent for ``model_id``.
 
     Same wiring as :func:`build_agent`, plus an Agno :class:`LearningMachine`
@@ -333,7 +368,7 @@ def build_learning_agent(model_id: str | None = None) -> Agent:
         return Agent(
             model=model,
             tools=TOOLS,
-            system_message=BILINGUAL_SYSTEM_PROMPT + "\n\n" + LEARNING_SAFETY_NOTE,
+            system_message=prompt_for_style(style) + "\n\n" + LEARNING_SAFETY_NOTE,
             markdown=True,
             db=db,
             learning=lm,
@@ -342,7 +377,7 @@ def build_learning_agent(model_id: str | None = None) -> Agent:
         )
     except Exception:   # noqa: BLE001 — any failure must degrade to the plain agent
         logger.exception("Failed to build learning agent; falling back to plain agent")
-        return build_agent(model_id)
+        return build_agent(model_id, style)
 
 
 # Stable across processes and restarts, so a session written by one worker is
@@ -350,7 +385,7 @@ def build_learning_agent(model_id: str | None = None) -> Agent:
 HISTORY_AGENT_ID = "city-pharma-agent"
 
 
-def build_history_agent(model_id: str | None = None) -> Agent:
+def build_history_agent(model_id: str | None = None, style: str = "standard") -> Agent:
     """A plain agent that can see the last few turns of its own conversation.
 
     Without this, every turn is answered in isolation: "which other shop has it?"
@@ -368,7 +403,7 @@ def build_history_agent(model_id: str | None = None) -> Agent:
     db = _get_learning_db()
     if db is None:
         logger.warning("No DB for history; conversation will be stateless")
-        return build_agent(model_id)
+        return build_agent(model_id, style)
 
     settings = get_settings()
     try:
@@ -385,7 +420,7 @@ def build_history_agent(model_id: str | None = None) -> Agent:
             # without one is persisted and then silently ignored on read.
             id=HISTORY_AGENT_ID,
             tools=TOOLS,
-            system_message=BILINGUAL_SYSTEM_PROMPT,
+            system_message=prompt_for_style(style),
             markdown=True,
             db=db,
             add_history_to_context=True,
@@ -396,22 +431,24 @@ def build_history_agent(model_id: str | None = None) -> Agent:
         return build_agent(model_id)
 
 
-@lru_cache(maxsize=8)
-def _agent_for(model_id: str) -> Agent:
-    return build_agent(model_id)
+@lru_cache(maxsize=24)
+def _agent_for(model_id: str, style: str = "standard") -> Agent:
+    return build_agent(model_id, style)
 
 
-@lru_cache(maxsize=8)
-def _history_agent_for(model_id: str) -> Agent:
-    return build_history_agent(model_id)
+@lru_cache(maxsize=24)
+def _history_agent_for(model_id: str, style: str = "standard") -> Agent:
+    return build_history_agent(model_id, style)
 
 
-@lru_cache(maxsize=8)
-def _learning_agent_for(model_id: str) -> Agent:
-    return build_learning_agent(model_id)
+@lru_cache(maxsize=24)
+def _learning_agent_for(model_id: str, style: str = "standard") -> Agent:
+    return build_learning_agent(model_id, style)
 
 
-def get_agent(model_id: str | None = None, *, with_history: bool = False) -> Agent:
+def get_agent(
+    model_id: str | None = None, *, with_history: bool = False, style: str = "standard"
+) -> Agent:
     """Return a cached agent for the requested model.
 
     Unknown / empty ids fall back to the configured default model. Agents are
@@ -427,11 +464,13 @@ def get_agent(model_id: str | None = None, *, with_history: bool = False) -> Age
 
     settings = get_settings()
     chosen = model_id if model_id in ALLOWED_MODEL_IDS else settings.openrouter_model
+    if style not in _STYLE_DIRECTIVE:
+        style = "standard"
     if settings.learning_enabled:
-        return _learning_agent_for(chosen)   # already history-aware
+        return _learning_agent_for(chosen, style)   # already history-aware
     if with_history and settings.history_enabled:
-        return _history_agent_for(chosen)
-    return _agent_for(chosen)
+        return _history_agent_for(chosen, style)
+    return _agent_for(chosen, style)
 
 
 __all__ = [

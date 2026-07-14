@@ -101,6 +101,34 @@ ksort($user);
 $canonical = json_encode($user, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
 $signature = hash_hmac('sha256', $canonical, config('services.cityagent.secret_key'));`);
 
+  // Complete, framework-free PHP. Drop into any .php page — no Laravel needed.
+  const phpReadySnippet = $derived(`<?php
+// ===== City Pharma chat widget — drop-in PHP =====
+$CITYAGENT_BASE = '${cleanBase}';       // public backend URL
+$EMBED_ID       = '${embedId}';         // from the Tenants page
+$PUBLIC_KEY     = '${publicKey}';
+$SECRET_KEY     = getenv('CITYAGENT_SECRET_KEY'); // == backend SECRET_KEY (server-side ONLY)
+
+// OPTIONAL — lock every answer to the logged-in user's branch.
+// Delete this block for a public widget that sees all stores.
+$user = [
+  'id'       => (string) $currentUser->id,       // your logged-in user id
+  'store_id' => (string) $currentUser->branch,   // e.g. "20060-CCBHSC"
+];
+ksort($user); // canonical form MUST match the backend: sorted keys, unescaped
+$payload   = json_encode($user, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+$signature = hash_hmac('sha256', $payload, $SECRET_KEY);
+?>
+<script src="<?= htmlspecialchars($CITYAGENT_BASE) ?>/api/embed/widget.js"
+  data-embed-id="<?= htmlspecialchars($EMBED_ID) ?>"
+  data-public-key="<?= htmlspecialchars($PUBLIC_KEY) ?>"
+  data-user='<?= htmlspecialchars($payload, ENT_QUOTES) ?>'
+  data-user-sig="<?= $signature ?>"
+  data-title="CityCare Agent"
+  data-greeting="Ask about stock, prices, or substitutes."
+  data-accent="${DEFAULT_ACCENT}"
+  data-stream="true" async><\/script>`);
+
   let copied = $state('');
   function copy(key, text) {
     navigator.clipboard.writeText(text);
@@ -272,8 +300,15 @@ $signature = hash_hmac('sha256', $canonical, config('services.cityagent.secret_k
 )}
 
 {@render block(
+  'php-ready',
+  'Ready-to-use PHP (drop-in, no framework)',
+  phpReadySnippet,
+  'Paste into any .php page. Set CITYAGENT_SECRET_KEY (must equal the backend SECRET_KEY) in the server env. Keep the $user block to lock answers to a branch, or delete it for a public widget.'
+)}
+
+{@render block(
   'php',
-  'Server-side signing (Laravel / PHP)',
+  'Server-side signing (Laravel)',
   phpSnippet,
   'CITYAGENT_SECRET_KEY must equal the backend SECRET_KEY. Canonical = sorted keys, no spaces, unescaped.'
 )}

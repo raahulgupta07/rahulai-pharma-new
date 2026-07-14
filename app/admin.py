@@ -818,6 +818,78 @@ async def upload(file: UploadFile = File(...)) -> Dict:
 # only — the router-level require_admin is not enough.
 
 
+# ---- CORS allowed origins (runtime-managed) --------------------------------
+
+
+class CorsOrigin(BaseModel):
+    origin: str
+
+
+@router.get("/cors-origins", dependencies=[Depends(require_super_admin)])
+async def cors_origins_list() -> Dict:
+    """The CORS allowlist: env origins (read-only) + runtime origins (editable).
+
+    A browser widget on a customer site can only call the embed API if that
+    site's origin is here. ``env`` comes from ``ALLOWED_ORIGINS`` and needs a
+    restart to change; ``runtime`` is what this page adds and takes effect within
+    seconds, no restart.
+    """
+
+    from app.api import cors_origins as _env_origins
+
+    return {
+        "env": sorted(o.lower() for o in _env_origins()),
+        "runtime": sorted(await cache.get_cors_origins()),
+    }
+
+
+@router.post("/cors-origins", dependencies=[Depends(require_super_admin)])
+async def cors_origins_add(c: CorsOrigin) -> Dict:
+    """Allow a browser origin to call the embed API. Live within seconds."""
+
+    try:
+        added = await cache.add_cors_origin(c.origin)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "ok", "origin": added}
+
+
+@router.delete("/cors-origins", dependencies=[Depends(require_super_admin)])
+async def cors_origins_remove(origin: str) -> Dict:
+    """Remove a runtime origin. Env origins cannot be removed here."""
+
+    removed = await cache.remove_cors_origin(origin)
+    return {"status": "ok", "removed": removed}
+
+
+# ---- answer style (crisp / standard / detailed) ----------------------------
+
+
+class AnswerStyleUpdate(BaseModel):
+    style: str
+
+
+@router.get("/answer-style", dependencies=[Depends(require_super_admin)])
+async def answer_style_get() -> Dict:
+    """The configured answer length + the available options."""
+
+    return {"style": await cache.get_answer_style(), "options": list(cache.ANSWER_STYLES)}
+
+
+@router.post("/answer-style", dependencies=[Depends(require_super_admin)])
+async def answer_style_set(u: AnswerStyleUpdate) -> Dict:
+    """Set the answer length. Bumps data_version so cached answers in the old
+    style are dropped — the same words should not return a long answer after a
+    switch to crisp."""
+
+    try:
+        style = await cache.set_answer_style(u.style)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    await cache.bump_data_version()
+    return {"style": style, "options": list(cache.ANSWER_STYLES)}
+
+
 class IngestConfigUpdate(BaseModel):
     poll_seconds: Optional[int] = None
     catalog_mode: Optional[str] = None

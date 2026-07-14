@@ -28,6 +28,49 @@
   let entityTypes = $state('brand, generic, ingredient, category, condition, site');
   let contradictionAttrs = $state('price, stock, dosage, substitute, indication');
 
+  // ---- answer length (REAL, backend-backed) --------------------------------
+  // Unlike the local-preference switches below, this changes the agent's system
+  // prompt server-side and takes effect on the next question.
+  let answerStyle = $state('standard');
+  let styleBusy = $state(false);
+  const STYLE_META = {
+    crisp: { label: 'Crisp', desc: 'One short line — name, code, and the number asked. No tables unless comparing.' },
+    standard: { label: 'Standard', desc: 'A lead sentence plus a table for multi-row results. The default.' },
+    detailed: { label: 'Detailed', desc: 'Adds brief indication/dosage context and lists more results.' }
+  };
+
+  async function loadStyle() {
+    try {
+      const res = await fetch(base + '/admin/answer-style');
+      if (!res.ok) return; // 403 for a non-super-admin — card just shows default
+      const data = await res.json();
+      answerStyle = data.style ?? 'standard';
+    } catch {}
+  }
+
+  async function setStyle(s) {
+    if (s === answerStyle || styleBusy) return;
+    styleBusy = true;
+    const prev = answerStyle;
+    answerStyle = s; // optimistic
+    try {
+      const res = await fetch(base + '/admin/answer-style', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ style: s })
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.detail || `failed (${res.status})`);
+      answerStyle = body.style;
+      toast(`Answers set to ${STYLE_META[body.style].label} · live now`);
+    } catch (e) {
+      answerStyle = prev;
+      toast(e.message || 'could not change answer length', 'shield-alert');
+    } finally {
+      styleBusy = false;
+    }
+  }
+
   async function getJSON(path) {
     let res;
     try {
@@ -63,6 +106,7 @@
       if (saved) prefs = { ...prefs, ...JSON.parse(saved) };
     } catch {}
     load();
+    loadStyle();
   });
 
   function save() {
@@ -100,6 +144,35 @@
   Per-deployment switches. Changes apply immediately — no redeploy — so one deployment can be tuned
   per client.
 </p>
+
+<!-- Answer length (real, server-side) -->
+<div class="mb-6 rounded-2xl border-[0.5px] border-line bg-surface p-4">
+  <div class="text-[14px] font-semibold text-ink">Answer length</div>
+  <p class="mb-3 mt-0.5 text-[13px] text-ink-2">
+    How long answers are, everywhere the agent replies — chat and the embedded widget. Applies to
+    the next question; no redeploy.
+  </p>
+  <div class="grid gap-2 sm:grid-cols-3">
+    {#each ['crisp', 'standard', 'detailed'] as s}
+      <button
+        onclick={() => setStyle(s)}
+        disabled={styleBusy}
+        class="rounded-xl border p-3 text-left transition-colors disabled:opacity-60 {answerStyle === s
+          ? 'border-accent bg-accent-soft'
+          : 'border-line bg-surface-2 hover:bg-surface'}"
+      >
+        <div class="mb-0.5 flex items-center gap-1.5 text-[13px] font-medium text-ink">
+          {#if answerStyle === s}<Check size={14} class="text-accent" />{/if}
+          {STYLE_META[s].label}
+          {#if s === 'standard'}<span class="text-[11px] font-normal text-ink-3">default</span>{/if}
+        </div>
+        <div class="text-[12px] leading-snug text-ink-2">{STYLE_META[s].desc}</div>
+      </button>
+    {/each}
+  </div>
+</div>
+
+<div class="my-6 h-px bg-line"></div>
 
 <!-- Inline citations -->
 <SettingRow title="Inline citations" bind:checked={prefs.citations} onchange={onToggle}>

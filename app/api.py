@@ -19,6 +19,7 @@ another branch's data.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, Dict, Optional
 
@@ -42,6 +43,7 @@ from app.cache import (
     set_cached_answer,
 )
 from app import fastpath
+from app import cache as cache_mod
 from app.cache import ensure_dev_credential
 from app.config import Settings, get_settings
 from app.db import close_pool, counts, get_pool
@@ -232,10 +234,32 @@ async def lifespan(_app: FastAPI):
             logger.info("pruned %d old chat logs", removed)
     except Exception:  # noqa: BLE001
         pass
+    # Keep the runtime CORS allowlist warm. is_allowed_origin() is sync and on the
+    # request hot path, so it cannot await Redis — this loop refreshes an
+    # in-process copy instead, and a UI change lands within one interval.
+    cors_task = asyncio.create_task(_refresh_cors_loop())
     yield
+    cors_task.cancel()
     await close_pool()
     await close_client()
     await close_embeddings()
+
+
+async def _refresh_cors_loop() -> None:
+    """Mirror the Redis CORS set into ``_EXTRA_CORS`` every few seconds."""
+
+    global _EXTRA_CORS
+    while True:
+        try:
+            _EXTRA_CORS = {o.lower() for o in await cache_mod.get_cors_origins()}
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — a Redis blip must not kill the loop
+            pass
+        try:
+            await asyncio.sleep(_CORS_REFRESH_SECONDS)
+        except asyncio.CancelledError:
+            raise
 
 
 app = FastAPI(title="CitCare Pharmacy Agent", lifespan=lifespan)
@@ -282,9 +306,34 @@ def cors_origins() -> list[str]:
     return origins
 
 
+# Origins added at runtime from the admin UI (Redis-backed), refreshed into this
+# set every few seconds by the lifespan loop. is_allowed_origin() (sync, on the
+# hot path) reads it without touching Redis; a change lands within one refresh.
+_EXTRA_CORS: set[str] = set()
+_CORS_REFRESH_SECONDS = 3
+
+
+class DynamicCORS(CORSMiddleware):
+    """CORSMiddleware whose allowlist is the env origins PLUS the runtime set.
+
+    Origins used to be ONLY ``ALLOWED_ORIGINS`` (env, read once at boot), so
+    allowing a new customer site meant editing env and restarting. This keeps
+    Starlette's battle-tested preflight/header machinery and only widens *which*
+    origins pass — env origins (``self.allow_origins``, fixed at init) unioned
+    with ``_EXTRA_CORS`` (managed live at ``/admin/cors-origins``). A wildcard in
+    env still short-circuits via ``allow_all_origins``.
+    """
+
+    def is_allowed_origin(self, origin: str) -> bool:
+        if self.allow_all_origins:
+            return True
+        o = origin.lower()
+        return o in self.allow_origins or o in _EXTRA_CORS
+
+
 app.add_middleware(
-    CORSMiddleware,
-    allow_origins=cors_origins(),
+    DynamicCORS,
+    allow_origins=[o.lower() for o in cors_origins()],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -714,11 +763,16 @@ async def _answer(
     # nothing. A follow-up also names no drug, so it could not be resolved from
     # this message alone. Hence: fast path only for self-contained turns, and we
     # write the turn into the conversation ourselves afterwards.
+    # Operator-selected answer length (crisp/standard/detailed), applied to both
+    # the fast-path phrasing and the full agent. A change bumps data_version at
+    # the admin layer, so this never serves an old-style answer from cache.
+    style = await cache_mod.get_answer_style()
+
     if get_settings().fast_path_enabled and not follow_up:
         facts = await fastpath.answer(message, store_id)
         if facts is not None:
             phrase_prompt = fastpath.build_phrasing_input(
-                _scoped_message(message, store_id), facts
+                _scoped_message(message, store_id), facts, style
             )
             metrics.incr("llm_calls")
             metrics.record_llm()
@@ -738,7 +792,7 @@ async def _answer(
     try:
         metrics.incr("llm_calls")
         metrics.record_llm()
-        out = await get_agent(model, with_history=bool(client_session)).arun(prompt, **run_kw)
+        out = await get_agent(model, with_history=bool(client_session), style=style).arun(prompt, **run_kw)
         content = getattr(out, "content", str(out))
     finally:
         reset_store_scope(token)
@@ -933,6 +987,9 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
         # lands mid-stream invalidates this answer instead of being masked by it.
         version = await get_data_version()
 
+        # Operator-selected answer length; see _answer().
+        style = await cache_mod.get_answer_style()
+
         # See _answer(): fast path only for self-contained turns; we record the
         # turn ourselves afterwards, since its phrasing agent never does.
         if get_settings().fast_path_enabled and not follow_up:
@@ -958,7 +1015,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                         }
                     yield f"event: result\ndata: {json.dumps(frame)}\n\n"
                 phrase_prompt = fastpath.build_phrasing_input(
-                    _scoped_message(req.message, store_id), facts
+                    _scoped_message(req.message, store_id), facts, style
                 )
                 metrics.incr("llm_calls")
                 metrics.record_llm()
@@ -995,7 +1052,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
         metrics.record_llm()
         try:
             async for event in get_agent(
-                req.model, with_history=bool(req.session_id)
+                req.model, with_history=bool(req.session_id), style=style
             ).arun(
                 _scoped_message(req.message, store_id),
                 stream=True,
