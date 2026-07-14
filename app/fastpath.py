@@ -48,7 +48,7 @@ _EN_WHERE = [
     re.compile(r"\bwho\s+else\s+(?:has|have|stocks?|carr(?:y|ies)|sells?)\s+(.+)", re.I),
     re.compile(r"\bwhere(?:\s+else)?\s+can\s+i\s+(?:find|buy|get)\s+(.+)", re.I),
     re.compile(r"\bwhere(?:\s+else)?\s+(?:is|are)\s+(.+)", re.I),
-    re.compile(r"\bwhich\s+(?:branch|store|shop|site|outlet)s?\s+(?:has|have|stocks?|carr(?:y|ies))\s+(.+)", re.I),
+    re.compile(r"\bwhich\s+(?:\w+\s+){0,2}?(?:branch|store|shop|site|outlet)s?\s+(?:has|have|stocks?|carr(?:y|ies))\s+(.+)", re.I),
     re.compile(r"\b(.+?)\s+at\s+(?:other|another|which)\s+(?:store|branch|shop|site|outlet)s?", re.I),
 ]
 _EN_HAVE = [

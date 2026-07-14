@@ -28,6 +28,7 @@
       baseTouched = true;
     }
     loadCreds();
+    loadOutlets();
   });
 
   async function loadCreds() {
@@ -134,6 +135,126 @@ $signature = hash_hmac('sha256', $payload, $SECRET_KEY);
     navigator.clipboard.writeText(text);
     copied = key;
     setTimeout(() => (copied = ''), 1500);
+  }
+
+  // --- per-outlet embeds (static, pre-signed, download-and-go) --------------
+  let outlets = $state([]);
+  let outletsLoading = $state(false);
+  let outletSel = $state('');
+  let outletSnippet = $state('');
+  let outletBusy = $state(false);
+  let outletError = $state(null);
+  let zipBusy = $state(false);
+
+  async function loadOutlets() {
+    outletsLoading = true;
+    try {
+      const res = await fetch(`${API_BASE}/admin/embed/outlets`);
+      if (!res.ok) throw new Error(`request failed (${res.status})`);
+      outlets = await res.json();
+      if (outlets.length && !outlets.some((o) => o.site_code === outletSel)) {
+        outletSel = outlets[0].site_code;
+      }
+    } catch (e) {
+      outletError = e.message || 'backend offline';
+    } finally {
+      outletsLoading = false;
+    }
+  }
+
+  function outletBody(storeId) {
+    return {
+      store_id: storeId,
+      embed_id: embedId,
+      public_key: publicKey,
+      base_url: cleanBase,
+      accent: DEFAULT_ACCENT
+    };
+  }
+
+  // A detached <a> whose object URL is revoked on the same tick never downloads
+  // (the click is async). Append, click, and revoke on a later tick.
+  function saveBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => {
+      a.remove();
+      URL.revokeObjectURL(url);
+    }, 0);
+  }
+
+  async function genOutletSnippet() {
+    if (!hasCred || !outletSel) return;
+    outletBusy = true;
+    outletError = null;
+    try {
+      const res = await fetch(`${API_BASE}/admin/embed/snippet`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(outletBody(outletSel))
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error(d.detail || `request failed (${res.status})`);
+      }
+      const data = await res.json();
+      outletSnippet = data.snippet;
+    } catch (e) {
+      outletError = e.message;
+      outletSnippet = '';
+    } finally {
+      outletBusy = false;
+    }
+  }
+
+  async function downloadOutlet() {
+    if (!hasCred || !outletSel) return;
+    outletBusy = true;
+    outletError = null;
+    try {
+      const res = await fetch(`${API_BASE}/admin/embed/snippet`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(outletBody(outletSel))
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error(d.detail || `request failed (${res.status})`);
+      }
+      const data = await res.json();
+      outletSnippet = data.snippet;
+      saveBlob(new Blob([data.demo_html], { type: 'text/html' }), `outlet-${outletSel}.html`);
+    } catch (e) {
+      outletError = e.message;
+    } finally {
+      outletBusy = false;
+    }
+  }
+
+  async function downloadAllZip() {
+    if (!hasCred) return;
+    zipBusy = true;
+    outletError = null;
+    try {
+      const res = await fetch(`${API_BASE}/admin/embed/snippets.zip`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(outletBody(outletSel || (outlets[0]?.site_code ?? '')))
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error(d.detail || `request failed (${res.status})`);
+      }
+      saveBlob(await res.blob(), 'outlet-embeds.zip');
+    } catch (e) {
+      outletError = e.message;
+    } finally {
+      zipBusy = false;
+    }
   }
 
   let previewLoaded = $state(false);
@@ -263,6 +384,89 @@ $signature = hash_hmac('sha256', $payload, $SECRET_KEY);
         </span>
       </p>
     {/if}
+  {/if}
+</section>
+
+<!-- 3. Per-outlet embeds (download & go) -->
+<section class="mb-6 rounded-[14px] border border-line bg-surface p-4">
+  <div class="mb-1 flex items-center gap-2">
+    <span class="text-[14px] font-medium text-ink">Per-outlet embeds (download &amp; go)</span>
+    <Badge tone="ok">{outlets.length} stores</Badge>
+  </div>
+  <p class="mb-3 text-[13px] text-ink-2">
+    Generate a pre-signed snippet locked to one store — the customer's developer just drops it in,
+    no login or signing on their end. Answers are limited to that branch (server-side). The signed
+    snippet is a bearer token for <em>that one store's</em> stock, which is the intended scope.
+  </p>
+
+  {#if !hasCred}
+    <p class="flex items-start gap-1.5 text-[13px] text-warning">
+      <TriangleAlert size={14} class="mt-0.5 shrink-0" />
+      <span>Pick a registered credential above first — an outlet snippet needs one to work.</span>
+    </p>
+  {:else}
+    <div class="flex flex-wrap items-end gap-2">
+      <label class="flex flex-col gap-1">
+        <span class="text-[12px] text-ink-3">Store</span>
+        <select
+          bind:value={outletSel}
+          class="min-w-[220px] rounded-lg border border-line bg-surface-2 px-3 py-2 font-mono text-[13px] text-ink outline-none focus:border-accent"
+        >
+          {#each outlets as o (o.site_code)}
+            <option value={o.site_code}>{o.site_code} · {o.skus} SKUs</option>
+          {/each}
+        </select>
+      </label>
+      <button
+        onclick={genOutletSnippet}
+        disabled={outletBusy || !outletSel}
+        class="rounded-lg border border-line px-3 py-2 text-[13px] text-ink-2 transition-colors hover:bg-surface-2 disabled:opacity-60"
+      >
+        {outletBusy ? 'Working…' : 'Show snippet'}
+      </button>
+      <button
+        onclick={downloadOutlet}
+        disabled={outletBusy || !outletSel}
+        class="rounded-lg bg-accent px-3 py-2 text-[13px] font-medium text-on-accent transition-colors hover:bg-accent-hover disabled:opacity-60"
+      >
+        Download this outlet (.html)
+      </button>
+      <button
+        onclick={downloadAllZip}
+        disabled={zipBusy || !outlets.length}
+        class="rounded-lg border border-accent px-3 py-2 text-[13px] font-medium text-accent-hover transition-colors hover:bg-accent-soft disabled:opacity-60"
+      >
+        {zipBusy ? 'Building…' : `Download all ${outlets.length} (.zip)`}
+      </button>
+    </div>
+
+    {#if outletError}
+      <p class="mt-3 text-[13px] text-danger">{outletError}</p>
+    {/if}
+
+    {#if outletSnippet}
+      <div class="mt-3">
+        <div class="mb-2 flex items-center">
+          <span class="text-[13px] font-medium text-ink">Snippet for {outletSel}</span>
+          <button
+            onclick={() => copy('outlet', outletSnippet)}
+            class="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1 text-[12px] text-ink-2 transition-colors hover:bg-surface-2"
+          >
+            {#if copied === 'outlet'}<Check size={13} /> Copied{:else}<Copy size={13} /> Copy{/if}
+          </button>
+        </div>
+        <pre
+          class="overflow-x-auto rounded-[14px] border border-line bg-surface-2 p-4 text-[12.5px] leading-relaxed text-ink"><code
+            >{outletSnippet}</code
+          ></pre>
+      </div>
+    {/if}
+
+    <p class="mt-3 text-[12.5px] text-ink-3">
+      Each downloaded page still needs its own site origin added to
+      <a href={appBase + '/tenants'} class="text-accent hover:underline">Tenants → CORS</a>, or the
+      browser blocks it.
+    </p>
   {/if}
 </section>
 

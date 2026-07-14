@@ -890,6 +890,181 @@ async def answer_style_set(u: AnswerStyleUpdate) -> Dict:
     return {"style": style, "options": list(cache.ANSWER_STYLES)}
 
 
+# ---- per-outlet embed snippets (static, pre-signed, download-and-go) --------
+#
+# Each outlet gets a snippet with its ``store_id`` baked in and HMAC-signed
+# server-side, so the widget is locked to that one store. The customer's dev
+# just drops the <script> tag on their site — no login, no signing on their end.
+# The signature is a bearer token for that ONE store's stock (availability, no
+# prices cross-store); that is the intended scope for an outlet embed.
+
+
+class OutletSnippetRequest(BaseModel):
+    store_id: str
+    embed_id: str
+    public_key: str
+    base_url: str
+    title: Optional[str] = None
+    accent: Optional[str] = "#006869"
+    stream: bool = True
+
+
+def _outlet_user(store_id: str) -> Dict[str, str]:
+    """The signed identity baked into an outlet snippet. Stable per store."""
+
+    return {"id": f"outlet:{store_id}", "store_id": store_id}
+
+
+def _snippet_html(req: "OutletSnippetRequest", signature: str) -> str:
+    """The <script> tag a customer dev pastes onto their site."""
+
+    import html as _html
+
+    base = req.base_url.rstrip("/")
+    user_json = json.dumps(_outlet_user(req.store_id), separators=(",", ":"), ensure_ascii=False)
+    title = req.title or f"Pharmacy · {req.store_id}"
+    attrs = [
+        f'src="{_html.escape(base)}/api/embed/widget.js"',
+        f'data-embed-id="{_html.escape(req.embed_id)}"',
+        f'data-public-key="{_html.escape(req.public_key)}"',
+        f"data-user='{_html.escape(user_json)}'",
+        f'data-user-sig="{signature}"',
+        f'data-title="{_html.escape(title)}"',
+        f'data-accent="{_html.escape(req.accent or "#006869")}"',
+        f'data-stream="{"true" if req.stream else "false"}"',
+        "async",
+    ]
+    return "<script " + "\n        ".join(attrs) + "></script>"
+
+
+def _demo_page(req: "OutletSnippetRequest", snippet: str) -> str:
+    """A complete standalone page that already works — open it, ask a question."""
+
+    import html as _html
+
+    return (
+        "<!doctype html>\n<html lang=\"en\">\n<head>\n"
+        "<meta charset=\"utf-8\">\n"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+        f"<title>{_html.escape(req.title or ('Pharmacy · ' + req.store_id))}</title>\n"
+        "<style>body{font:16px/1.6 system-ui,sans-serif;max-width:720px;margin:48px auto;padding:0 20px;color:#111}"
+        "code{background:#f4f4f5;padding:2px 6px;border-radius:5px}</style>\n"
+        "</head>\n<body>\n"
+        f"<h1>Store {_html.escape(req.store_id)} — stock assistant</h1>\n"
+        "<p>Ask about a product (e.g. <code>do you have ROYAL-D 25G</code>) or where else "
+        "to find it (<code>which other stores have ROYAL-D 25G</code>). The widget is "
+        "locked to this store.</p>\n"
+        "<!-- CityAgent pharmacy embed — paste this <script> on your own site -->\n"
+        f"{snippet}\n"
+        "</body>\n</html>\n"
+    )
+
+
+def _outlet_readme(req: "OutletSnippetRequest") -> str:
+    return (
+        f"Outlet embed — store {req.store_id}\n"
+        "=====================================\n\n"
+        "1. Copy the <script> tag from snippet.txt onto any page of your site\n"
+        "   (or open index.html to see it working first).\n"
+        f"2. Ask CityAgent's admin to add your site's origin to CORS (e.g.\n"
+        "   https://your-domain.com) — otherwise the browser blocks the widget.\n"
+        f"3. Backend: {req.base_url.rstrip('/')}\n\n"
+        "The widget only ever answers for this one store. No login, no keys to keep.\n"
+    )
+
+
+async def _validate_outlet_request(req: "OutletSnippetRequest") -> None:
+    if not await cache.is_valid_credential(req.embed_id, req.public_key):
+        raise HTTPException(status_code=400, detail="embed_id / public_key are not a registered credential")
+    if not re.match(r"^https?://[^/\s]+", req.base_url):
+        raise HTTPException(status_code=400, detail="base_url must be a full http(s) origin")
+    codes = {r["site_code"] for r in await q("SELECT DISTINCT site_code FROM inventory")}
+    if req.store_id not in codes:
+        raise HTTPException(status_code=404, detail=f"unknown store_id {req.store_id!r}")
+
+
+@router.get("/embed/outlets", dependencies=[Depends(require_super_admin)])
+async def embed_outlets() -> List[Dict]:
+    """Every store that can be embedded, with SKU/unit counts for the picker."""
+
+    return await q(
+        """
+        SELECT site_code,
+               COUNT(*)        AS skus,
+               SUM(stock_qty)  AS units
+          FROM inventory
+         GROUP BY site_code
+         ORDER BY site_code
+        """
+    )
+
+
+@router.post("/embed/snippet", dependencies=[Depends(require_super_admin)])
+async def embed_snippet(req: OutletSnippetRequest) -> Dict:
+    """Generate a pre-signed, store-locked embed snippet for one outlet."""
+
+    from app.security import sign_user
+
+    await _validate_outlet_request(req)
+    user = _outlet_user(req.store_id)
+    signature = sign_user(user)          # server-side secret; never leaves the box
+    snippet = _snippet_html(req, signature)
+    return {
+        "store_id": req.store_id,
+        "user": user,
+        "signature": signature,
+        "snippet": snippet,
+        "demo_html": _demo_page(req, snippet),
+    }
+
+
+@router.post("/embed/snippets.zip", dependencies=[Depends(require_super_admin)])
+async def embed_snippets_zip(req: OutletSnippetRequest = Body(...)) -> Any:
+    """One ZIP with a folder per store (demo page + snippet + README).
+
+    ``store_id`` in the body is ignored — every store is generated. Hand each
+    outlet's dev their own folder.
+    """
+
+    import io
+    import zipfile
+
+    from fastapi import Response
+
+    from app.security import sign_user
+
+    if not await cache.is_valid_credential(req.embed_id, req.public_key):
+        raise HTTPException(status_code=400, detail="embed_id / public_key are not a registered credential")
+    if not re.match(r"^https?://[^/\s]+", req.base_url):
+        raise HTTPException(status_code=400, detail="base_url must be a full http(s) origin")
+
+    codes = sorted({r["site_code"] for r in await q("SELECT DISTINCT site_code FROM inventory")})
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(
+            "README.txt",
+            f"CityAgent pharmacy — per-outlet embeds ({len(codes)} stores)\n"
+            f"Backend: {req.base_url.rstrip('/')}\n\n"
+            "One folder per store. Give each outlet's developer their own folder.\n"
+            "Each folder has: index.html (working demo), snippet.txt (the tag to\n"
+            "paste), README.txt (steps). Remember to add each site's origin to CORS.\n",
+        )
+        for code in codes:
+            one = req.model_copy(update={"store_id": code})
+            sig = sign_user(_outlet_user(code))
+            snip = _snippet_html(one, sig)
+            folder = f"outlet-{code}"
+            zf.writestr(f"{folder}/index.html", _demo_page(one, snip))
+            zf.writestr(f"{folder}/snippet.txt", snip + "\n")
+            zf.writestr(f"{folder}/README.txt", _outlet_readme(one))
+    buf.seek(0)
+    return Response(
+        content=buf.read(),
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="outlet-embeds.zip"'},
+    )
+
+
 class IngestConfigUpdate(BaseModel):
     poll_seconds: Optional[int] = None
     catalog_mode: Optional[str] = None

@@ -32,6 +32,11 @@ from app.resolver import Candidate, ResolveResult, Resolution
         ("who else has paracap", fastpath.HOT_WHERE, "paracap"),
         ("where can I find flemex", fastpath.HOT_WHERE, "flemex"),
         ("which branch has paracap", fastpath.HOT_WHERE, "paracap"),
+        # adjective between "which" and the store noun must still route to WHERE,
+        # not fall through to the "... in stock" HAVE pattern (was a live bug:
+        # "which other stores have X in stock" answered from the own store).
+        ("which other stores have paracap in stock", fastpath.HOT_WHERE, "paracap"),
+        ("which nearby branch has flemex", fastpath.HOT_WHERE, "flemex"),
         # Burmese (drug typed in English, question in Burmese — the real hot case)
         ("PARACAP ရှိလား", fastpath.HOT_HAVE, "PARACAP"),
         ("flemex ရှိသလား", fastpath.HOT_HAVE, "flemex"),
