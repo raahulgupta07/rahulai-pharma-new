@@ -396,10 +396,35 @@ async def ensure_dev_credential() -> Optional[str]:
     return embed_id
 
 
+# The first-party admin chat page (same-origin, behind admin auth) drives the
+# embed API with this fixed pair. It is the app's OWN internal client, not a
+# customer embed.
+INTERNAL_CHAT_EMBED_ID = "admin-chat"
+INTERNAL_CHAT_PUBLIC_KEY = "admin"
+
+
+async def ensure_internal_credential() -> None:
+    """Guarantee the admin chat's internal credential exists.
+
+    ``is_valid_credential`` is fail-closed, so the moment ANY credential is
+    registered (an operator mints one, or a test seeds one) the admin chat's
+    fixed ``(admin-chat, admin)`` pair is rejected with 403 unless it too is
+    present. Unlike :func:`ensure_dev_credential` this is neither flag-gated nor
+    limited to an empty store — it is first-party and re-seeded idempotently on
+    every boot so the console chat never silently breaks.
+    """
+
+    await register_credential(INTERNAL_CHAT_EMBED_ID, INTERNAL_CHAT_PUBLIC_KEY)
+
+
 async def list_credentials() -> dict:
     """Return all registered credentials as {embed_id: public_key}."""
 
-    return await get_client().hgetall(_CRED_KEY)
+    creds = await get_client().hgetall(_CRED_KEY)
+    # The internal admin-chat credential is an implementation detail of the
+    # console, not a customer tenant — hide it from the Tenants list.
+    creds.pop(INTERNAL_CHAT_EMBED_ID, None)
+    return creds
 
 
 async def remove_credential(embed_id: str) -> int:
@@ -630,6 +655,7 @@ __all__ = [
     "register_credential",
     "is_valid_credential",
     "ensure_dev_credential",
+    "ensure_internal_credential",
     "get_poll_seconds",
     "get_catalog_mode",
     "get_ingest_config",

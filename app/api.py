@@ -44,7 +44,7 @@ from app.cache import (
 )
 from app import fastpath
 from app import cache as cache_mod
-from app.cache import ensure_dev_credential
+from app.cache import ensure_dev_credential, ensure_internal_credential
 from app.config import Settings, get_settings
 from app.db import close_pool, counts, get_pool
 from app.embeddings import close as close_embeddings
@@ -226,6 +226,12 @@ async def lifespan(_app: FastAPI):
         await ensure_dev_credential()
     except Exception as exc:  # noqa: BLE001 — Redis down must not block startup
         logger.warning("embed credential seed skipped: %s", exc)
+    # The console chat is a first-party embed client with a fixed credential;
+    # once ANY credential exists the fail-closed check would 403 it. Always seed.
+    try:
+        await ensure_internal_credential()
+    except Exception as exc:  # noqa: BLE001 — Redis down must not block startup
+        logger.warning("internal chat credential seed skipped: %s", exc)
     try:
         from app.admin import prune_chat_logs
 
