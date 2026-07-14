@@ -812,15 +812,14 @@ async def _answer(
 
 
 @app.get("/")
-async def chat_ui():
-    """Serve the test chat UI."""
+async def root():
+    """Root goes to the admin console — the one UI. The old standalone test chat
+    (``static/index.html``) confused operators into thinking it was a second app;
+    the embed widget is tested from the Embed page, not here."""
 
-    from pathlib import Path
+    from fastapi.responses import RedirectResponse
 
-    from fastapi.responses import HTMLResponse
-
-    html = (Path(__file__).parent / "static" / "index.html").read_text(encoding="utf-8")
-    return HTMLResponse(html)
+    return RedirectResponse(url="/admin/", status_code=307)
 
 
 @app.get("/api/embed/widget.js")
