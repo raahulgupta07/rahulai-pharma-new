@@ -22,6 +22,32 @@ ingest-worker healthy), real data loaded (5,292 catalog · 111,654 inventory). R
 UI (Overview/Settings/Chat/Data), Claude-style chat with tool-use trace + rich
 rendering, redesigned Data page, GraphRAG, auth, embed API — all live + verified.
 
+**2026-07-14 session — EMBED OPS + repo now has a REMOTE (on `main`, baked into
+`:8091`, pushed to `github.com/raahulgupta07/rahulai-pharma-new`, HEAD `c8f1636`):**
+The baseline `:8088` stack was torn down — only the optimize `:8091` stack
+(project `pharmacy-opt`) remains. Shipped: **UI-configurable CORS** (`DynamicCORS`
+subclass + Redis set, refreshed every 3s, no restart — `8de3adf`); **answer length**
+Crisp/Standard/Detailed (`/admin/answer-style`, re-tunes prompt + fast-path,
+bumps `data_version`); **ready-to-use PHP** embed snippet + **per-outlet embed
+generator** (`GET /admin/embed/outlets`, `POST /admin/embed/snippet`,
+`POST /admin/embed/snippets.zip` — pre-signed, store-locked, download-and-go;
+NO per-store URL, the store is the HMAC-signed `user.store_id` — `d3f9a29`); fixed
+the **cross-store "which OTHER stores have X" regex** (adjective slot; it was
+answering from the own store — `d3f9a29`); in-admin **Integration guide** docs
+page (`/admin/docs`, audience tabs, live values — `8ee64e3`); **console chat 403
+fix** — `ensure_internal_credential()` auto-seeds `admin-chat`/`admin` on every
+boot, since fail-closed + a polluted credential store had knocked it offline
+(`839785e`); **root `/` → `/admin` redirect**, dropping the old standalone test
+chat page (`c8f1636`). ⚠️ **A code change that alters answers does NOT bump
+`data_version`** — a stale cached answer masked the cross-store fix on redeploy;
+`POST /api/embed/reload` (or bump `data_version`) after any answer-affecting
+deploy. ⚠️ **The pytest suite shares the live `:6381` Redis and mutates
+`pharmacy:credentials`** — running it can knock the console chat offline until the
+next restart re-seeds; give tests their own Redis DB (`/15`). ⚠️ **AWS shows the
+OLD UI until the image is rebuilt THERE** — GitHub push ≠ deploy; `docker/Dockerfile`
+is multi-stage and builds the SPA itself (no manual `vite build`), so AWS update =
+`git pull` → `docker compose … build api` → `up -d api` → `/api/embed/reload`.
+
 **2026-07-10 session (on `feature/optimize`, baked into `:8091`, verified live):**
 Keycloak SSO + LDAP existed since baseline but shipped with two auth bypasses —
 fixed (`ec5c35d`, live-tested against a real OpenLDAP). SSO/LDAP now
@@ -39,10 +65,12 @@ recent changes alter what the model *says* (the `FORMATTING` prompt block, the
 fast path, `NULLS LAST`) and none has been graded. Do not cite a correctness
 number; there isn't one.
 
-**Git:** repo under version control since 2026-07-09. `main` holds the
-pre-optimization baseline (`1610801`); `feature/optimize` holds the speed +
-accuracy fixes and the optimization design. There is **NO REMOTE** — every commit
-is local only. Nothing is pushed anywhere.
+**Git:** repo under version control since 2026-07-09. Active branch is now
+**`main`**, pushed to **`github.com/raahulgupta07/rahulai-pharma-new`** (HEAD
+`c8f1636`, 2026-07-14). The old local-only `feature/optimize` history was merged
+forward; `main` now carries the speed + accuracy fixes, the auth work, and the
+2026-07-14 embed-ops features. `.env` is NOT tracked (verified). `admin/build` is
+gitignored — the Docker image rebuilds the SPA from source.
 
 ### Measured latency (real, not estimates)
 
