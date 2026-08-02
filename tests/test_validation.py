@@ -145,16 +145,24 @@ class TestData:
         assert not r.ok
         assert f"at least {MIN_ROWS}" in " ".join(r.errors)
 
-    def test_non_numeric_quantities_are_rejected(self, tmp_path):
+    def test_unreadable_quantities_are_rejected(self, tmp_path):
+        """A majority of unreadable quantities means a mis-mapped column."""
+
         r = validate_file(_write(tmp_path, "balance_stock.csv",
                                  _inventory_csv(qty="n/a")))
         assert not r.ok
-        assert "non-numeric stock quantity" in " ".join(r.errors)
+        assert "no readable stock quantity" in " ".join(r.errors)
 
-    def test_negative_quantity_warns_but_loads(self, tmp_path):
+    def test_negative_quantity_is_noted_and_loaded(self, tmp_path):
+        """Negatives are a real state — the branch's books disagree with its
+        shelf — and must reach the database so the branch can see them. A note,
+        never a warning, and never a rejection. See tests/test_value_fidelity.py."""
+
         r = validate_file(_write(tmp_path, "balance_stock.csv", _inventory_csv(qty="-5")))
         assert r.ok
-        assert any("negative" in w for w in r.warnings)
+        assert any("negative" in n for n in r.notes)
+        assert not any("negative" in w for w in r.warnings)
+        assert r.stats["qty_negative"] == 20
 
     def test_duplicate_codes_warn_but_load(self, tmp_path):
         text = "Article Code,Brand Name\n" + "".join(

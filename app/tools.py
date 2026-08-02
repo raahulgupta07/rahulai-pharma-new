@@ -426,9 +426,16 @@ async def summarize_article(code: str) -> Dict:
 
     Returns:
         A single dict with article_code, found, brand_name, generic_name,
-        total_stock, weighted_avg_price (rounded to 2 decimals) and site_count.
-        If the article is not found, returns
+        total_stock, unknown_sites, weighted_avg_price (rounded to 2 decimals)
+        and site_count. If the article is not found, returns
         ``{'article_code': code, 'found': False}``.
+
+        ``total_stock`` is ``None`` when no branch has a known quantity, and
+        otherwise sums only the branches that do — ``unknown_sites`` counts the
+        rest. Zero and negative quantities are REAL VALUES and are included in
+        the sum: a 0 means the branch is out, a negative means the branch's
+        books disagree with its shelf, and hiding either would misreport stock.
+        Only an unknown (NULL) is excluded, because it is not a number.
     """
 
     scope = get_store_scope()
@@ -437,7 +444,15 @@ async def summarize_article(code: str) -> Dict:
         SELECT i.article_code,
                COALESCE(c.brand_name, i.article_code) AS brand_name,
                c.generic_name,
-               COALESCE(SUM(i.stock_qty), 0) AS total_stock,
+               -- NOT COALESCE(..., 0). A NULL stock_qty means UNKNOWN, never
+               -- "none on hand", and a pharmacist reading 0 does not dispense.
+               -- The same coercion was already removed from admin.catalog_one;
+               -- this was the last one left. SUM ignores NULLs, so the total
+               -- covers the branches we have a figure for and is NULL when we
+               -- have a figure for none — with unknown_sites saying how many
+               -- were left out, so a partial total is never read as complete.
+               SUM(i.stock_qty) AS total_stock,
+               COUNT(*) FILTER (WHERE i.stock_qty IS NULL) AS unknown_sites,
                SUM(i.price * i.stock_qty)
                    / NULLIF(SUM(i.stock_qty), 0) AS weighted_avg_price,
                COUNT(DISTINCT i.site_code) AS site_count

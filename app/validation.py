@@ -76,6 +76,11 @@ class ValidationReport:
     ok: bool = False
     errors: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
+    # Neutral observations about the data, kept separate from `warnings`.
+    # Zero, negative and blank quantities are all valid states of a pharmacy
+    # and are loaded unchanged — calling them "warnings" would suggest the
+    # file needs fixing when it does not.
+    notes: List[str] = field(default_factory=list)
     stats: Dict = field(default_factory=dict)
 
     def fail(self, msg: str) -> "ValidationReport":
@@ -87,10 +92,15 @@ class ValidationReport:
         self.warnings.append(msg)
         return self
 
+    def note(self, msg: str) -> "ValidationReport":
+        self.notes.append(msg)
+        return self
+
     def as_dict(self) -> Dict:
         return {
             "file": self.file, "kind": self.kind, "ok": self.ok,
-            "errors": self.errors, "warnings": self.warnings, "stats": self.stats,
+            "errors": self.errors, "warnings": self.warnings,
+            "notes": self.notes, "stats": self.stats,
         }
 
     @property
@@ -194,15 +204,30 @@ def _validate_inventory(df: pd.DataFrame, r: ValidationReport) -> None:
 
     usable = int(ok_rows.sum())
     qty = pd.to_numeric(df.loc[ok_rows, "stock_qty"], errors="coerce")
+    price = (
+        pd.to_numeric(df.loc[ok_rows, "weighted_cost_price"], errors="coerce")
+        if "weighted_cost_price" in present
+        else pd.Series(dtype="float64")
+    )
     bad_site = int((~sites[ok_rows].apply(lambda v: bool(_SITE_RE.match(v)))).sum())
 
+    # Zero, negative and blank are all LOADED — they are real states of a
+    # pharmacy, not errors to filter out. A 0 means the branch is out; a
+    # negative means its books disagree with its shelf, which the branch needs
+    # to see rather than have quietly dropped; a blank means nobody counted,
+    # which is stored as NULL (unknown) and must never become 0. They are
+    # counted here purely so the operator can see the shape of what they are
+    # about to load.
     r.stats.update({
         "rows_in_file": int(len(df)),
         "usable_rows": usable,
         "distinct_sites": int(sites[ok_rows].nunique()),
         "distinct_articles": int(codes[ok_rows].nunique()),
-        "non_numeric_qty": int(qty.isna().sum()),
-        "negative_qty": int((qty < 0).sum()),
+        "qty_zero": int((qty == 0).sum()),
+        "qty_negative": int((qty < 0).sum()),
+        "qty_blank_or_non_numeric": int(qty.isna().sum()),
+        "price_zero": int((price == 0).sum()) if len(price) else 0,
+        "price_blank": int(price.isna().sum()) if len(price) else 0,
     })
 
     if usable == 0:
@@ -211,9 +236,22 @@ def _validate_inventory(df: pd.DataFrame, r: ValidationReport) -> None:
     if usable < MIN_ROWS:
         r.fail(f"only {usable} usable row(s); expected at least {MIN_ROWS}")
     if qty.isna().sum() / usable > 0.5:
-        r.fail(f"{int(qty.isna().sum())} of {usable} rows have a non-numeric stock quantity")
+        # Not "blanks are bad" — a majority of unreadable quantities means the
+        # wrong column was mapped, not that the branch never counted.
+        r.fail(
+            f"{int(qty.isna().sum())} of {usable} rows have no readable stock "
+            f"quantity — check that stock_qty is the right column"
+        )
     if (qty < 0).any():
-        r.warn(f"{int((qty < 0).sum())} row(s) have a negative stock quantity")
+        # Informational, never blocking. Loaded as-is.
+        r.note(f"{int((qty < 0).sum())} row(s) have a negative stock quantity (loaded as-is)")
+    if (qty == 0).any():
+        r.note(f"{int((qty == 0).sum())} row(s) have zero stock (loaded as-is)")
+    if qty.isna().any():
+        r.note(
+            f"{int(qty.isna().sum())} row(s) have no stock figure — stored as "
+            f"unknown (NULL), not as zero"
+        )
     if bad_site:
         # Not fatal: _site_clause tolerates prefix/suffix forms. Worth flagging
         # because an unexpected shape usually means the wrong column was mapped.
