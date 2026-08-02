@@ -175,9 +175,11 @@ async def catalog(
         conds.append(
             f"(brand_name ILIKE '%'||${n}||'%' OR generic_name ILIKE '%'||${n}||'%' OR article_code = ${n})"
         )
-    else:
-        # Browse view hides stub rows (brand_name == article_code).
-        conds.append("brand_name <> article_code")
+    # Stub rows (brand_name == article_code) are NO LONGER hidden. Filtering
+    # them out made a 100%-stub catalog render as a clean, ordinary-looking
+    # table — which is why the broken load on the customer host went unnoticed
+    # for weeks while the chat agent answered "not found" for stocked products.
+    # They are returned and flagged; the UI badges them.
     if category:
         params.append(category)
         conds.append(f"category ILIKE '%'||${len(params)}||'%'")
@@ -185,9 +187,11 @@ async def catalog(
     params.append(limit)
     params.append(offset)
     return await q(
-        f"""SELECT article_code, brand_name, generic_name, category
+        f"""SELECT article_code, brand_name, generic_name, category,
+                   (brand_name = article_code) AS is_stub
               FROM catalog {where}
-             ORDER BY brand_name LIMIT ${len(params)-1} OFFSET ${len(params)}""",
+             ORDER BY (brand_name = article_code), brand_name
+             LIMIT ${len(params)-1} OFFSET ${len(params)}""",
         *params,
     )
 

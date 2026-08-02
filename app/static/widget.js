@@ -331,6 +331,23 @@
     d.textContent = text; msgs.appendChild(d); scroll(); return d;
   }
 
+  /* Conversation id for this widget instance.
+   *
+   * Without it every turn starts cold: the backend only engages multi-turn
+   * memory for clients that send a real `session_id`, and the widget never
+   * sent one. A pharmacist asking "Omez ရှိပါသလား" and then "ဈေးဘယ်လောက်လဲ"
+   * got "which medicine?" back, because turn two had no idea turn one
+   * happened (Feedback 9, the only High-priority ticket in the pack).
+   *
+   * Deliberately NOT the embed session token: that one is short-lived and gets
+   * re-minted on a 401, which would silently reset the conversation mid-chat.
+   * This id lives as long as the widget instance does.
+   *
+   * Not persisted to storage — a page reload starts a fresh conversation,
+   * which is the right default for a shared shop-counter browser. */
+  var convId = 'w-' + Date.now().toString(36) + '-' +
+    Math.random().toString(36).slice(2, 10);
+
   function session() {
     if (token) return Promise.resolve(token);
     var body = { embed_id: embedId, public_key: publicKey };
@@ -453,7 +470,7 @@
         if (!stream) {
           return fetch(base + '/api/embed/chat', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ session_token: tok, message: msg })
+            body: JSON.stringify({ session_token: tok, message: msg, session_id: convId })
           }).then(function (r) {
             if (r.status === 401 && !retried) { token = null; return attempt(true); }
             return r.json().then(function (j) {
@@ -463,7 +480,7 @@
         }
         return fetch(base + '/api/embed/chat/stream', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ session_token: tok, message: msg })
+          body: JSON.stringify({ session_token: tok, message: msg, session_id: convId })
         }).then(function (r) {
           // Expired/invalid session -> re-mint a fresh token and retry once.
           if (r.status === 401 && !retried) { token = null; return attempt(true); }

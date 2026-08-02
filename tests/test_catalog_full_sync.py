@@ -176,7 +176,12 @@ def test_full_sync_empty_file_deletes_nothing(tmp_path):
         return res, await _codes_present(conn, [c1, c2])
 
     res, present = run_isolated(body)
-    assert res == {"rows": 0, "deleted": 0}
+    # Assert the contract, not the whole dict: ingest_catalog also returns a
+    # parse report and an `ok` flag (added with the stub guard), and pinning
+    # exact equality here would fail on every future additive field.
+    assert res["rows"] == 0
+    assert res["deleted"] == 0
+    assert res["ok"] is False
     assert c1 in present and c2 in present  # nothing removed
 
 

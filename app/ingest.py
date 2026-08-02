@@ -53,6 +53,17 @@ _CATALOG_FIELDS = [
 
 _INVENTORY_FIELDS = ["article_code", "site_code", "site_name", "stock_qty", "price", "uom"]
 
+# Refuse a catalog file when more than this share of its rows carry no brand
+# name. On healthy CityCare data the figure is 0% (the export names every one of
+# its 4,892 rows); the backfill stubs that legitimately exist come from
+# inventory codes absent from the export, not from the file itself.
+CATALOG_FALLBACK_LIMIT = 0.20
+
+# Above this share of stub rows the catalog is not fit to answer questions from:
+# search_by_name cannot match a name that is a 13-digit code. Surfaced by
+# catalog_health() on /ready and the admin Data page.
+CATALOG_STUB_WARN = 0.20
+
 
 # ---- helpers ---------------------------------------------------------------
 
@@ -88,8 +99,16 @@ def _is_csv(path: str) -> bool:
     return Path(path).suffix.lower() == ".csv"
 
 
-def parse_catalog(path: str) -> List[Dict]:
-    """Parse the article export into catalog rows (banner skipped, columns mapped)."""
+def parse_catalog(path: str, report: Optional[Dict] = None) -> List[Dict]:
+    """Parse the article export into catalog rows (banner skipped, columns mapped).
+
+    Pass ``report`` to receive parse diagnostics in place: which mapped columns
+    the header actually matched, which are missing, and how many rows fell back
+    to ``brand_name = article_code``. A load that silently produces nameless
+    rows is the failure mode behind the 2026-07-28 field reports — the catalog
+    on that host held only stubs, every ``search_by_name`` returned ``[]``, and
+    nothing anywhere said so. The parse is unchanged; only the reporting is new.
+    """
 
     if _is_csv(path):
         # utf-8-sig tolerates a BOM; Burmese text needs UTF-8 either way.
@@ -104,16 +123,24 @@ def parse_catalog(path: str) -> List[Dict]:
     else:
         df = pd.read_excel(path, skiprows=4)
     df.columns = [str(c).strip() for c in df.columns]
+    matched = sorted(c for c in _CATALOG_MAP if c in df.columns)
     df = df.rename(columns=_CATALOG_MAP)
 
     rows: List[Dict] = []
     seen = set()
+    brand_fallbacks = 0
     for _, r in df.iterrows():
         code = _clean(r.get("article_code"))
         if not code or code in seen:
             continue
         seen.add(code)
-        brand = _clean(r.get("brand_name")) or code  # brand_name is NOT NULL
+        brand = _clean(r.get("brand_name"))
+        if not brand:
+            # brand_name is NOT NULL, so a blank has to become something. Using
+            # the code keeps the row loadable, but it is indistinguishable from
+            # a backfill stub downstream — count it so callers can alarm on it.
+            brand = code
+            brand_fallbacks += 1
         rows.append({
             "article_code": code,
             "brand_name": brand,
@@ -127,6 +154,24 @@ def parse_catalog(path: str) -> List[Dict]:
             "mm_label": _clean(r.get("mm_label")),
             "status": _clean(r.get("status")),
         })
+
+    if report is not None:
+        report.update({
+            "file": Path(path).name,
+            "rows_in_file": int(len(df)),
+            "rows_parsed": len(rows),
+            "columns_matched": matched,
+            "columns_missing": sorted(set(_CATALOG_MAP) - set(matched)),
+            "brand_fallbacks": brand_fallbacks,
+        })
+    if "Brand Name" not in matched:
+        # Every row will land nameless. Loud, because the symptom downstream is
+        # a chat agent that answers "not found" for products that are in stock.
+        logger.error(
+            "catalog parse: no 'Brand Name' column in %s — matched %s. "
+            "Every row will load with brand_name = article_code.",
+            Path(path).name, matched or "nothing",
+        )
     return rows
 
 
@@ -189,8 +234,9 @@ async def ingest_catalog(path: str, mode: str = "full_sync") -> Dict:
     """
 
     run_start = datetime.now(timezone.utc)
+    report: Dict = {}
     # Parsing 100k+ rows with pandas is CPU-bound; keep it off the event loop.
-    rows = await asyncio.to_thread(parse_catalog, path)
+    rows = await asyncio.to_thread(parse_catalog, path, report)
     if not rows:
         # An empty/partial upload is never authoritative. Skipping the delete here
         # is the guard that stops a bad file from emptying the catalog in
@@ -200,7 +246,26 @@ async def ingest_catalog(path: str, mode: str = "full_sync") -> Dict:
                 "full_sync: parsed 0 catalog rows from %s; skipping delete "
                 "(empty/partial upload guard)", Path(path).name,
             )
-        return {"rows": 0, "deleted": 0}
+        return {"rows": 0, "deleted": 0, "report": report, "ok": False}
+
+    # A file whose every row is nameless is never authoritative. Loading it
+    # would overwrite good rows with codes, and in full_sync the delete would
+    # then discard everything the file did not name. Refuse instead.
+    fallback_ratio = report.get("brand_fallbacks", 0) / max(len(rows), 1)
+    if fallback_ratio > CATALOG_FALLBACK_LIMIT:
+        logger.error(
+            "catalog ingest REFUSED for %s: %.1f%% of %s rows have no brand name "
+            "(limit %.0f%%). Columns matched: %s",
+            Path(path).name, fallback_ratio * 100, len(rows),
+            CATALOG_FALLBACK_LIMIT * 100, report.get("columns_matched"),
+        )
+        return {
+            "rows": 0, "deleted": 0, "report": report, "ok": False,
+            "error": (
+                f"refused: {fallback_ratio:.0%} of rows have no brand name — "
+                f"check the header row and column names"
+            ),
+        }
 
     fields = _CATALOG_FIELDS
     cols = ", ".join(fields) + ", last_seen"
@@ -233,7 +298,12 @@ async def ingest_catalog(path: str, mode: str = "full_sync") -> Dict:
                 deleted = len(gone)
     if deleted:
         logger.info("full_sync removed %s discontinued catalog rows", deleted)
-    return {"rows": len(rows), "deleted": deleted}
+    logger.info(
+        "catalog ingest %s: %s rows, %s deleted, %s brand fallbacks, columns %s",
+        Path(path).name, len(rows), deleted,
+        report.get("brand_fallbacks"), report.get("columns_matched"),
+    )
+    return {"rows": len(rows), "deleted": deleted, "report": report, "ok": True}
 
 
 async def ingest_inventory(path: str) -> int:
@@ -269,6 +339,42 @@ async def refresh_views() -> None:
                 await execute(f"REFRESH MATERIALIZED VIEW {mv}")
             except Exception:  # noqa: BLE001 - view may not exist yet
                 pass
+
+
+async def catalog_health() -> Dict:
+    """Report how much of the catalog is nameless stub rows.
+
+    A stub is ``brand_name = article_code``: a row carrying no product name and
+    no clinical text, so ``search_by_name`` can never match it and
+    ``embed_catalog`` skips it. A handful is normal — the article export does
+    not cover every stocked code. A catalog that is *mostly* stubs means the
+    export never loaded, and the only visible symptom is a chat agent that
+    answers "not found" for products sitting on the shelf. That is exactly what
+    the 2026-07-28 field reports describe, and nothing in the app said a word
+    about it. This makes it a number anyone can read.
+    """
+
+    rows = await q(
+        """
+        SELECT count(*)                                        AS total,
+               count(*) FILTER (WHERE brand_name = article_code) AS stubs,
+               count(*) FILTER (WHERE composition IS NOT NULL)   AS with_composition,
+               count(*) FILTER (WHERE dosage IS NOT NULL)        AS with_dosage
+          FROM catalog
+        """
+    )
+    r = rows[0] if rows else {"total": 0, "stubs": 0, "with_composition": 0, "with_dosage": 0}
+    total = r["total"] or 0
+    stubs = r["stubs"] or 0
+    ratio = (stubs / total) if total else 0.0
+    return {
+        "total": total,
+        "stubs": stubs,
+        "stub_ratio": round(ratio, 4),
+        "with_composition": r["with_composition"] or 0,
+        "with_dosage": r["with_dosage"] or 0,
+        "healthy": total > 0 and ratio <= CATALOG_STUB_WARN,
+    }
 
 
 async def backfill_catalog_stubs() -> int:

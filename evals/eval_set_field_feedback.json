@@ -1,0 +1,115 @@
+{
+  "_comment": "The 2026-07-28 field feedback, as graded cases. One case per question a pharmacist actually asked at CityCare (Feedback_1..14 + Feedback_Summary), with expectations verified against the live :8091 database on 2026-08-02 — never guessed. Verified anchors: 1000000008626 AEROCORT INHALER (2 @ 20015-CCGV, 36500 MMK); 1000000347875 AMNOTAC 150 RANITIDINE 10`S mm_reg R2103AA3615; 1000000131948 BIOGESIC 500MG 10`S (380 @ 20015-CCGV, 1700 MMK); 1000000008745 MOTILIUM-M 10`S category 5102-PRESCRIPTION MEDICINE; 1000000008672 OMEZ 20MG 10`S (71 @ 20015-CCGV, 3000 MMK); 1000000360173 WICKS MENTHOL COUGH DROPS 20`S (28 @ 20015-CCGV); 1000000010002 AIR-X DROP 15ML. Every case carries expect_absent so a reasoning leak fails the run, not just a wrong fact — that is the regression these tickets are most likely to suffer.",
+
+  "_leak_markers": [
+    "search_by_name", "search_by_meaning", "top_by_stock", "get_article_info",
+    "list_sites", "get_stock", "find_at_other_stores", "summarize_article",
+    "Step 1:", "thought ", "Let's ", "Let me search", "Wait,",
+    "system prompt", "prompt instructions", "Final Polish", "Reply ONLY in"
+  ],
+
+  "cases": [
+    {
+      "id": "fb14_code_to_brand",
+      "_ticket": "Feedback 14 — answered 'The brand name for 1000000008626 is 1000000008626'",
+      "question": "Show me the brand name for this article code \"1000000008626\"",
+      "expect_contains": ["AEROCORT INHALER"],
+      "expect_absent": ["brand name for article code 1000000008626 is 1000000008626"]
+    },
+    {
+      "id": "fb14_brand_to_code",
+      "_ticket": "Feedback 14 — the reverse lookup returned 'could not find any matching product'",
+      "question": "Show me the article code for the brand name \"AEROCORT INHALER\"",
+      "expect_contains": ["1000000008626"]
+    },
+    {
+      "id": "fb14_how_to_use",
+      "_ticket": "Feedback 14 — refused with 'I am an inventory helper and cannot provide usage directions'",
+      "question": "How to use for the brand name is AEROCORT INHALER and its article code is \"1000000008626\".",
+      "expect_contains": ["AEROCORT INHALER"],
+      "expect_absent": ["cannot provide", "unable to provide"]
+    },
+    {
+      "id": "fb14_code_to_stock",
+      "_ticket": "Feedback 14 — this one already worked; it is the control that proves inventory was never the problem",
+      "question": "Show me the balance stock for this article 1000000008626",
+      "expect_contains": ["AEROCORT INHALER"]
+    },
+    {
+      "id": "fb13_mm_reg",
+      "_ticket": "Feedback 13 — 'unable to find any product matching AMNOTAC'. No tool selected mm_reg at all until 2026-08-02.",
+      "question": "What is the myanmar registration(MM-Reg) for AMNOTAC 150 RANITIDINE 10`S?",
+      "expect_contains": ["R2103AA3615"]
+    },
+    {
+      "id": "fb13_menthol",
+      "_ticket": "Feedback 13 — 'no matching products were found' while 12 rows came back",
+      "question": "show me medicines which include Menthol",
+      "expect_contains": ["MENTHOL"],
+      "expect_absent": ["no matching products were found"]
+    },
+    {
+      "id": "fb13_motilium_category",
+      "_ticket": "Feedback 13 — 'could not find any active product listing for MOTILIUM-M'",
+      "question": "What is the category for MOTILIUM-M?",
+      "expect_contains": ["5102"]
+    },
+    {
+      "id": "fb13_airx_how_to_use",
+      "_ticket": "Feedback 13 — 'we do not have specific product records for AIR-X DROP'",
+      "question": "How to use AIR-X DROP?",
+      "expect_contains": ["AIR-X DROP"],
+      "expect_absent": ["do not have specific product records"]
+    },
+    {
+      "id": "fb08_biogesic_burmese",
+      "_ticket": "Feedback 8 — 'Biogesic မတွေ့ရှိရပါ' while 380 units sat at that very store",
+      "question": "Biogesic ရှိပါသလား",
+      "expect_contains": ["BIOGESIC"],
+      "expect_script": "my"
+    },
+    {
+      "id": "fb08_paracetamol_brands",
+      "_ticket": "Feedback 8 — the answer admitted the catalog held only numeric codes",
+      "question": "Paracetamol ဘာတံဆိပ်တွေ city care မှာရှိပါသလဲ",
+      "expect_contains": ["PARA"],
+      "expect_script": "my",
+      "expect_absent": ["numeric codes", "without descriptive catalog names"]
+    },
+    {
+      "id": "fb09_omez_stock",
+      "_ticket": "Feedback 9 (High) — turn 1 of the conversation that lost its subject",
+      "question": "Omez ရှိပါသလား",
+      "expect_contains": ["OMEZ"],
+      "expect_script": "my"
+    },
+    {
+      "id": "fb12_cilnidipine_indication",
+      "_ticket": "Feedback 12 — answered about stock and price when asked what the drug treats",
+      "question": "Cilnidipine ကိုဘယ်လိုရောဂါမှာသုံးသင့်ပါသလဲ",
+      "expect_contains": ["Cilnidipine"],
+      "expect_script": "my"
+    },
+    {
+      "id": "fb06_calcium_types",
+      "_ticket": "Feedback 6 — 'no matching product information' with 10 rows returned. Needs composition, which stubs do not have.",
+      "question": "Calcium အမျိုးအစား ဘယ်နှစ်မျိုးရှိပါသလဲ",
+      "expect_contains": ["Calcium"],
+      "expect_script": "my"
+    },
+    {
+      "id": "fb01_atorvastatin_dose",
+      "_ticket": "Feedback 1 — refused clinical dosing for a field the catalog already stores, in Burmese, asked in English",
+      "question": "For atorvastatin, give me the recommended dose",
+      "expect_contains": ["mg"],
+      "expect_absent": ["cannot provide clinical dosing", "cannot provide"],
+      "_note": "Expectation is a dose, not a brand: the store may stock LIPITOR, LIPVAS-10, ATORVIM-20 or ATO 10 — all valid atorvastatin products. An earlier version asserted the string 'ator' and failed a correct LIPITOR answer."
+    },
+    {
+      "id": "summary_multi_question",
+      "_ticket": "Feedback Summary rule 8 — 'answer all questions, do not ignore any part'",
+      "question": "What is Strocain used for? And what is the category for MOTILIUM-M?",
+      "expect_contains": ["STROCAIN", "5102"]
+    }
+  ]
+}

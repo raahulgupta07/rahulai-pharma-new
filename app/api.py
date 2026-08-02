@@ -32,6 +32,7 @@ from pydantic import BaseModel
 from contextlib import asynccontextmanager
 
 from app.agent import get_agent
+from app.answer_filter import LeakFilter, fallback_for, filter_answer
 from app.cache import (
     bump_data_version,
     bump_session_turn,
@@ -86,6 +87,31 @@ def _step_detail(tool_args) -> str:
 _CODE_RE = _re.compile(r"^\d{10,14}$")
 
 
+# How many rows a `result` frame may carry. Was a silent `rows[:8]`, which is
+# what acceptance rule 6 from the 2026-07-28 feedback explicitly rejects:
+# "return all matching results... do not summarize, reduce, or limit the result
+# unless user requests a specific limit". A ceiling still exists — an SSE frame
+# holding 100k inventory rows helps nobody — but it is high enough not to bite
+# real queries, and when it does bite it SAYS SO rather than quietly dropping
+# rows the pharmacist needed.
+RESULT_ROW_LIMIT = 250
+
+
+def _result_frame(tool: str, rows: list) -> Dict[str, Any]:
+    """Build an SSE ``result`` payload, reporting any truncation."""
+
+    frame: Dict[str, Any] = {"tool": tool, "rows": rows[:RESULT_ROW_LIMIT]}
+    if len(rows) > RESULT_ROW_LIMIT:
+        # Additive fields; the embed widget ignores what it does not know.
+        frame["total_rows"] = len(rows)
+        frame["truncated"] = True
+        logger.info(
+            "result frame truncated: %s returned %s rows, sent %s",
+            tool, len(rows), RESULT_ROW_LIMIT,
+        )
+    return frame
+
+
 def _subject_of(rows: list, tool_args) -> Optional[Dict[str, str]]:
     """The drug an answer is ABOUT — code + display name — or ``None``.
 
@@ -96,7 +122,7 @@ def _subject_of(rows: list, tool_args) -> Optional[Dict[str, str]]:
     scan below therefore falls back to the tool's own ``code`` argument.
     """
 
-    for row in rows[:8]:
+    for row in rows[:8]:  # a subject scan, not a display cap — first hit wins
         if not isinstance(row, dict):
             continue
         code = next(
@@ -753,6 +779,9 @@ async def _answer(
     if not follow_up:
         cached = await get_cached_answer(message, store_id, model)
         if cached is not None:
+            # Answers cached before the leak filter shipped can still contain
+            # reasoning, and they survive for a full TTL. Filter on read too.
+            cached = filter_answer(cached) or cached
             metrics.incr("cache_hits")
             # A cache hit runs no agent, so nothing would record this turn and
             # the NEXT turn would not know it happened.
@@ -783,7 +812,7 @@ async def _answer(
             metrics.incr("llm_calls")
             metrics.record_llm()
             out = await fastpath.get_phrasing_agent(model).arun(phrase_prompt)
-            content = getattr(out, "content", str(out))
+            content = filter_answer(getattr(out, "content", str(out)))
             await set_cached_answer(message, store_id, content, model=model, version=version)
             await _remember(client_session, model, session_id, user_id, message, content)
             return content, False
@@ -799,7 +828,7 @@ async def _answer(
         metrics.incr("llm_calls")
         metrics.record_llm()
         out = await get_agent(model, with_history=bool(client_session), style=style).arun(prompt, **run_kw)
-        content = getattr(out, "content", str(out))
+        content = filter_answer(getattr(out, "content", str(out)))
     finally:
         reset_store_scope(token)
 
@@ -857,7 +886,20 @@ async def ready() -> Dict[str, Any]:
         await get_pool()
         c = await counts()
         version = await get_data_version()
-        return {"status": "ready", "data_version": version, **c}
+        # Row counts alone cannot distinguish "5,292 products" from "5,292
+        # nameless codes" — the state behind the 2026-07-28 field reports, where
+        # every catalog row was a stub and the agent answered "not found" for
+        # stocked products. Surface the stub ratio so a health check can see it.
+        from app.ingest import catalog_health
+
+        health = await catalog_health()
+        return {
+            "status": "ready",
+            "data_version": version,
+            **c,
+            "catalog_health": health,
+            **({} if health["healthy"] else {"warning": "catalog is mostly stub rows"}),
+        }
     except Exception as exc:  # noqa: BLE001 - surface as 503
         raise HTTPException(status_code=503, detail=f"not ready: {exc}")
 
@@ -1012,7 +1054,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     # find_at_other_stores) select only site_code/site_name/
                     # stock_qty, so the drug the answer is ABOUT appears in no
                     # row. The UI needs it to offer follow-up questions.
-                    frame: dict = {"tool": facts["tool"], "rows": rows[:8]}
+                    frame: dict = _result_frame(facts["tool"], rows)
                     if facts.get("article_code"):
                         frame["subject"] = {
                             "code": facts["article_code"],
@@ -1025,6 +1067,9 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 metrics.incr("llm_calls")
                 metrics.record_llm()
                 full = ""
+                # The phrasing agent has no tools, so it has least reason to
+                # narrate — but Feedback 5 leaked from exactly this route.
+                leak = LeakFilter()
                 try:
                     async for event in fastpath.get_phrasing_agent(req.model).arun(
                         phrase_prompt, stream=True, stream_events=True,
@@ -1032,8 +1077,22 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                         if type(event).__name__ == "RunContentEvent":
                             delta = getattr(event, "content", None)
                             if isinstance(delta, str) and delta:
-                                full += delta
-                                yield f"data: {json.dumps({'delta': delta})}\n\n"
+                                safe = leak.feed(delta)
+                                if safe:
+                                    full += safe
+                                    yield f"data: {json.dumps({'delta': safe})}\n\n"
+                    tail = leak.flush()
+                    if tail:
+                        full += tail
+                        yield f"data: {json.dumps({'delta': tail})}\n\n"
+                    if leak.leaked:
+                        metrics.incr("reasoning_leaks_suppressed")
+                        logger.warning(
+                            "fast path: suppressed leaked reasoning (%s)", leak.dropped[:1]
+                        )
+                        if not full.strip():
+                            full = fallback_for(" ".join(leak.dropped))
+                            yield f"data: {json.dumps({'delta': full})}\n\n"
                 except Exception as exc:  # noqa: BLE001
                     yield f"event: error\ndata: {json.dumps({'detail': str(exc)})}\n\n"
                 if full:
@@ -1049,6 +1108,9 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
 
         scope = set_store_scope(store_id)
         full = ""
+        # This is the route that leaked in Feedback 7, 10, 11 and 12 — the
+        # tool-using agent narrating its search strategy, tool names and all.
+        leak = LeakFilter()
         # Last drug seen in a tool result, carried across steps: get_stock and
         # find_at_other_stores return branch rows only, so a turn that ends on
         # one of them would otherwise name no subject at all.
@@ -1096,15 +1158,29 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                         rows = [rows]
                     if isinstance(rows, list) and rows and isinstance(rows[0], dict):
                         subject = _subject_of(rows, getattr(tool_obj, "tool_args", None)) or subject
-                        payload: dict = {"tool": tname, "rows": rows[:8]}
+                        payload: dict = _result_frame(tname, rows)
                         if subject:
                             payload["subject"] = subject
                         yield f"event: result\ndata: {json.dumps(payload)}\n\n"
                 elif name == "RunContentEvent":
                     delta = getattr(event, "content", None)
                     if isinstance(delta, str) and delta:
-                        full += delta
-                        yield f"data: {json.dumps({'delta': delta})}\n\n"
+                        safe = leak.feed(delta)
+                        if safe:
+                            full += safe
+                            yield f"data: {json.dumps({'delta': safe})}\n\n"
+            tail = leak.flush()
+            if tail:
+                full += tail
+                yield f"data: {json.dumps({'delta': tail})}\n\n"
+            if leak.leaked:
+                metrics.incr("reasoning_leaks_suppressed")
+                logger.warning(
+                    "agent stream: suppressed leaked reasoning (%s)", leak.dropped[:1]
+                )
+                if not full.strip():
+                    full = fallback_for(" ".join(leak.dropped))
+                    yield f"data: {json.dumps({'delta': full})}\n\n"
         except Exception as exc:  # noqa: BLE001
             yield f"event: error\ndata: {json.dumps({'detail': str(exc)})}\n\n"
         finally:

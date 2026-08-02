@@ -138,6 +138,14 @@ async def get_article_info(code: str) -> List[Dict]:
                c.indication,
                c.dosage,
                c.side_effect,
+               -- Myanmar registration fields. No tool selected these until
+               -- 2026-08-02, so "what is the MM-Reg for X" was unanswerable no
+               -- matter how well the search worked: the agent found the row,
+               -- could not see the column, and reported it "not available in
+               -- the catalog" while a value sat in the database (FB-13).
+               c.mm_reg,
+               c.mm_label,
+               c.status,
                i.site_code,
                i.site_name,
                i.stock_qty,
@@ -169,6 +177,9 @@ async def get_article_info(code: str) -> List[Dict]:
                indication,
                dosage,
                side_effect,
+               mm_reg,
+               mm_label,
+               status,
                NULL::text AS site_code,
                NULL::text AS site_name,
                NULL::int AS stock_qty,
@@ -342,33 +353,61 @@ async def filter_by_price(
 async def get_substitutes(code: str) -> List[Dict]:
     """Return substitute articles for the given article.
 
-    Finds generic alternatives — catalog entries sharing the same
-    generic_name but with a different article_code.
+    Finds alternatives that share the source article's active ingredient,
+    generic name, indication or category — ranked in that order, closest match
+    first. Prefer the top rows: a `composition` match is a true substitute, a
+    `category` match is merely the same shelf.
 
     Args:
         code: The article/catalog code to find substitutes for (literal).
 
     Returns:
-        A list of candidate substitutes (article_code, brand_name, generic_name).
-        Empty if the source article has no/empty generic_name or no other
-        article shares its generic_name.
+        Up to 50 candidates, each with article_code, brand_name, generic_name,
+        composition, category, `match_rank` (1 = closest) and `matched_on`
+        (which field matched). Empty if the article is unknown or nothing
+        shares any of its four fields.
     """
 
+    # Ranked, not just filtered. Acceptance rule 5 from the 2026-07-28 feedback
+    # asks for substitutes by "Same Composition, Same Generic Name, Same
+    # Indication, Same Category" in that priority order. Matching on
+    # generic_name alone (the original) missed every product that shares an
+    # active ingredient under a different generic label — and generic_name is
+    # NULL for 32% of the catalog, where it returned nothing at all.
     rows = await q(
         """
-        SELECT article_code,
-               brand_name,
-               generic_name
-          FROM catalog
-         WHERE generic_name = (
-                   SELECT generic_name
-                     FROM catalog
-                    WHERE article_code = $1
+        WITH src AS (
+            SELECT generic_name, composition, indication, category
+              FROM catalog WHERE article_code = $1
+        )
+        SELECT c.article_code,
+               c.brand_name,
+               c.generic_name,
+               c.composition,
+               c.category,
+               CASE
+                   WHEN src.composition  IS NOT NULL AND c.composition  = src.composition  THEN 1
+                   WHEN src.generic_name IS NOT NULL AND c.generic_name = src.generic_name THEN 2
+                   WHEN src.indication   IS NOT NULL AND c.indication   = src.indication   THEN 3
+                   ELSE 4
+               END AS match_rank,
+               CASE
+                   WHEN src.composition  IS NOT NULL AND c.composition  = src.composition  THEN 'composition'
+                   WHEN src.generic_name IS NOT NULL AND c.generic_name = src.generic_name THEN 'generic_name'
+                   WHEN src.indication   IS NOT NULL AND c.indication   = src.indication   THEN 'indication'
+                   ELSE 'category'
+               END AS matched_on
+          FROM catalog c CROSS JOIN src
+         WHERE c.article_code <> $1
+           AND c.brand_name <> c.article_code   -- never suggest a nameless stub
+           AND (
+                   (src.composition  IS NOT NULL AND c.composition  = src.composition)
+                OR (src.generic_name IS NOT NULL AND c.generic_name = src.generic_name)
+                OR (src.indication   IS NOT NULL AND c.indication   = src.indication)
+                OR (src.category     IS NOT NULL AND c.category     = src.category)
                )
-           AND generic_name IS NOT NULL
-           AND generic_name <> ''
-           AND article_code <> $1
-         ORDER BY brand_name
+         ORDER BY match_rank, c.brand_name
+         LIMIT 50
         """,
         code,
     )
