@@ -104,7 +104,23 @@ async def scan_once(stable_only: bool = False, _sizes: Dict[str, int] = None) ->
             logger.exception("ingest failed for %s", f.name)
 
     if bumped:
-        from app.ingest import build_edges_safe, embed_catalog, refresh_views
+        from app.ingest import (
+            backfill_catalog_stubs,
+            build_edges_safe,
+            embed_catalog,
+            refresh_views,
+        )
+
+        # Re-stub AFTER any ingest, not just an inventory one. backfill runs
+        # inside ingest_inventory, so dropping a catalog file in full_sync mode
+        # DELETES the stubs it had created and leaves those inventory articles
+        # with no catalog row at all. Tools that INNER JOIN catalog (top_by_stock)
+        # then cannot see their stock, and the article silently disappears until
+        # the next inventory upload. Order of uploads should not change what the
+        # agent can find. Idempotent, so a no-op when nothing is orphaned.
+        stubs = await backfill_catalog_stubs()
+        if stubs:
+            logger.info("re-stubbed %s inventory articles absent from catalog", stubs)
 
         await refresh_views()        # keep materialized views in sync
 

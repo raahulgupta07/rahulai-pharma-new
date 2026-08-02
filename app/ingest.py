@@ -467,8 +467,19 @@ async def ingest_file(path: str, catalog_mode: str = "full_sync") -> Dict:
     kind = detect_kind(path)
     if kind == "catalog":
         res = await ingest_catalog(path, mode=catalog_mode)
+        if not res.get("ok", True):
+            # A refused or empty catalog file must NOT look like a success.
+            # The watcher archives whatever ingest_file returns without raising,
+            # so swallowing this would file a rejected upload away as "done" —
+            # the same silent-success bug that let an unrecognised filename
+            # through before (see the comment in watcher.scan_once).
+            raise ValueError(
+                res.get("error")
+                or "catalog file parsed to 0 rows (empty or partial upload)"
+            )
         return {"file": Path(path).name, "kind": "catalog",
-                "rows": res["rows"], "deleted": res["deleted"]}
+                "rows": res["rows"], "deleted": res["deleted"],
+                "report": res.get("report", {})}
     if kind == "inventory":
         n = await ingest_inventory(path)
         return {"file": Path(path).name, "kind": "inventory", "rows": n}
