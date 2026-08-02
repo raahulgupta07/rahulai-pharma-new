@@ -49,7 +49,11 @@ def _stamp(name: str) -> str:
     return f"{int(time.time())}_{name}"
 
 
-async def scan_once(stable_only: bool = False, _sizes: Dict[str, int] = None) -> Dict:
+async def scan_once(
+    stable_only: bool = False,
+    _sizes: Dict[str, int] = None,
+    allow_shrink: bool = False,
+) -> Dict:
     """Process all ready files once.
 
     Args:
@@ -57,6 +61,11 @@ async def scan_once(stable_only: bool = False, _sizes: Dict[str, int] = None) ->
             the previous scan (``_sizes`` carries prior sizes) — guards against
             partial uploads. The manual endpoint calls with False.
         _sizes: previous {path: size} map (mutated in place) for stability.
+        allow_shrink: pass through to ingest_file, overriding the guard that
+            refuses a file which would delete more than half a table. The SFTP
+            watcher never sets it — an unattended drop must not be able to wipe
+            the catalog, so shrinking uploads go through the admin API where a
+            human has seen the warning.
 
     Returns a summary dict with processed / skipped / failed lists.
     """
@@ -91,7 +100,9 @@ async def scan_once(stable_only: bool = False, _sizes: Dict[str, int] = None) ->
             continue
 
         try:
-            result = await ingest_file(str(f), catalog_mode=catalog_mode)
+            result = await ingest_file(
+                str(f), catalog_mode=catalog_mode, allow_shrink=allow_shrink
+            )
             f.rename(d["archive"] / _stamp(f.name))
             processed.append(result)
             bumped = True

@@ -485,16 +485,17 @@ async def get_catalog_mode() -> str:
     empty/partial-file guard in ``ingest_catalog`` stops a bad upload from
     emptying the catalog.
 
-    But a Redis *error* degrades to 'merge', the non-destructive mode: if we
-    cannot even read the config we must not delete rows on a guess. So an unset
-    key returns the full_sync default; only an unreachable Redis falls to merge.
+    As of 2026-08-02 this ALWAYS returns 'full_sync'. Merge was removed by
+    request: an upload replaces the data, it never adds to it. The old
+    degrade-to-merge-on-Redis-error path is gone with it — it existed so a
+    config read failure could not trigger deletes on a guess, and that job now
+    belongs to ``app.validation``, which refuses a malformed or suspiciously
+    small file before any delete is reached. Keeping the function (rather than
+    deleting the call sites) leaves one place to reintroduce a mode if the
+    requirement ever changes back.
     """
 
-    try:
-        raw = await get_client().hget(_INGEST_CONFIG_KEY, "catalog_mode")
-    except Exception:  # noqa: BLE001
-        return "merge"
-    return raw if raw in CATALOG_MODES else "full_sync"
+    return "full_sync"
 
 
 async def get_ingest_config() -> dict:

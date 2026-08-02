@@ -40,7 +40,7 @@ def calls(monkeypatch):
 
     seen = {"ingested": [], "refresh": 0, "embed": 0, "edges": 0, "bump": 0, "mode": None}
 
-    async def _ingest_file(path, catalog_mode="merge"):
+    async def _ingest_file(path, catalog_mode="full_sync", allow_shrink=False):
         from pathlib import Path
 
         seen["ingested"].append(Path(path).name)
@@ -105,6 +105,20 @@ async def test_misnamed_file_does_not_bust_the_cache(incoming, calls):
     assert calls["embed"] == 0
 
 
+
+# A minimal catalog file that PASSES validation. The old fixtures were
+# "Article Code\nA1\n" — one row, no Brand Name column, a non-numeric code —
+# which app.validation now rejects before the loader runs, for the same reason
+# it rejects the real broken export. These tests are about watcher behaviour
+# (embedding, graph rebuild, stability), not about validation, so they need a
+# file that is genuinely well-formed.
+def _valid_catalog_csv(rows: int = 12) -> str:
+    header = "Article Code,Brand Name,Generic Name\n"
+    return header + "".join(
+        f"10000000{i:05d},TEST BRAND {i},Testogen\n" for i in range(rows)
+    )
+
+
 # ---- defect 2: an SFTP drop must embed + rebuild the graph -------------------
 
 
@@ -112,7 +126,7 @@ async def test_misnamed_file_does_not_bust_the_cache(incoming, calls):
 async def test_sftp_ingest_embeds_and_rebuilds_graph(incoming, calls):
     """Otherwise the new drug is unreachable via search_by_meaning, silently."""
 
-    (incoming / "articles-export.csv").write_text("Article Code\nA1\n")
+    (incoming / "articles-export.csv").write_text(_valid_catalog_csv())
 
     summary = await watcher.scan_once()
 
@@ -131,7 +145,7 @@ async def test_embed_failure_does_not_lose_the_ingest(incoming, calls, monkeypat
         raise RuntimeError("embedding provider down")
 
     monkeypatch.setattr("app.ingest.embed_catalog", _boom)
-    (incoming / "articles-export.csv").write_text("Article Code\nA1\n")
+    (incoming / "articles-export.csv").write_text(_valid_catalog_csv())
 
     summary = await watcher.scan_once()
 
@@ -148,7 +162,7 @@ async def test_growing_file_is_skipped_until_stable(incoming, calls):
     """stable_only: a file still being written over SFTP must not be ingested."""
 
     f = incoming / "articles-export.csv"
-    f.write_text("Article Code\nA1\n")
+    f.write_text(_valid_catalog_csv())
     sizes = {}
 
     first = await watcher.scan_once(stable_only=True, _sizes=sizes)

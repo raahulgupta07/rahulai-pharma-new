@@ -796,22 +796,78 @@ async def graph_neighbors(code: str, limit: int = 14) -> Dict:
 
 
 @router.post("/upload")
-async def upload(file: UploadFile = File(...)) -> Dict:
-    """Manually upload an article/balance xlsx/csv → drop in incoming dir → ingest now."""
+async def upload(
+    file: UploadFile = File(...), allow_shrink: bool = False
+) -> Dict:
+    """Validate an article/balance xlsx/csv, then REPLACE the matching table.
+
+    Rejected files return 422 with the reasons and never reach the drop folder.
+    ``allow_shrink=true`` overrides the guard on a file that would delete more
+    than half the existing rows.
+    """
 
     from pathlib import Path
 
     from app.watcher import scan_once
 
+    import asyncio
+    import tempfile
+
+    from app.validation import check_shrink, validate_file
+
     name = Path(file.filename or "upload.xlsx").name
     if not name.lower().endswith((".xlsx", ".csv")):
         raise HTTPException(status_code=400, detail="only .xlsx or .csv files accepted")
+
+    payload = await file.read()
+
+    # Validate in a temp dir FIRST. The load replaces the table outright, so a
+    # rejected file must never reach the drop folder — if it did, the watcher
+    # would pick it up on its next poll and the API's rejection would mean
+    # nothing. Staging here keeps "rejected" and "not ingested" the same thing.
+    with tempfile.TemporaryDirectory() as tmp:
+        staged = Path(tmp) / name
+        staged.write_bytes(payload)
+        report = await check_shrink(
+            await asyncio.to_thread(validate_file, str(staged)),
+            allow_shrink=allow_shrink,
+        )
+        if not report.ok:
+            raise HTTPException(status_code=422, detail=report.as_dict())
+
     incoming = Path(get_settings().incoming_dir)
     incoming.mkdir(parents=True, exist_ok=True)
     dest = incoming / name
-    dest.write_bytes(await file.read())
-    summary = await scan_once(stable_only=False)
-    return {"status": "uploaded", "file": name, **summary}
+    dest.write_bytes(payload)
+    summary = await scan_once(stable_only=False, allow_shrink=allow_shrink)
+    return {
+        "status": "uploaded",
+        "file": name,
+        "validation": report.as_dict(),
+        **summary,
+    }
+
+
+@router.post("/validate", dependencies=[Depends(require_super_admin)])
+async def validate_upload(file: UploadFile = File(...)) -> Dict:
+    """Dry run: check a file and report, without loading anything.
+
+    Lets an operator confirm a monthly export is well-formed before it replaces
+    live data — the useful order of operations when the load is destructive.
+    """
+
+    import asyncio
+    import tempfile
+
+    from app.validation import check_shrink, validate_file
+
+    name = Path(file.filename or "upload.xlsx").name
+    payload = await file.read()
+    with tempfile.TemporaryDirectory() as tmp:
+        staged = Path(tmp) / name
+        staged.write_bytes(payload)
+        report = await check_shrink(await asyncio.to_thread(validate_file, str(staged)))
+    return report.as_dict()
 
 
 # ---- ingest config + manual stale purge ------------------------------------

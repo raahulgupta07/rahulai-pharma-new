@@ -457,12 +457,36 @@ async def build_edges_safe() -> Optional[int]:
         return None
 
 
-async def ingest_file(path: str, catalog_mode: str = "full_sync") -> Dict:
-    """Dispatch one file to the right loader based on its name.
+async def ingest_file(
+    path: str, catalog_mode: str = "full_sync", allow_shrink: bool = False
+) -> Dict:
+    """Validate one file, then load it. Rejects raise ``ValueError``.
 
-    ``catalog_mode`` ('merge' | 'full_sync') is applied only to a catalog file;
-    inventory is always a full snapshot replace regardless.
+    Both kinds REPLACE rather than merge — the newest file is authoritative:
+
+    * inventory: ``TRUNCATE`` + bulk copy, a clean snapshot every time.
+    * catalog: upsert every row in the file, then delete every row the file did
+      not contain. The end state is identical to truncate-and-reload, but it is
+      NOT a truncate on purpose. ``drug_alias`` carries an FK to ``catalog``, so
+      a truncate would cascade and destroy the learned aliases; and a truncate
+      would drop every ``embedding``, forcing a full ~3-minute re-embed of 4,892
+      rows on every upload instead of only the rows whose text changed.
+
+    ``allow_shrink`` overrides the guard that refuses a file which would delete
+    more than half the existing rows.
     """
+
+    # Validate BEFORE anything destructive runs. Both loaders replace rather
+    # than merge, so a bad file is not a failed import — it is data loss.
+    from app.validation import check_shrink, validate_file
+
+    report = await check_shrink(
+        await asyncio.to_thread(validate_file, path), allow_shrink=allow_shrink
+    )
+    if not report.ok:
+        raise ValueError(report.summary)
+    for w in report.warnings:
+        logger.warning("%s: %s", Path(path).name, w)
 
     kind = detect_kind(path)
     if kind == "catalog":

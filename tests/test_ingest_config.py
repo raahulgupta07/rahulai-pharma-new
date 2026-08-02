@@ -73,10 +73,19 @@ def test_defaults_when_unset():
     assert cfg["poll_seconds"] == get_settings().watch_interval_seconds
 
 
-def test_redis_error_degrades_to_merge_not_full_sync(monkeypatch):
-    """The unset DEFAULT is full_sync, but an unreachable Redis must fall to the
-    NON-destructive mode — deleting catalog rows on a config we could not even
-    read is the one failure we refuse. So: default full_sync, error merge."""
+def test_catalog_mode_is_always_full_sync(monkeypatch):
+    """Merge was removed on 2026-08-02: an upload REPLACES, it never adds.
+
+    This test previously asserted the opposite — that an unreachable Redis must
+    degrade to the non-destructive merge mode, because deleting catalog rows on
+    a config we could not read was the one failure worth refusing. That safety
+    argument still holds, but it is now enforced upstream: app.validation
+    rejects a malformed, empty, or suspiciously small file before any delete is
+    reached, so the destructive path is gated on the FILE being sound rather
+    than on a config read succeeding.
+
+    Redis being down must therefore change nothing about the mode.
+    """
 
     class _Boom:
         async def hget(self, *a, **k):
@@ -87,7 +96,7 @@ def test_redis_error_degrades_to_merge_not_full_sync(monkeypatch):
     async def go():
         return await cache.get_catalog_mode()
 
-    assert run(go()) == "merge"
+    assert run(go()) == "full_sync"
 
 
 def test_config_round_trips_through_redis():
