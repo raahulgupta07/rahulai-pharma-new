@@ -33,6 +33,7 @@ from contextlib import asynccontextmanager
 
 from app.agent import get_agent
 from app.answer_filter import LeakFilter, fallback_for, filter_answer
+from app.disclaimer import apply_policy as apply_disclaimer
 from app.cache import (
     bump_data_version,
     bump_session_turn,
@@ -110,6 +111,30 @@ def _result_frame(tool: str, rows: list) -> Dict[str, Any]:
             tool, len(rows), RESULT_ROW_LIMIT,
         )
     return frame
+
+
+
+def _finish_stream(full: str, tail: str, force: Optional[bool] = None):
+    """Apply the disclaimer policy at the end of a stream.
+
+    Returns ``(text_to_emit, final_full)``.
+
+    Streaming cannot un-send a token, so the policy can only suppress a safety
+    line that has NOT been streamed yet. That covers the normal case: the line
+    is the last paragraph, LeakFilter holds a paragraph until it is complete,
+    so the final one is still in its buffer at flush time and can simply be
+    dropped. When the model wrote the line inline instead ("800 MMK. Please
+    consult..."), it has already gone out — the text is corrected for the cache
+    and the conversation, and the reader sees one redundant sentence. Redundant
+    beats wrong, and the non-streaming route has no such limit.
+    """
+
+    final = apply_disclaimer(full + (tail or ""), force=force)
+    if final.startswith(full):
+        return final[len(full):], final
+    # The policy rewrote text already on screen; emit the tail as-is and keep
+    # the corrected version for everything downstream.
+    return (tail or ""), final
 
 
 def _subject_of(rows: list, tool_args) -> Optional[Dict[str, str]]:
@@ -781,7 +806,9 @@ async def _answer(
         if cached is not None:
             # Answers cached before the leak filter shipped can still contain
             # reasoning, and they survive for a full TTL. Filter on read too.
-            cached = filter_answer(cached) or cached
+            # Entries cached before the policy shipped still carry the line
+            # on stock answers, and survive a full TTL.
+            cached = apply_disclaimer(filter_answer(cached) or cached)
             metrics.incr("cache_hits")
             # A cache hit runs no agent, so nothing would record this turn and
             # the NEXT turn would not know it happened.
@@ -812,7 +839,11 @@ async def _answer(
             metrics.incr("llm_calls")
             metrics.record_llm()
             out = await fastpath.get_phrasing_agent(model).arun(phrase_prompt)
-            content = filter_answer(getattr(out, "content", str(out)))
+            # The fast path answers only HOT_HAVE / HOT_WHERE — stock and
+            # price — so the safety line never belongs on it.
+            content = apply_disclaimer(
+                filter_answer(getattr(out, "content", str(out))), force=False
+            )
             await set_cached_answer(message, store_id, content, model=model, version=version)
             await _remember(client_session, model, session_id, user_id, message, content)
             return content, False
@@ -828,7 +859,7 @@ async def _answer(
         metrics.incr("llm_calls")
         metrics.record_llm()
         out = await get_agent(model, with_history=bool(client_session), style=style).arun(prompt, **run_kw)
-        content = filter_answer(getattr(out, "content", str(out)))
+        content = apply_disclaimer(filter_answer(getattr(out, "content", str(out))))
     finally:
         reset_store_scope(token)
 
@@ -1081,10 +1112,10 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                                 if safe:
                                     full += safe
                                     yield f"data: {json.dumps({'delta': safe})}\n\n"
-                    tail = leak.flush()
-                    if tail:
-                        full += tail
-                        yield f"data: {json.dumps({'delta': tail})}\n\n"
+                    # Fast path answers only stock and price, so force removal.
+                    emit, full = _finish_stream(full, leak.flush(), force=False)
+                    if emit:
+                        yield f"data: {json.dumps({'delta': emit})}\n\n"
                     if leak.leaked:
                         metrics.incr("reasoning_leaks_suppressed")
                         logger.warning(
@@ -1169,10 +1200,9 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                         if safe:
                             full += safe
                             yield f"data: {json.dumps({'delta': safe})}\n\n"
-            tail = leak.flush()
-            if tail:
-                full += tail
-                yield f"data: {json.dumps({'delta': tail})}\n\n"
+            emit, full = _finish_stream(full, leak.flush())
+            if emit:
+                yield f"data: {json.dumps({'delta': emit})}\n\n"
             if leak.leaked:
                 metrics.incr("reasoning_leaks_suppressed")
                 logger.warning(

@@ -210,6 +210,38 @@
       "expect_contains": [
         "ATORVASTATIN"
       ]
+    },
+    {
+      "id": "disclaimer_burmese_price_has_none",
+      "_ticket": "Burmese was not covered; the policy is enforced in code now",
+      "question": "ROYAL-D 25G ဈေးဘယ်လောက်လဲ",
+      "expect_contains": [
+        "ROYAL-D"
+      ],
+      "expect_absent": [
+        "consult a licensed pharmacist",
+        "ဆေးဝါးကျွမ်းကျင်သူ"
+      ]
+    },
+    {
+      "id": "disclaimer_english_price_has_none",
+      "_ticket": "This exact question DID carry the warning on 2026-08-02",
+      "question": "what is the price of ROYAL-D 25G",
+      "expect_contains": [
+        "ROYAL-D"
+      ],
+      "expect_absent": [
+        "consult a licensed pharmacist"
+      ]
+    },
+    {
+      "id": "disclaimer_indication_answer_keeps_it",
+      "_ticket": "Removing it from clinical answers would be the opposite failure",
+      "question": "What is Strocain used for?",
+      "expect_contains": [
+        "STROCAIN",
+        "consult a licensed pharmacist"
+      ]
     }
   ]
 }
