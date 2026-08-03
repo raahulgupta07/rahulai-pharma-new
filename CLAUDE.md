@@ -14,13 +14,51 @@ SvelteKit admin SPA ("Aurora" UI) is served at `/admin`.
   Flash variants, A/B picker). Override with `OPENROUTER_MODEL` env.
 - **Embeddings:** `google/gemini-embedding-2` (3072-dim, pgvector, exact scan).
 
-## Status (2026-07-10)
+## Status (2026-08-03)
 
 **Functionally complete + running locally.** Services up (api/postgres/redis/sftp/
-ingest-worker healthy), real data loaded (5,292 catalog · 111,654 inventory). Run
-`pytest -q` for the test count; 4 skip without a live `OPENROUTER_API_KEY`. Aurora
-UI (Overview/Settings/Chat/Data), Claude-style chat with tool-use trace + rich
-rendering, redesigned Data page, GraphRAG, auth, embed API — all live + verified.
+ingest-worker healthy), real data loaded (5,292 catalog · 111,654 inventory · 400
+stubs, `stub_ratio` 0.076). Run `pytest -q` for the test count (**358 pass, 4
+skip** without a live `OPENROUTER_API_KEY`). Aurora UI, Claude-style chat with
+tool-use trace, GraphRAG, auth, embed API — all live + verified.
+
+**2026-08-02/03 sessions — FIELD FEEDBACK + SFTP OPS (on `main`, baked into
+`:8091`, HEAD `8e8ed54`).** 14 CMHL feedback forms (`~/Downloads/28-07-2026 3/`)
+were diagnosed down to a handful of causes and worked through. Shipped:
+
+- **Validate-then-replace ingest** (`app/validation.py`) — three passes (format →
+  columns → data) then a shrink guard; a refused file returns 422 with the
+  reasons and never reaches the drop folder. **Merge mode is gone**: an upload
+  always replaces.
+- **0, negative and blank are real values.** Blank stock is NULL = *unknown*, not
+  0. Negatives (79 in the current file) are stored and shown as sent.
+- **Leak filter** (`app/answer_filter.py`) — the model was narrating its own
+  process ("Let me search… actually, wait…"). Paragraph-buffered, so nothing
+  escapes mid-sentence.
+- **Deterministic disclaimer** (`app/disclaimer.py`) — see the landmine below.
+- **Pharmacist voice** — prompt rewrite; `ALWAYS NAME THE PRODUCT`, no provenance
+  narration, answer every question asked.
+- **`RESULT_ROW_LIMIT = 250`** replacing a silent `rows[:8]`, and the answer says
+  when it truncated. The field forms asked for this explicitly.
+- **File history + file actions** (`app/ingest_events.py`, `8e8ed54`) — every
+  ingest step is stored instead of going only to `logger`; `/admin/sftp/files`
+  merges the three folders into one listing; download / retry / delete per file.
+  The SFTP admin page was rebuilt around it (5 tabs, drawer with the timeline).
+
+**Accuracy baseline exists now.** `evals/eval_set_field_feedback.json` (22 cases)
+passes 22/22 against `:8091`. That is a *baseline, not coverage* — 22 questions,
+one store. Do not quote it as an accuracy figure.
+
+⚠️ **The customer host `192.168.2.46:8090` is untouched and unreachable from
+here.** It still has no catalog loaded, which is the root cause behind ~8 of the
+14 field tickets. Nothing in this repo fixes that until the file is loaded there;
+check `/ready` for `catalog_health.stub_ratio` near 0 afterwards.
+
+⚠️ **Four product decisions are blocked on CMHL** (see
+`docs/What_We_Fixed_2026-08-03.docx`): cross-branch stock visibility (forms 4/9
+ask the agent to *refuse*, and it currently answers), default answer length (form
+5 wants "Found/Not Found", form 10 wants everything), whether an out-of-stock
+answer may suggest an alternative, and whether the public may be given dosage.
 
 **2026-07-14 session — EMBED OPS + repo now has a REMOTE (on `main`, baked into
 `:8091`, pushed to `github.com/raahulgupta07/rahulai-pharma-new`, HEAD `c8f1636`):**
@@ -41,9 +79,13 @@ boot, since fail-closed + a polluted credential store had knocked it offline
 chat page (`c8f1636`). ⚠️ **A code change that alters answers does NOT bump
 `data_version`** — a stale cached answer masked the cross-store fix on redeploy;
 `POST /api/embed/reload` (or bump `data_version`) after any answer-affecting
-deploy. ⚠️ **The pytest suite shares the live `:6381` Redis and mutates
-`pharmacy:credentials`** — running it can knock the console chat offline until the
-next restart re-seeds; give tests their own Redis DB (`/15`). ⚠️ **AWS shows the
+deploy. ⚠️ **The pytest suite shares the live `:6381` Redis and rewrites
+`pharmacy:credentials`** — `tests/conftest.py:50` builds its client from
+`get_settings().redis_url`, the same one the running stack uses, and its autouse
+fixture sets `emb1` → `pk1`. **Demonstrated twice on 2026-08-03**: any live embed
+using `emb1` starts 401-ing the moment someone runs the suite, and stays broken
+until re-seeded. Still unfixed; the fix is one line — give tests their own Redis
+DB (`/15`). ⚠️ **AWS shows the
 OLD UI until the image is rebuilt THERE** — GitHub push ≠ deploy; `docker/Dockerfile`
 is multi-stage and builds the SPA itself (no manual `vite build`), so AWS update =
 `git pull` → `docker compose … build api` → `up -d api` → `/api/embed/reload`.
@@ -147,7 +189,18 @@ local-only UI prefs); a prod readiness-check script for items 1–7.
 **Not yet visually verified:** nobody has laid eyes on the *authenticated* admin
 UI in a browser. Headless Chrome hangs on the authed route, so every claim about
 how the logged-in pages actually render is unverified. The dark palette is
-derived, not reviewed (see "Design").
+derived, not reviewed (see "Design"). **This is now more true, not less**: the
+SFTP page was rewritten from scratch on 2026-08-03 (1,445 lines, five tabs, a
+drawer) and verified only by `curl`, a clean `vite build`, and
+`scripts/check_svelte_icons.py`. That guard catches the known blank-page trap; it
+is not the same as looking. Open `/admin/ftp` before trusting any of it.
+
+**Client-facing docs** live in `docs/`. `What_We_Fixed_2026-08-03.docx` is the
+short version sent to CMHL (the issues table only — deliberately no advice, no
+test plan, no next steps; the client asked for exactly that and nothing more).
+`Field_Feedback_Response_2026-08-03.docx` is the long version with causes,
+questions and upgrade notes, for their IT team. Both are generated by scripts, so
+regenerate rather than hand-editing if the facts change.
 
 ## Architecture
 
@@ -178,7 +231,11 @@ The agent is a **router**: per question it picks among three retrieval modes —
 | `app/agent.py` | `build_agent()` / `build_history_agent()` / `build_learning_agent()` — OpenRouter model, 12 tools, bilingual system prompt (FORMATTING + SEARCH STRATEGY) |
 | `app/history.py` | `record_turn()` — writes a fast-path / cache-hit turn into the Agno session (private agno APIs; see landmine) |
 | `app/tools.py` | the 12 agent tools (store-scope contextvar) |
-| `app/admin.py` | admin router: catalog/inventory/categories, stores, conversations, graph, users (+approval), upload, sftp, `GET/PUT /admin/auth-config` |
+| `app/admin.py` | admin router: catalog/inventory/categories, stores, conversations, graph, users (+approval), upload, sftp files + keys, `GET/PUT /admin/auth-config`, `_resolve_sftp_file` (path safety) |
+| `app/validation.py` | three-pass file validation (format → columns → data) + `check_shrink`; `ValidationReport` carries `errors`/`warnings`/`notes`/`stats` |
+| `app/ingest_events.py` | the file history: `record()`, `history()`, `latest()`, `prune()`. Every write degrades to a warning — see landmine |
+| `app/answer_filter.py` | strips the model's own reasoning out of a streamed answer, a paragraph at a time |
+| `app/disclaimer.py` | decides the safety line in code, not by prompt — see landmine |
 | `app/auth.py` | users table (+`approved`), bcrypt, JWT, local + LDAP + OIDC, merge-by-email, `effective_auth()` (env+Redis override), `make_state`/`verify_state` (OIDC CSRF) |
 | `docs/SSO.md` | operator guide: Keycloak client setup, LDAP/AD, the failure modes |
 | `scripts/check_svelte_icons.py` | static guard: unimported `.svelte` component/icon → blank page (see landmine); run by `tests/test_svelte_builds.py` |
@@ -231,6 +288,95 @@ it will not update `/app/admin_build` at all.
 
 The vite dev server (`:5173`, HMR) picks up `admin/src` changes; the docker-served
 `/admin` does not.
+
+## ⚠️ The drop folder is `/incoming`, NOT `/app/data/incoming`
+
+Both api and ingest-worker mount the `sftp_data` volume at **`/incoming`**
+(`INCOMING_DIR=/incoming`). The image ALSO contains a stale `/app/data/incoming`
+with an `archive/` and a months-old xlsx, copied in from the repo's `data/`
+directory at build time. It looks exactly like the real thing and is read by
+nothing. A `docker cp` into it silently does nothing; you will watch the watcher
+ignore your file and conclude the watcher is broken. Verify with
+`docker inspect --format '{{range .Mounts}}…'` before believing a path.
+
+## ⚠️ The safety line is decided in code, not asked for in the prompt
+
+`app/disclaimer.py` runs **after** the model has written its answer: clinical
+content (a dose, how to take it, what it treats, a side effect) gets exactly one
+line, last, in the answer's language; stock/price/code/brand/category gets none.
+
+The prompt asked for exactly this and the model obeyed *most of the time*.
+Measured live, the same question class differed run to run — an English price
+question got a medical warning while the same question in Burmese, and as a
+follow-up, did not. **Whether a medical warning appears cannot depend on
+sampling.** Both my hypotheses (Burmese, follow-ups) were wrong; it was plain
+sampling non-determinism, and the case I was using as the control was the one
+that failed.
+
+Two details that will re-break it if touched:
+
+- **Detection matches phrases about USE, never bare units.** `mg` appears in
+  almost every brand name here (`BIOGESIC 500MG 10\`S`), so matching it marks
+  every stock answer clinical and puts the warning back on all of them. Bold runs
+  (product names) and article codes are stripped before matching, because
+  `AIR-X DROP` contains "drop".
+- **Streaming can only suppress what it has not sent.** `LeakFilter` holds a
+  paragraph until complete, so a disclaimer written as the final paragraph is
+  still buffered at flush and can be dropped. Written *inline*, it is already on
+  screen; `_finish_stream()` corrects the text for the cache and conversation and
+  accepts the one redundant sentence rather than pretending it can un-send it.
+
+Pinned by `tests/test_disclaimer.py` (24 tests, no LLM, so they cannot flake).
+
+## ⚠️ Ingest history: never let recording break an ingest, and summarise the RUN
+
+`app/ingest_events.py` mirrors `history.record_turn`: **every write is wrapped
+and degrades to a warning.** A file loading but not being recorded is a bad day;
+a file failing to load *because* the recorder was down is much worse. If a
+failure ever starts propagating out of `record()`, a Postgres blip stops being a
+missing timeline and becomes a refused upload.
+
+`latest()` summarises the whole run, **not the last event**. Taking the last row
+looked right and was wrong: a successful load ends on `cache_cleared`, which
+carries no `kind` and no row count — so every file that loaded correctly listed
+as "Unknown, — rows", and the files with the most to say looked like the ones we
+knew nothing about. Caught live, not in review. A rejection also outranks the
+`set_aside` that follows it, or the listing shows "Kept so you can look at it"
+where the reason belongs.
+
+## ⚠️ `_resolve_sftp_file` needs BOTH defences
+
+The download name is doubly untrusted: a URL segment naming a file a partner
+uploaded over SFTP. `app/admin.py::_resolve_sftp_file` has two independent
+checks and both are load-bearing:
+
+1. `Path(name).name` discards directory parts, killing traversal.
+2. The resolved path's parent must **be** one of the three folders, compared
+   after `resolve()` on both sides.
+
+Check 1 alone is bypassed by a **symlink planted in the drop folder** — a plain
+single-segment filename, no traversal in the URL at all, which check 1 happily
+passes through. Verified live against a real symlink to `/etc/passwd`: 404.
+
+Note that multi-segment traversal never reaches the handler at all — it fails to
+match the route and falls through to the SPA mount, which answers **200 with the
+admin shell**. Nothing leaks, but a scanner reading status codes will flag it.
+API 404s under `/admin/*` returning HTML rather than JSON is pre-existing.
+
+## ⚠️ Two settings that reported success and did nothing
+
+- **`catalog_mode`** was a live merge/full_sync control. It POSTed, Redis stored
+  it, and the console printed "Catalog mode set to Merge — nothing is
+  auto-deleted" — while `get_catalog_mode()` has hard-returned `full_sync` since
+  2026-08-02, so the next file deleted rows anyway. A setting that lies about
+  DATA LOSS is worse than no setting. `set_ingest_config` now raises on any
+  attempted change (re-sending the current value is a no-op, so the page's
+  GET→POST round trip still works), and the config exposes `catalog_mode_locked`.
+- **`allow_shrink`** had no UI at all — a parameter on `POST /admin/upload` and
+  nothing else, so the only way to override the "would delete more than half the
+  rows" guard was hand-written curl. The one person overriding it was the one
+  person who never saw the warning. It now lives in the SFTP page's per-file
+  drawer, next to the count it would delete, and expires with that file.
 
 ## ⚠️ Site scoping — always go through `_site_clause`
 
@@ -488,10 +634,13 @@ touches the baseline's.
     article code → **`drug_alias`** table lookup → trigram similarity (GIN index).
     The single phrasing agent has **no tools**, so it cannot fetch or invent a
     number — it only restates the FACTS block.
-  - `drug_alias` exists (`migrations/0002_drug_alias.sql`) but **has no write path
-    yet** — nothing populates it, so the alias layer is currently always a miss
-    and resolution falls to trigram. Wiring the "pharmacist clarified → learn the
-    alias" write is the next step.
+  - `drug_alias` has an **API** write path (`GET/POST/DELETE /admin/aliases`,
+    `ensure_admin_schema` creates the table) but **nothing populates it**: no
+    admin UI references those endpoints and nothing learns an alias
+    automatically, so the alias tier is still always a miss and resolution falls
+    to trigram. The two things that would change that: a "pharmacist clarified →
+    learn it" write, and a list of the local shorthand staff actually use — which
+    is question 9 in the client doc, currently unanswered.
 - **The semantic answer cache is a KNOWN-BAD idea as built. Leave it OFF.**
   (`semantic_cache_enabled`, `semantic_cache_threshold`, default OFF.) Measured on
   `gemini-embedding-2`, whole-question cosine **cannot** separate "same question"
