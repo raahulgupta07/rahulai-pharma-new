@@ -457,10 +457,25 @@ async def build_edges_safe() -> Optional[int]:
         return None
 
 
+class FileRejected(ValueError):
+    """A file was refused. Carries the report that explains why.
+
+    A ``ValueError`` subclass on purpose: every existing caller catches
+    ``ValueError`` (or ``Exception``) and reads ``str(exc)``, which still gives
+    the same one-line summary as before. The difference is that a caller which
+    wants to *store* the reason — the console's file history — can reach the
+    structured errors, warnings and row counts instead of re-parsing prose.
+    """
+
+    def __init__(self, message: str, report: Optional[Dict] = None):
+        super().__init__(message)
+        self.report = report or {}
+
+
 async def ingest_file(
     path: str, catalog_mode: str = "full_sync", allow_shrink: bool = False
 ) -> Dict:
-    """Validate one file, then load it. Rejects raise ``ValueError``.
+    """Validate one file, then load it. Rejects raise :class:`FileRejected`.
 
     Both kinds REPLACE rather than merge — the newest file is authoritative:
 
@@ -484,7 +499,7 @@ async def ingest_file(
         await asyncio.to_thread(validate_file, path), allow_shrink=allow_shrink
     )
     if not report.ok:
-        raise ValueError(report.summary)
+        raise FileRejected(report.summary, report.as_dict())
     for w in report.warnings:
         logger.warning("%s: %s", Path(path).name, w)
 
@@ -497,17 +512,21 @@ async def ingest_file(
             # so swallowing this would file a rejected upload away as "done" —
             # the same silent-success bug that let an unrecognised filename
             # through before (see the comment in watcher.scan_once).
-            raise ValueError(
+            raise FileRejected(
                 res.get("error")
-                or "catalog file parsed to 0 rows (empty or partial upload)"
+                or "catalog file parsed to 0 rows (empty or partial upload)",
+                {**report.as_dict(), "parse": res.get("report", {})},
             )
         return {"file": Path(path).name, "kind": "catalog",
                 "rows": res["rows"], "deleted": res["deleted"],
-                "report": res.get("report", {})}
+                "report": res.get("report", {}),
+                "validation": report.as_dict()}
     if kind == "inventory":
         n = await ingest_inventory(path)
-        return {"file": Path(path).name, "kind": "inventory", "rows": n}
-    return {"file": Path(path).name, "kind": "unknown", "rows": 0}
+        return {"file": Path(path).name, "kind": "inventory", "rows": n,
+                "validation": report.as_dict()}
+    return {"file": Path(path).name, "kind": "unknown", "rows": 0,
+            "validation": report.as_dict()}
 
 
 def _find_latest(data_dir: str, kind: str) -> Optional[str]:

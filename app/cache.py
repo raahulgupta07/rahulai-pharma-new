@@ -498,32 +498,72 @@ async def get_catalog_mode() -> str:
     return "full_sync"
 
 
+async def get_ingest_enabled() -> bool:
+    """Whether the watcher loads a ready file, or leaves it for a human.
+
+    Default ON — that is what an unattended drop folder is for. Turning it off
+    is the switch an operator wants during a migration or an incident: files
+    keep arriving and are still listed, but nothing replaces live data until
+    somebody presses Load.
+
+    Like :func:`get_poll_seconds`, an unreadable Redis degrades to the default
+    rather than stalling the loop — but note the direction. Defaulting to OFF on
+    a Redis blip would silently stop ingesting with no error anywhere, which is
+    the failure nobody notices for a week.
+    """
+
+    try:
+        raw = await get_client().hget(_INGEST_CONFIG_KEY, "enabled")
+    except Exception:  # noqa: BLE001 — never let a Redis blip stop the watcher
+        return True
+    if raw is None:
+        return True
+    return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+
+
 async def get_ingest_config() -> dict:
-    """The effective ingest config as the admin page reads it."""
+    """The effective ingest config as the admin page reads it.
+
+    ``catalog_mode_locked`` exists so the page cannot offer a choice the loader
+    will ignore. See :func:`set_ingest_config`.
+    """
 
     return {
         "poll_seconds": await get_poll_seconds(),
         "catalog_mode": await get_catalog_mode(),
+        "catalog_mode_locked": True,
+        "enabled": await get_ingest_enabled(),
     }
 
 
 async def set_ingest_config(
-    poll_seconds: Optional[int] = None, catalog_mode: Optional[str] = None
+    poll_seconds: Optional[int] = None,
+    catalog_mode: Optional[str] = None,
+    enabled: Optional[bool] = None,
 ) -> dict:
     """Validate + persist a partial ingest-config update. Returns the effective config.
 
-    ``poll_seconds`` is clamped; a ``catalog_mode`` outside :data:`CATALOG_MODES`
-    is rejected. Raises ``ValueError`` on bad input so the admin endpoint can turn
-    it into a 400.
+    ``catalog_mode`` is REFUSED, not stored. It used to be accepted and written
+    to Redis, while :func:`get_catalog_mode` has hard-returned ``full_sync``
+    since 2026-08-02 — so an operator could select Merge, be told "Catalog mode
+    set to Merge — nothing is auto-deleted", and watch the next file delete rows
+    anyway. A setting that reports success and changes nothing is worse than no
+    setting at all: it is a promise about data loss that the code does not keep.
+    Refusing it turns a silent lie into a visible 400.
     """
+
+    if catalog_mode is not None and catalog_mode != await get_catalog_mode():
+        raise ValueError(
+            "catalog mode cannot be changed — a file always replaces the rows it "
+            "covers. Merging was removed because it left deleted products in the "
+            "catalog forever."
+        )
 
     mapping: dict = {}
     if poll_seconds is not None:
         mapping["poll_seconds"] = _clamp_poll(poll_seconds)
-    if catalog_mode is not None:
-        if catalog_mode not in CATALOG_MODES:
-            raise ValueError(f"catalog_mode must be one of {', '.join(CATALOG_MODES)}")
-        mapping["catalog_mode"] = catalog_mode
+    if enabled is not None:
+        mapping["enabled"] = "1" if enabled else "0"
     if mapping:
         await get_client().hset(_INGEST_CONFIG_KEY, mapping=mapping)
     return await get_ingest_config()

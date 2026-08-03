@@ -255,6 +255,15 @@ async def lifespan(_app: FastAPI):
     except Exception as exc:  # noqa: BLE001
         logger.warning("chat_logs init skipped: %s", exc)
     try:
+        from app import ingest_events
+
+        await ingest_events.ensure_schema()
+        # Trim on boot rather than on a timer: the table only grows when files
+        # arrive, and a restart is the one moment we are certainly not mid-scan.
+        await ingest_events.prune()
+    except Exception as exc:  # noqa: BLE001 — history is not worth a failed boot
+        logger.warning("ingest_events init skipped: %s", exc)
+    try:
         from app.auth import ensure_users_table, seed_super_admin
 
         await ensure_users_table()

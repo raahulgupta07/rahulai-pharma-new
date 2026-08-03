@@ -1128,6 +1128,7 @@ async def embed_snippets_zip(req: OutletSnippetRequest = Body(...)) -> Any:
 class IngestConfigUpdate(BaseModel):
     poll_seconds: Optional[int] = None
     catalog_mode: Optional[str] = None
+    enabled: Optional[bool] = None
 
 
 @router.get("/ingest/config", dependencies=[Depends(require_super_admin)])
@@ -1141,13 +1142,19 @@ async def ingest_config_get() -> Dict:
 async def ingest_config_set(c: IngestConfigUpdate) -> Dict:
     """Persist a partial ingest-config update. Clamped/validated on write.
 
-    ``poll_seconds`` is clamped to 5..3600; ``catalog_mode`` must be 'merge' or
-    'full_sync'. Takes effect on the worker's next loop/scan — no restart.
+    ``poll_seconds`` is clamped to 5..3600. ``enabled`` turns automatic loading
+    on and off. ``catalog_mode`` is now REFUSED with a 400 — it was accepted and
+    stored while the loader ignored it, so the console could report a change to
+    delete behaviour that never happened (see ``cache.set_ingest_config``).
+
+    Takes effect on the worker's next loop/scan — no restart.
     """
 
     try:
         return await cache.set_ingest_config(
-            poll_seconds=c.poll_seconds, catalog_mode=c.catalog_mode
+            poll_seconds=c.poll_seconds,
+            catalog_mode=c.catalog_mode,
+            enabled=c.enabled,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -1248,6 +1255,192 @@ async def sftp_status() -> Dict:
         # page never claims a poll interval the worker isn't actually using.
         "poll_seconds": await cache.get_poll_seconds(),
     }
+
+
+# ---- SFTP files: one history, downloadable, retryable -----------------------
+#
+# The three folders ARE the status. A file in archive/ loaded, one in failed/ was
+# refused, one still in the drop folder is on its way. The old endpoint returned
+# them as three separate arrays, which is why the page could never show one
+# sorted history.
+
+_FOLDER_STATE = {"incoming": "wait", "archive": "ok", "failed": "bad"}
+
+
+def _sftp_dirs() -> Dict[str, Path]:
+    base = Path(get_settings().incoming_dir)
+    return {"incoming": base, "archive": base / "archive", "failed": base / "failed"}
+
+
+def _original_name(stamped: str) -> str:
+    """Strip the archive timestamp: ``1782107161_balance.xlsx`` -> ``balance.xlsx``.
+
+    The prefix is ours (``watcher._stamp``), not the partner's. Showing it makes
+    every filename look mangled, and makes two uploads of the same export look
+    like two unrelated files.
+    """
+
+    head, sep, tail = stamped.partition("_")
+    return tail if sep and head.isdigit() and tail else stamped
+
+
+def _resolve_sftp_file(name: str) -> Path:
+    """Locate one file inside the drop folders, or 404.
+
+    SECURITY. ``name`` arrives in a URL and names a file a *partner* uploaded
+    over SFTP, so it is doubly untrusted. Two independent defences, because
+    either alone has a bypass:
+
+    1. ``Path(name).name`` discards every directory part, so ``../../etc/passwd``
+       becomes ``passwd``. This alone would still be fooled by a symlink sitting
+       in the drop folder and pointing anywhere on the container.
+    2. The resolved path's parent must BE one of the three real directories,
+       compared after ``resolve()`` on both sides. A symlink resolves to its
+       target, whose parent is elsewhere, so it fails here.
+
+    Anything else is a 404 — the same answer as "no such file", so probing
+    cannot map the filesystem.
+    """
+
+    leaf = Path(name).name
+    if not leaf or leaf in {".", ".."}:
+        raise HTTPException(status_code=404, detail="no such file")
+
+    for key, folder in _sftp_dirs().items():
+        candidate = folder / leaf
+        try:
+            if not candidate.is_file():
+                continue
+            real = candidate.resolve(strict=True)
+            if real.parent != folder.resolve(strict=True):
+                continue  # a symlink out of the folder — treat as absent
+        except OSError:
+            continue
+        return real
+
+    raise HTTPException(status_code=404, detail="no such file")
+
+
+@router.get("/sftp/files", dependencies=[Depends(require_super_admin)])
+async def sftp_files() -> Dict:
+    """Every file we hold, newest first, with what happened to it.
+
+    The folder gives the status; ``ingest_events`` gives the story. A file with
+    no history (it predates the table, or the recorder was down) still lists —
+    it just has nothing to show in the drawer.
+    """
+
+    from app import ingest_events
+
+    events = await ingest_events.latest()
+    out: List[Dict] = []
+
+    for key, folder in _sftp_dirs().items():
+        if not folder.is_dir():
+            continue
+        for f in list(folder.glob("*.xlsx")) + list(folder.glob("*.csv")):
+            if not f.is_file():
+                continue
+            st = f.stat()
+            original = _original_name(f.name)
+            last = events.get(original) or {}
+            data = last.get("data") or {}
+            out.append({
+                "name": original,
+                "stored_as": f.name,
+                "folder": key,
+                "state": _FOLDER_STATE[key],
+                "size": st.st_size,
+                "mtime": int(st.st_mtime),
+                "kind": last.get("kind"),
+                "step": last.get("step"),
+                "detail": last.get("detail"),
+                "rows": data.get("rows"),
+                "run_id": last.get("run_id"),
+            })
+
+    out.sort(key=lambda r: r["mtime"], reverse=True)
+    return {
+        "files": out,
+        "counts": {
+            s: sum(1 for r in out if r["state"] == s) for s in ("wait", "ok", "bad")
+        },
+        "poll_seconds": await cache.get_poll_seconds(),
+        "enabled": await cache.get_ingest_enabled(),
+    }
+
+
+@router.get("/sftp/file/{name}/history", dependencies=[Depends(require_super_admin)])
+async def sftp_file_history(name: str, run_id: Optional[str] = None) -> Dict:
+    """Every step of one file's most recent attempt."""
+
+    from app import ingest_events
+
+    leaf = _original_name(Path(name).name)
+    return {"file": leaf, "events": await ingest_events.history(leaf, run_id)}
+
+
+@router.get("/sftp/file/{name}", dependencies=[Depends(require_super_admin)])
+async def sftp_file_download(name: str):
+    """Download the copy we kept. super_admin only — these are partner exports."""
+
+    from fastapi.responses import FileResponse
+
+    path = _resolve_sftp_file(name)
+    return FileResponse(
+        path,
+        filename=_original_name(path.name),
+        media_type="application/octet-stream",
+    )
+
+
+class RetryFile(BaseModel):
+    allow_shrink: bool = False
+
+
+@router.post("/sftp/file/{name}/retry", dependencies=[Depends(require_super_admin)])
+async def sftp_file_retry(name: str, body: RetryFile = Body(default=RetryFile())) -> Dict:
+    """Put a file back in the drop folder and read it again, now.
+
+    ``allow_shrink`` overrides the guard that refuses a file which would delete
+    more than half a table — the ONE place that override is reachable from the
+    console, and deliberately per-file rather than a global setting. A file is
+    refused because of what *it* contains, so the decision to accept it anyway
+    belongs to that file and expires with it.
+
+    The retried file keeps its original name: the loader decides what a file is
+    from its name, so restoring the timestamp-prefixed archive name would make a
+    previously-recognised file unrecognisable.
+    """
+
+    from app.watcher import scan_once
+
+    path = _resolve_sftp_file(name)
+    incoming = _sftp_dirs()["incoming"]
+    incoming.mkdir(parents=True, exist_ok=True)
+    dest = incoming / _original_name(path.name)
+
+    if path.parent.resolve() != incoming.resolve():
+        if dest.exists():
+            raise HTTPException(
+                status_code=409,
+                detail=f"{dest.name} is already waiting in the drop folder",
+            )
+        path.rename(dest)
+
+    # stable_only=False: a human pressed the button, so there is no half-written
+    # upload to wait for — the file has been sitting still since it was refused.
+    summary = await scan_once(stable_only=False, allow_shrink=body.allow_shrink)
+    return {"file": dest.name, "allow_shrink": body.allow_shrink, **summary}
+
+
+@router.delete("/sftp/file/{name}", dependencies=[Depends(require_super_admin)])
+async def sftp_file_delete(name: str) -> Dict:
+    """Delete the kept copy. Loaded data is untouched — this only removes the file."""
+
+    path = _resolve_sftp_file(name)
+    path.unlink()
+    return {"deleted": path.name, "note": "loaded data unchanged"}
 
 
 # ---- SFTP partner handoff --------------------------------------------------

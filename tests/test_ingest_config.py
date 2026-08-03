@@ -108,7 +108,11 @@ def test_config_round_trips_through_redis():
         return cfg
 
     cfg = run(go())
-    assert cfg == {"poll_seconds": 42, "catalog_mode": "full_sync"}
+    # Assert the contract, not the whole dict: the config grows fields (locked
+    # flags, the automatic-loading switch) and a `==` here fails every time one
+    # is added, without any of them being what the test is about.
+    assert cfg["poll_seconds"] == 42
+    assert cfg["catalog_mode"] == "full_sync"
 
 
 def test_poll_seconds_clamps_low_and_high():
@@ -152,7 +156,8 @@ def test_partial_update_leaves_the_other_field():
         return after
 
     after = run(go())
-    assert after == {"poll_seconds": 60, "catalog_mode": "full_sync"}
+    assert after["poll_seconds"] == 60
+    assert after["catalog_mode"] == "full_sync"
 
 
 # ---- endpoints: super_admin only -------------------------------------------
@@ -234,7 +239,8 @@ def test_config_get_and_set_as_super_admin(api_client, super_admin):
         json={"poll_seconds": 20, "catalog_mode": "full_sync"},
     )
     assert put.status_code == 200
-    assert put.json() == {"poll_seconds": 20, "catalog_mode": "full_sync"}
+    assert put.json()["poll_seconds"] == 20
+    assert put.json()["catalog_mode"] == "full_sync"
 
 
 def test_config_post_rejects_bad_mode(api_client, super_admin):
@@ -242,3 +248,77 @@ def test_config_post_rejects_bad_mode(api_client, super_admin):
         "/admin/ingest/config", headers=super_admin.headers, json={"catalog_mode": "wipe"}
     )
     assert r.status_code == 400
+
+
+# ---- the setting that reported success and changed nothing ------------------
+
+
+def test_asking_for_merge_is_refused_not_silently_ignored(api_client, super_admin):
+    """The bug this replaces: accepted, stored, reported as applied, ignored.
+
+    ``get_catalog_mode()`` has hard-returned 'full_sync' since 2026-08-02, but
+    the endpoint kept accepting 'merge' and writing it to Redis — so the console
+    printed "Catalog mode set to Merge — nothing is auto-deleted" and the very
+    next file deleted rows anyway. A setting that lies about DATA LOSS is worse
+    than no setting. It must now fail loudly.
+    """
+
+    r = api_client.post(
+        "/admin/ingest/config", headers=super_admin.headers, json={"catalog_mode": "merge"}
+    )
+    assert r.status_code == 400
+    assert "replace" in r.json()["detail"].lower()
+
+
+def test_resending_the_current_mode_is_not_a_change(api_client, super_admin):
+    """The page GETs the config and POSTs it back; that must keep working."""
+
+    r = api_client.post(
+        "/admin/ingest/config",
+        headers=super_admin.headers,
+        json={"catalog_mode": "full_sync", "poll_seconds": 25},
+    )
+    assert r.status_code == 200
+    assert r.json()["poll_seconds"] == 25
+
+
+def test_the_config_says_the_mode_is_locked(api_client, super_admin):
+    """So the page cannot render a choice the loader will ignore."""
+
+    r = api_client.get("/admin/ingest/config", headers=super_admin.headers)
+    assert r.json()["catalog_mode_locked"] is True
+
+
+# ---- automatic loading ------------------------------------------------------
+
+
+def test_automatic_loading_defaults_on_and_round_trips():
+    async def go():
+        first = await cache.get_ingest_enabled()
+        off = (await cache.set_ingest_config(enabled=False))["enabled"]
+        cache._client = None  # prove it came back from Redis, not memory
+        still_off = await cache.get_ingest_enabled()
+        on = (await cache.set_ingest_config(enabled=True))["enabled"]
+        await cache.close_client()
+        return first, off, still_off, on
+
+    first, off, still_off, on = run(go())
+    assert first is True      # an unattended drop folder loads by default
+    assert off is False and still_off is False
+    assert on is True
+
+
+def test_an_unreadable_redis_keeps_loading(monkeypatch):
+    """The DIRECTION of this default is the point.
+
+    Failing closed would silently stop ingesting on a Redis blip, with no error
+    raised anywhere — the outage nobody notices until a pharmacist is reading
+    week-old stock off the screen.
+    """
+
+    class _Boom:
+        async def hget(self, *a, **k):
+            raise ConnectionError("redis down")
+
+    monkeypatch.setattr(cache, "get_client", lambda: _Boom())
+    assert run(cache.get_ingest_enabled()) is True

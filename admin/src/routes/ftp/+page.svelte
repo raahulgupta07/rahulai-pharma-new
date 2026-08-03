@@ -1,4 +1,16 @@
 <script>
+  /**
+   * SFTP uploads.
+   *
+   * The old page stacked seven cards down one scroll and put the FILES — the
+   * only thing anyone opens this page for — last, split across three separate
+   * lists (pending / archived / failed) that could not be sorted together.
+   *
+   * Now: five tabs, landing on one file list. The folder a file sits in is its
+   * status, and `GET /admin/sftp/files` merges the three folders into one
+   * history. Everything else — connecting, naming, keys, clean-up — is setup
+   * you touch once, so it moves off the landing tab.
+   */
   import { API_BASE } from '$lib/apiBase.js';
   import { onMount, onDestroy } from 'svelte';
   import {
@@ -7,9 +19,6 @@
     Server,
     Check,
     AlertTriangle,
-    Clock,
-    FileSpreadsheet,
-    FolderOpen,
     Copy,
     Eye,
     EyeOff,
@@ -17,7 +26,15 @@
     FileCheck2,
     Lock,
     Plus,
-    Trash2
+    Trash2,
+    Download,
+    RotateCcw,
+    X,
+    Play,
+    Eraser,
+    SlidersHorizontal,
+    FileText,
+    Loader2
   } from '@lucide/svelte';
   import PageHeader from '$lib/PageHeader.svelte';
   import Badge from '$lib/Badge.svelte';
@@ -29,133 +46,157 @@
   // starting point, not a fact: behind a proxy, or when the sftp port is not
   // published on the same name as the console, it is simply wrong. So a detected
   // host is shown pre-filled and asks to be confirmed, and an operator override
-  // beats it and persists per browser (same pattern as the embed page's
-  // embed_public_base). We never invent a `<server>` placeholder.
+  // beats it and persists per browser.
   const HOST_KEY = 'sftp_public_host';
 
-  let status = $state(null);
+  const TABS = [
+    { id: 'files', label: 'Files', icon: FileText },
+    { id: 'connect', label: 'How to connect', icon: Server },
+    { id: 'rules', label: 'Naming rules', icon: FileCheck2 },
+    { id: 'keys', label: 'Partner keys', icon: KeyRound },
+    { id: 'clean', label: 'Clean up', icon: Eraser }
+  ];
+  let tab = $state('files');
+
   let conn = $state(null);
   let connError = $state(null); // 403 => not a super_admin
-  let error = $state(null);
   let loading = $state(true);
-  let uploading = $state(false);
-  let ingesting = $state(false);
-  let msg = $state(null);
-  let fileInput;
+  let error = $state(null);
   let timer;
 
-  let hostInput = $state('');
-  let hostTouched = $state(false);
-  let revealed = $state(false);
-  let copied = $state('');
+  // ---- files ---------------------------------------------------------------
+  let files = $state([]);
+  let counts = $state({ wait: 0, ok: 0, bad: 0 });
+  let filter = $state('all');
+  let selected = $state(null); // the file whose drawer is open
+  let events = $state([]);
+  let eventsLoading = $state(false);
+  let busyFile = $state(''); // name of the file an action is running against
+  let allowShrink = $state(false); // per-file override, armed inside the drawer
+  let confirmDeleteFile = $state('');
 
-  // ---- partner keys --------------------------------------------------------
-  let keys = $state([]);
-  let keysError = $state(null); // e.g. the volume is not mounted (503)
-  let keyLabel = $state('');
-  let keyMaterial = $state('');
-  let keyBusy = $state(false);
-  let keyMsg = $state(null);
-  let keyErr = $state(null);
-  let confirmDelete = $state(null); // label pending confirmation
+  const shown = $derived(filter === 'all' ? files : files.filter((f) => f.state === filter));
 
-  async function loadKeys() {
-    keysError = null;
+  async function loadFiles() {
+    error = null;
     try {
-      const res = await fetch(base + '/admin/sftp/keys');
-      if (res.status === 403) return; // handled by connError
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        keysError = body.detail || `request failed (${res.status})`;
-        keys = [];
+      const res = await fetch(base + '/admin/sftp/files');
+      if (res.status === 403) {
+        connError = 'super_admin';
         return;
       }
-      keys = body;
+      if (!res.ok) throw new Error(`request failed (${res.status})`);
+      const body = await res.json();
+      files = body.files || [];
+      counts = body.counts || counts;
+      if (body.poll_seconds != null) pollInput = String(body.poll_seconds);
+      if (body.enabled != null) autoLoad = body.enabled;
     } catch (e) {
-      keysError = 'backend offline';
+      error = 'backend offline';
+    } finally {
+      loading = false;
     }
   }
 
-  async function addKey() {
-    keyBusy = true;
-    keyErr = null;
-    keyMsg = null;
+  async function openFile(f) {
+    selected = f;
+    allowShrink = false;
+    confirmDeleteFile = '';
+    events = [];
+    eventsLoading = true;
     try {
-      const res = await fetch(base + '/admin/sftp/keys', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ label: keyLabel.trim(), public_key: keyMaterial })
-      });
+      const res = await fetch(base + `/admin/sftp/file/${encodeURIComponent(f.name)}/history`);
+      events = res.ok ? (await res.json()).events || [] : [];
+    } catch {
+      events = [];
+    } finally {
+      eventsLoading = false;
+    }
+  }
+
+  /**
+   * Download the kept copy.
+   *
+   * Not an <a href>: the endpoint needs the admin bearer token, which a plain
+   * link cannot carry. Fetch it (the layout's fetch wrapper adds the header),
+   * then hand the browser a blob URL. Revoked straight after, or every download
+   * leaks the whole file until the tab is closed.
+   */
+  async function download(f) {
+    busyFile = f.name;
+    try {
+      const res = await fetch(base + `/admin/sftp/file/${encodeURIComponent(f.stored_as)}`);
+      if (!res.ok) throw new Error(`download failed (${res.status})`);
+      const url = URL.createObjectURL(await res.blob());
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = f.name;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast(`Downloaded ${f.name}.`);
+    } catch (e) {
+      toast(e.message || 'could not download', true);
+    } finally {
+      busyFile = '';
+    }
+  }
+
+  async function retry(f) {
+    busyFile = f.name;
+    try {
+      const res = await fetch(
+        base + `/admin/sftp/file/${encodeURIComponent(f.stored_as)}/retry`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ allow_shrink: allowShrink })
+        }
+      );
       const body = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(body.detail || `failed (${res.status})`);
-      keyMsg = `${body.label} registered — ${body.fingerprint}. Live on their next connection.`;
-      keyLabel = '';
-      keyMaterial = '';
-      await loadKeys();
+      const done = (body.processed ?? []).length;
+      const bad = (body.failed ?? [])[0];
+      toast(
+        bad
+          ? `${f.name} was refused again — ${bad.reason}`
+          : `${f.name} loaded${done ? '' : ' (nothing to do)'}. Saved answers cleared.`,
+        Boolean(bad)
+      );
+      selected = null;
+      await loadFiles();
     } catch (e) {
-      keyErr = e.message || 'could not register the key';
+      toast(e.message || 'could not retry', true);
     } finally {
-      keyBusy = false;
+      busyFile = '';
     }
   }
 
-  async function removeKey(label) {
-    keyBusy = true;
-    keyErr = null;
-    keyMsg = null;
+  async function removeFile(f) {
+    busyFile = f.name;
     try {
-      const res = await fetch(base + '/admin/sftp/keys/' + encodeURIComponent(label), {
+      const res = await fetch(base + `/admin/sftp/file/${encodeURIComponent(f.stored_as)}`, {
         method: 'DELETE'
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(body.detail || `failed (${res.status})`);
-      keyMsg = `${label} revoked — that key can no longer connect.`;
-      await loadKeys();
+      toast(`${f.name} deleted. Loaded data is unchanged.`);
+      selected = null;
+      await loadFiles();
     } catch (e) {
-      keyErr = e.message || 'could not revoke the key';
+      toast(e.message || 'could not delete', true);
     } finally {
-      keyBusy = false;
-      confirmDelete = null;
+      busyFile = '';
+      confirmDeleteFile = '';
     }
   }
 
-  const addedOn = (secs) => new Date(secs * 1000).toLocaleDateString();
-
-  // ---- ingest settings (poll cadence + catalog mode + stale purge) ---------
-  // Both the api and the worker container read this from Redis, so a change here
-  // takes effect on the worker's next scan with no restart. super_admin only:
-  // the /admin/ingest/* endpoints all require it, so the card only renders when
-  // the connection card loaded (i.e. the caller is a super_admin).
-  let ingestCfg = $state(null); // { poll_seconds, catalog_mode }
-  let pollInput = $state('');
+  // ---- ingest settings -----------------------------------------------------
+  let pollInput = $state('15');
+  let autoLoad = $state(true);
   let savingCfg = $state(false);
-  let cfgMsg = $state(null);
-  let cfgErr = $state(null);
 
-  let staleDays = $state(90);
-  let stalePreview = $state(null); // { count, legacy_count, cutoff }
-  let previewing = $state(false);
-  let purging = $state(false);
-  let purgeConfirm = $state(false);
-  let purgeMsg = $state(null);
-  let purgeErr = $state(null);
-
-  async function loadIngestConfig() {
-    cfgErr = null;
-    try {
-      const res = await fetch(base + '/admin/ingest/config');
-      if (!res.ok) return; // 403 for a plain admin — card stays hidden
-      ingestCfg = await res.json();
-      pollInput = String(ingestCfg.poll_seconds);
-    } catch (e) {
-      cfgErr = 'backend offline';
-    }
-  }
-
-  async function saveIngestConfig(updates, note) {
+  async function saveConfig(updates, note) {
     savingCfg = true;
-    cfgErr = null;
-    cfgMsg = null;
     try {
       const res = await fetch(base + '/admin/ingest/config', {
         method: 'POST',
@@ -164,33 +205,156 @@
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(body.detail || `failed (${res.status})`);
-      ingestCfg = body;
       pollInput = String(body.poll_seconds);
-      cfgMsg = note;
-      await load(); // the Files card echoes the poll interval
+      autoLoad = body.enabled;
+      toast(note);
     } catch (e) {
-      cfgErr = e.message || 'could not save';
+      toast(e.message || 'could not save', true);
     } finally {
       savingCfg = false;
     }
   }
 
-  const savePoll = () => saveIngestConfig({ poll_seconds: Number(pollInput) }, 'Poll interval saved.');
-  const setMode = (m) => {
-    if (m === ingestCfg?.catalog_mode) return;
-    saveIngestConfig(
-      { catalog_mode: m },
-      m === 'full_sync'
-        ? 'Catalog mode set to Full sync — article files now delete rows they omit.'
-        : 'Catalog mode set to Merge — nothing is auto-deleted.'
+  const savePoll = (v) =>
+    saveConfig({ poll_seconds: Number(v) }, `Now checking every ${describeSeconds(Number(v))}.`);
+
+  const toggleAuto = () =>
+    saveConfig(
+      { enabled: !autoLoad },
+      autoLoad
+        ? 'Automatic loading off — files will wait until you load them.'
+        : 'Automatic loading on.'
     );
-  };
+
+  function describeSeconds(s) {
+    if (s < 60) return `${s} seconds`;
+    if (s < 3600) return s === 60 ? 'minute' : `${Math.round(s / 60)} minutes`;
+    return 'hour';
+  }
+
+  // ---- upload + manual run -------------------------------------------------
+  let uploading = $state(false);
+  let ingesting = $state(false);
+  let rejection = $state(null); // the 422 report, shown in full
+  let fileInput;
+
+  async function onUpload(e) {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    uploading = true;
+    rejection = null;
+    try {
+      const fd = new FormData();
+      fd.append('file', f);
+      const res = await fetch(base + '/admin/upload', { method: 'POST', body: fd });
+      const body = await res.json().catch(() => ({}));
+      if (res.status === 422) {
+        // Not a failure to report in one line — the reasons are the whole point.
+        rejection = body.detail || {};
+        tab = 'files';
+        return;
+      }
+      if (!res.ok) throw new Error(body.detail || `upload failed (${res.status})`);
+      const done = (body.processed ?? [])
+        .map((x) => `${x.kind} ${Number(x.rows).toLocaleString()}`)
+        .join(', ');
+      toast(`Loaded ${body.file}${done ? ' — ' + done : ''}. Saved answers cleared.`);
+      await loadFiles();
+    } catch (err) {
+      toast(err.message || 'upload failed', true);
+    } finally {
+      uploading = false;
+      if (e.target) e.target.value = '';
+    }
+  }
+
+  async function ingestNow() {
+    ingesting = true;
+    try {
+      const res = await fetch(base + '/api/embed/ingest', { method: 'POST' });
+      if (!res.ok) throw new Error(`failed (${res.status})`);
+      const j = await res.json();
+      toast(`Read the folder — ${(j.processed ?? []).length} loaded, saved answers cleared.`);
+      await loadFiles();
+    } catch (err) {
+      toast(err.message || 'could not run', true);
+    } finally {
+      ingesting = false;
+    }
+  }
+
+  // ---- partner keys --------------------------------------------------------
+  let keys = $state([]);
+  let keysError = $state(null);
+  let keyLabel = $state('');
+  let keyMaterial = $state('');
+  let keyBusy = $state(false);
+  let confirmDelete = $state(null);
+
+  async function loadKeys() {
+    keysError = null;
+    try {
+      const res = await fetch(base + '/admin/sftp/keys');
+      if (res.status === 403) return;
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        keysError = body.detail || `request failed (${res.status})`;
+        keys = [];
+        return;
+      }
+      keys = body;
+    } catch {
+      keysError = 'backend offline';
+    }
+  }
+
+  async function addKey() {
+    keyBusy = true;
+    try {
+      const res = await fetch(base + '/admin/sftp/keys', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ label: keyLabel.trim(), public_key: keyMaterial })
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.detail || `failed (${res.status})`);
+      toast(`${body.label} registered — ${body.fingerprint}. Live on their next connection.`);
+      keyLabel = '';
+      keyMaterial = '';
+      await loadKeys();
+    } catch (e) {
+      toast(e.message || 'could not register the key', true);
+    } finally {
+      keyBusy = false;
+    }
+  }
+
+  async function removeKey(label) {
+    keyBusy = true;
+    try {
+      const res = await fetch(base + '/admin/sftp/keys/' + encodeURIComponent(label), {
+        method: 'DELETE'
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.detail || `failed (${res.status})`);
+      toast(`${label} revoked — that key can no longer connect.`);
+      await loadKeys();
+    } catch (e) {
+      toast(e.message || 'could not revoke the key', true);
+    } finally {
+      keyBusy = false;
+      confirmDelete = null;
+    }
+  }
+
+  // ---- stale purge ---------------------------------------------------------
+  let staleDays = $state(90);
+  let stalePreview = $state(null);
+  let previewing = $state(false);
+  let purging = $state(false);
 
   async function previewStale() {
     previewing = true;
-    purgeErr = null;
-    purgeMsg = null;
-    purgeConfirm = false;
     stalePreview = null;
     try {
       const res = await fetch(base + '/admin/ingest/stale?days=' + encodeURIComponent(staleDays));
@@ -198,7 +362,7 @@
       if (!res.ok) throw new Error(body.detail || `failed (${res.status})`);
       stalePreview = body;
     } catch (e) {
-      purgeErr = e.message || 'could not preview';
+      toast(e.message || 'could not check', true);
     } finally {
       previewing = false;
     }
@@ -206,8 +370,6 @@
 
   async function purgeStale() {
     purging = true;
-    purgeErr = null;
-    purgeMsg = null;
     try {
       const res = await fetch(base + '/admin/ingest/purge-stale', {
         method: 'POST',
@@ -216,29 +378,151 @@
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(body.detail || `failed (${res.status})`);
-      purgeMsg = `Removed ${Number(body.deleted).toLocaleString()} stale ${body.deleted === 1 ? 'row' : 'rows'}.`;
+      toast(`Removed ${Number(body.deleted).toLocaleString()} products. Saved answers cleared.`);
       stalePreview = null;
-      purgeConfirm = false;
-      await load();
     } catch (e) {
-      purgeErr = e.message || 'could not purge';
+      toast(e.message || 'could not remove', true);
     } finally {
       purging = false;
     }
   }
 
-  async function load() {
-    error = null;
-    try {
-      const res = await fetch(base + '/admin/sftp');
-      if (!res.ok) throw new Error(`request failed (${res.status})`);
-      status = await res.json();
-    } catch (e) {
-      error = 'backend offline';
-    } finally {
-      loading = false;
-    }
+  // ---- host + snippets -----------------------------------------------------
+  let hostInput = $state('');
+  let hostTouched = $state(false);
+  let revealed = $state(false);
+  let copied = $state('');
+
+  function saveHost(v) {
+    hostInput = v;
+    hostTouched = true;
+    localStorage.setItem(HOST_KEY, v);
+    toast('Address saved. Every command below uses it.');
   }
+
+  // Precedence: the env-configured host (authoritative) > what the operator
+  // typed (they know better than we do) > what we detected off the request
+  // (a guess). A detected host must never outrank a human.
+  const envHost = $derived(conn?.host_source === 'env' ? (conn.host || '').trim() : '');
+  const detectedHost = $derived(conn?.host_source === 'detected' ? (conn.host || '').trim() : '');
+  const host = $derived(envHost || (hostInput || '').trim() || detectedHost);
+  const hostKnown = $derived(host !== '');
+  const usingDetected = $derived(!envHost && !!detectedHost && host === detectedHost && !hostTouched);
+  const isLocal = $derived(/^(localhost|127\.|0\.0\.0\.0|\[::1\]|::1)/i.test(host));
+  const port = $derived(conn?.port ?? 2222);
+  const user = $derived(conn?.username ?? 'pharma');
+  const path = $derived(conn?.upload_path ?? 'upload/');
+  // Shouted, so nobody pastes it into a real script by accident.
+  const h = $derived(hostKnown ? host : 'SFTP_HOST_NOT_SET');
+
+  const snippets = $derived([
+    {
+      key: 'sftp',
+      title: 'Command line',
+      note: 'one file, by hand',
+      body: `sftp -P ${port} ${user}@${h}
+# password: the shared one above
+sftp> cd ${path.replace(/\/$/, '')}
+sftp> put articles-export-2026-08-03.csv
+sftp> put balance_stock_20260803.xlsx
+sftp> bye`
+    },
+    {
+      key: 'scp',
+      title: 'One line',
+      note: 'scp, for a script',
+      body: `scp -P ${port} balance_stock_20260803.xlsx ${user}@${h}:${path}`
+    },
+    {
+      key: 'cron',
+      title: 'Every night',
+      note: 'cron, 01:15',
+      body: `# /etc/cron.d/pharma-export — nightly push at 01:15
+# sshpass keeps the password off the command line. Better still: register a
+# key on the Partner keys tab and drop SSHPASS entirely.
+15 1 * * *  pharma  SSHPASS="$SFTP_PASSWORD" sshpass -e \\
+  sftp -oBatchMode=no -oStrictHostKeyChecking=accept-new -P ${port} \\
+  -b - ${user}@${h} <<< $'cd ${path.replace(/\/$/, '')}\\nput /exports/balance_stock_$(date +%Y%m%d).xlsx'`
+    },
+    {
+      key: 'py',
+      title: 'From Python',
+      note: 'paramiko',
+      body: `# pip install paramiko
+import os
+from datetime import date
+
+import paramiko
+
+HOST, PORT = "${h}", ${port}
+USER = "${user}"
+PASSWORD = os.environ["PHARMA_SFTP_PASSWORD"]   # never hardcode it
+
+# The name is the contract — see the Naming rules tab.
+local = f"/exports/balance_stock_{date.today():%Y%m%d}.xlsx"
+remote = f"${path}{os.path.basename(local)}"
+
+transport = paramiko.Transport((HOST, PORT))
+transport.connect(username=USER, password=PASSWORD)
+try:
+    sftp = paramiko.SFTPClient.from_transport(transport)
+    # Upload to a temp name, then rename: we only read a file whose size has
+    # stopped changing, and a rename is atomic — so a half-written file is
+    # never picked up mid-flight.
+    sftp.put(local, remote + ".part")
+    sftp.rename(remote + ".part", remote)
+finally:
+    transport.close()`
+    },
+    {
+      key: 'winscp',
+      title: 'WinSCP',
+      note: 'settings to type in',
+      body: `File protocol:      SFTP
+Host name:          ${h}
+Port number:        ${port}
+User name:          ${user}
+Password:           <shared password from this page>
+Remote directory:   /${path.replace(/\/$/, '')}
+
+Transfer mode:      Binary
+Resume support:     ON   (WinSCP writes a .filepart then renames, so we
+                          never read a partial file)`
+    }
+  ]);
+
+  const keygenSnippet = `# on the PARTNER's machine — generate a key pair
+ssh-keygen -t ed25519 -f ~/.ssh/pharma_sftp -C "acme-pharma"
+
+# send us ONLY the .pub file — never ~/.ssh/pharma_sftp itself
+cat ~/.ssh/pharma_sftp.pub
+
+# and read us this fingerprint, so we can check we registered the right key
+ssh-keygen -lf ~/.ssh/pharma_sftp.pub`;
+
+  function copy(key, text) {
+    navigator.clipboard.writeText(text);
+    copied = key;
+    setTimeout(() => (copied = ''), 1500);
+  }
+
+  // ---- toasts --------------------------------------------------------------
+  let toasts = $state([]);
+  let toastSeq = 0;
+
+  function toast(message, bad = false) {
+    const id = ++toastSeq;
+    toasts = [...toasts, { id, message, bad }];
+    setTimeout(() => (toasts = toasts.filter((t) => t.id !== id)), 5000);
+  }
+
+  // ---- formatting ----------------------------------------------------------
+  const size = (b) => (b > 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.round(b / 1024) + ' KB');
+  const when = (s) => new Date(s * 1000).toLocaleString();
+  const addedOn = (secs) => new Date(secs * 1000).toLocaleDateString();
+  const KIND = { catalog: 'Product list', inventory: 'Stock levels' };
+  const STATE_LABEL = { wait: 'Still arriving', ok: 'Loaded', bad: 'Rejected' };
+  const FOLDER_LABEL = { incoming: 'Waiting', archive: 'Loaded', failed: 'Rejected' };
 
   async function loadConn() {
     connError = null;
@@ -255,480 +539,523 @@
     }
   }
 
-  function saveHost(v) {
-    hostInput = v;
-    hostTouched = true;
-    localStorage.setItem(HOST_KEY, v);
-  }
-
-  // Accept the detected host as-is: persist it so it survives a reload and is no
-  // longer merely a guess this browser happens to be echoing.
-  function confirmDetected() {
-    saveHost(detectedHost);
-  }
-
-  // Precedence: the env-configured host (authoritative) > what the operator
-  // typed (they know better than we do) > what we detected off the request
-  // (a guess). A detected host must never outrank a human.
-  const envHost = $derived(conn?.host_source === 'env' ? (conn.host || '').trim() : '');
-  const detectedHost = $derived(conn?.host_source === 'detected' ? (conn.host || '').trim() : '');
-  const host = $derived(envHost || (hostInput || '').trim() || detectedHost);
-  const hostKnown = $derived(host !== '');
-  // True while the operator is going along with the detected value — the state
-  // the "confirm this" prompt is for.
-  const usingDetected = $derived(!envHost && !!detectedHost && host === detectedHost);
-  const isLocal = $derived(/^(localhost|127\.|0\.0\.0\.0|\[::1\]|::1)/i.test(host));
-  const port = $derived(conn?.port ?? 2222);
-  const user = $derived(conn?.username ?? 'pharma');
-  const path = $derived(conn?.upload_path ?? 'upload/');
-  // Shown inside snippets before a host is known — shouted, so nobody pastes it.
-  const h = $derived(hostKnown ? host : 'SFTP_HOST_NOT_SET');
-
-  const sftpSnippet = $derived(`sftp -P ${port} ${user}@${h}
-# password: the shared credential shown above
-sftp> cd ${path.replace(/\/$/, '')}
-sftp> put articles-export-2026-07-13.csv
-sftp> put balance_stock_20260713.xlsx
-sftp> bye`);
-
-  const scpSnippet = $derived(
-    `scp -P ${port} balance_stock_20260713.xlsx ${user}@${h}:${path}`
-  );
-
-  const cronSnippet = $derived(`# /etc/cron.d/pharma-export — nightly push at 01:15
-# sshpass keeps the shared password out of the command line; better still,
-# switch to key auth (below) and drop the SSHPASS env entirely.
-15 1 * * *  pharma  SSHPASS="$SFTP_PASSWORD" sshpass -e \\
-  sftp -oBatchMode=no -oStrictHostKeyChecking=accept-new -P ${port} \\
-  -b - ${user}@${h} <<< $'cd ${path.replace(/\/$/, '')}\\nput /exports/balance_stock_$(date +%Y%m%d).xlsx'`);
-
-  const pythonSnippet = $derived(`# pip install paramiko
-import os
-from datetime import date
-
-import paramiko
-
-HOST, PORT = "${h}", ${port}
-USER = "${user}"
-PASSWORD = os.environ["PHARMA_SFTP_PASSWORD"]   # never hardcode it
-
-# The name is the contract: it must contain one of the keywords below, or the
-# file lands in failed/ and nothing is ingested.
-local = f"/exports/balance_stock_{date.today():%Y%m%d}.xlsx"
-remote = f"${path}{os.path.basename(local)}"
-
-transport = paramiko.Transport((HOST, PORT))
-transport.connect(username=USER, password=PASSWORD)
-try:
-    sftp = paramiko.SFTPClient.from_transport(transport)
-    # Upload to a temp name, then rename: the watcher only ingests a file whose
-    # size has stopped changing, and a rename is atomic — so a half-written file
-    # is never picked up mid-flight.
-    sftp.put(local, remote + ".part")
-    sftp.rename(remote + ".part", remote)
-finally:
-    transport.close()`);
-
-  const winscpSnippet = $derived(`File protocol:  SFTP
-Host name:      ${h}
-Port number:    ${port}
-User name:      ${user}
-Password:       <shared password from this page>
-Remote directory: /${path.replace(/\/$/, '')}
-
-Transfer settings -> Transfer mode: Binary
-Endurance / resume: ON  (WinSCP writes a .filepart then renames — the
-watcher ignores the partial and ingests only the final name)`);
-
-  // What the PARTNER runs. They send back the .pub line and read you the
-  // fingerprint; you paste the line here and check the two match.
-  const keygenSnippet = `# on the PARTNER's machine — generate a key pair
-ssh-keygen -t ed25519 -f ~/.ssh/pharma_sftp -C "acme-pharma"
-
-# send us ONLY the .pub file — never ~/.ssh/pharma_sftp itself
-cat ~/.ssh/pharma_sftp.pub
-
-# and read us this fingerprint, so we can check we registered the right key
-ssh-keygen -lf ~/.ssh/pharma_sftp.pub`;
-
-  function copy(key, text) {
-    navigator.clipboard.writeText(text);
-    copied = key;
-    setTimeout(() => (copied = ''), 1500);
-  }
-
-  async function onUpload(e) {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    uploading = true;
-    msg = null;
-    try {
-      const fd = new FormData();
-      fd.append('file', f);
-      const res = await fetch(base + '/admin/upload', { method: 'POST', body: fd });
-      if (!res.ok) throw new Error(`upload failed (${res.status})`);
-      const j = await res.json();
-      const done = (j.processed ?? []).map((x) => `${x.kind} ${Number(x.rows).toLocaleString()}`).join(', ');
-      msg = `Uploaded ${j.file}${done ? ' → ' + done : ''}`;
-      await load();
-    } catch (err) {
-      msg = err.message || 'upload failed';
-    } finally {
-      uploading = false;
-      if (e.target) e.target.value = '';
-    }
-  }
-
-  async function ingestNow() {
-    ingesting = true;
-    msg = null;
-    try {
-      const res = await fetch(base + '/api/embed/ingest', { method: 'POST' });
-      if (!res.ok) throw new Error(`ingest failed (${res.status})`);
-      const j = await res.json();
-      msg = `Ingest run — ${(j.processed ?? []).length} processed, data v${j.data_version}`;
-      await load();
-    } catch (err) {
-      msg = err.message || 'ingest failed';
-    } finally {
-      ingesting = false;
-    }
-  }
-
   onMount(() => {
     hostInput = localStorage.getItem(HOST_KEY) || '';
-    load();
+    hostTouched = localStorage.getItem(HOST_KEY) != null;
+    loadFiles();
     loadConn().then(() => {
       // Pre-fill (not save) the detected host so the field shows a value the
       // operator can confirm or correct. Saving it here would quietly promote a
       // guess into a stored setting nobody ever looked at.
       if (!hostInput && !hostTouched && conn?.host_source === 'detected') hostInput = conn.host;
-      if (conn) {
-        loadKeys();
-        loadIngestConfig();
-      }
+      if (conn) loadKeys();
     });
-    timer = setInterval(load, 10000);
+    // Refresh the list while the page is open — a partner's drop should appear
+    // without anyone pressing anything. Paused while a drawer is open, so the
+    // list cannot reshuffle under a decision being made.
+    timer = setInterval(() => {
+      if (!selected) loadFiles();
+    }, 10000);
   });
   onDestroy(() => clearInterval(timer));
-
-  const size = (b) => (b > 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.round(b / 1024) + ' KB');
-  const when = (s) => new Date(s * 1000).toLocaleString();
 </script>
 
 <PageHeader
   title="SFTP uploads"
-  subtitle="Everything a partner needs to push article and balance-stock exports. The worker ingests them automatically and busts the cache."
+  subtitle="Everything the partner needs to send us files, and everything that happened to the files they sent."
 >
   {#snippet actions()}
     <input type="file" accept=".xlsx,.csv" bind:this={fileInput} onchange={onUpload} class="hidden" />
     <button
-      onclick={() => fileInput?.click()}
-      disabled={uploading}
-      class="inline-flex items-center gap-2 rounded-lg border border-line bg-surface px-3.5 py-2 text-[13px] font-medium text-ink transition-colors hover:bg-surface-2 disabled:opacity-60"
-    >
-      <Upload size={15} class={uploading ? 'animate-pulse' : ''} />
-      {uploading ? 'Uploading' : 'Upload xlsx'}
-    </button>
-    <button
       onclick={ingestNow}
       disabled={ingesting}
-      class="inline-flex items-center gap-2 rounded-lg bg-accent px-3.5 py-2 text-[13px] font-medium text-on-accent transition-colors hover:bg-accent-hover disabled:opacity-60"
+      class="inline-flex items-center gap-2 rounded-lg border border-line bg-surface px-3.5 py-2 text-[13px] font-medium text-ink transition-colors hover:bg-surface-2 disabled:opacity-60"
     >
       <RefreshCw size={15} class={ingesting ? 'animate-spin' : ''} />
-      {ingesting ? 'Ingesting' : 'Ingest now'}
+      {ingesting ? 'Reading' : 'Check now'}
+    </button>
+    <button
+      onclick={() => fileInput?.click()}
+      disabled={uploading}
+      class="inline-flex items-center gap-2 rounded-lg bg-accent px-3.5 py-2 text-[13px] font-medium text-on-accent transition-colors hover:bg-accent-hover disabled:opacity-60"
+    >
+      <Upload size={15} class={uploading ? 'animate-pulse' : ''} />
+      {uploading ? 'Checking' : 'Upload a file'}
     </button>
   {/snippet}
 </PageHeader>
 
-{#if msg}
-  <div class="mb-6 rounded-xl border border-line bg-surface px-4 py-3 text-[13px] text-ink-2">{msg}</div>
-{/if}
-
-{#snippet block(key, label, code, note)}
-  <section class="mb-6">
-    <div class="mb-2 flex items-center">
-      <span class="text-[14px] font-medium text-ink">{label}</span>
-      <button
-        onclick={() => copy(key, code)}
-        class="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1 text-[12px] text-ink-2 transition-colors hover:bg-surface-2"
-      >
-        {#if copied === key}<Check size={13} /> Copied{:else}<Copy size={13} /> Copy{/if}
-      </button>
-    </div>
-    {#if note}<p class="mb-2 text-[13px] text-ink-2">{note}</p>{/if}
-    <pre
-      class="overflow-x-auto rounded-[14px] border border-line bg-surface-2 p-4 text-[12.5px] leading-relaxed text-ink"><code
-        >{code}</code
-      ></pre>
-  </section>
-{/snippet}
-
-{#if error}
+{#if connError === 'super_admin'}
+  <div class="rounded-xl border border-line bg-surface px-5 py-4 text-[14px] text-ink-2">
+    <p class="font-medium text-ink">Super admin only</p>
+    <p class="mt-1">
+      This page carries the shared SFTP password and the partner key list, so it is limited to super
+      admins.
+    </p>
+  </div>
+{:else if error && !files.length}
   <div class="rounded-xl border border-line bg-surface px-5 py-4 text-[14px] text-ink-2">
     <p class="font-medium text-ink">Backend offline</p>
     <p class="mt-1">Could not reach the agent at {API_BASE}.</p>
   </div>
-{:else if loading}
-  <p class="text-[14px] text-ink-2">Loading…</p>
-{:else if status}
-  <!-- 1. Connection -->
-  <section class="mb-6 rounded-[14px] border border-line bg-surface p-4">
-    <div class="mb-1 flex items-center gap-2">
-      <Server size={16} class="text-ink-2" />
-      <span class="text-[14px] font-medium text-ink">Connection</span>
-      {#if usingDetected}<Badge tone="warn">host detected — confirm</Badge>
-      {:else if conn && !conn.host_configured}<Badge tone="warn">host not configured</Badge>{/if}
-      {#if isLocal}<Badge tone="warn">not reachable by a partner</Badge>{/if}
-    </div>
+{:else}
+  <!-- ---------- tabs ---------- -->
+  <div class="mb-5 flex gap-0.5 overflow-x-auto border-b border-line" role="tablist">
+    {#each TABS as t (t.id)}
+      {@const Icon = t.icon}
+      {@const active = tab === t.id}
+      <button
+        role="tab"
+        aria-selected={active}
+        onclick={() => (tab = t.id)}
+        class="inline-flex shrink-0 items-center gap-2 border-b-2 px-3.5 py-2.5 text-[13.5px] transition-colors
+          {active
+          ? 'border-accent font-semibold text-accent'
+          : 'border-transparent font-medium text-ink-2 hover:text-ink'}"
+      >
+        <Icon size={15} />
+        {t.label}
+        {#if t.id === 'keys' && keys.length}<Badge>{keys.length}</Badge>{/if}
+      </button>
+    {/each}
+  </div>
 
-    {#if connError === 'super_admin'}
-      <p class="mt-2 flex items-start gap-1.5 text-[13px] text-warning">
-        <AlertTriangle size={14} class="mt-0.5 shrink-0" />
-        <span>
-          Connection details are <span class="font-medium">super_admin only</span> — they include the
-          shared SFTP password. Ask a super admin for the handover, or sign in as one.
-        </span>
-      </p>
-    {:else if connError}
-      <p class="mt-2 text-[13px] text-danger">Could not load connection details: {connError}</p>
-    {:else if conn}
-      {#if !conn.host_configured}
-        {#if conn.host_source === 'detected'}
-          <p class="mb-2 text-[13px] text-ink-2">
-            <span class="font-mono">SFTP_PUBLIC_HOST</span> is not set, so we filled this in with the
-            hostname <span class="font-medium text-ink">you reached this console on</span> —
-            <span class="font-mono text-ink">{conn.host}</span>.
-            <span class="font-medium text-ink">Detected, not confirmed:</span> behind a proxy, or if the
-            SFTP port is published on a different name, it is wrong. Check it is what a partner dials, then
-            correct it or confirm it. It is baked into every snippet below.
+  <!-- ================= FILES ================= -->
+  {#if tab === 'files'}
+    {#if rejection}
+      <div class="mb-4 rounded-[14px] border border-danger/40 bg-danger-soft p-4">
+        <div class="mb-1 flex items-center gap-2">
+          <AlertTriangle size={16} class="text-danger" />
+          <span class="text-[14px] font-semibold text-ink">
+            {rejection.file || 'That file'} was refused — nothing changed
+          </span>
+          <button
+            onclick={() => (rejection = null)}
+            aria-label="Dismiss"
+            class="ml-auto rounded-lg p-1 text-ink-3 hover:bg-surface hover:text-ink"
+          >
+            <X size={15} />
+          </button>
+        </div>
+        <ul class="mt-2 space-y-1 text-[13px] text-ink-2">
+          {#each rejection.errors ?? [] as e}
+            <li class="flex items-start gap-2"><X size={14} class="mt-0.5 shrink-0 text-danger" />{e}</li>
+          {/each}
+          {#each rejection.warnings ?? [] as w}
+            <li class="flex items-start gap-2">
+              <AlertTriangle size={14} class="mt-0.5 shrink-0 text-warning" />{w}
+            </li>
+          {/each}
+        </ul>
+        <p class="mt-2 text-[12.5px] text-ink-3">
+          The loaded data was never touched — a refused file cannot replace good data.
+        </p>
+      </div>
+    {/if}
+
+    <!-- controls -->
+    <section class="mb-4 overflow-hidden rounded-[14px] border border-line bg-surface">
+      <div class="flex items-center gap-2 border-b border-line px-4 py-3">
+        <SlidersHorizontal size={16} class="text-ink-2" />
+        <span class="text-[14px] font-medium text-ink">How files are handled</span>
+        <span class="ml-auto text-[12px] text-ink-3">Applies to the next file — no restart</span>
+      </div>
+      <div class="grid sm:grid-cols-3">
+        <div class="border-b border-line px-4 py-3.5 sm:border-b-0 sm:border-r">
+          <div class="text-[12.5px] font-semibold text-ink">Check for new files</div>
+          <p class="mt-0.5 text-[11.5px] text-ink-3">How often we look in the folder.</p>
+          <select
+            value={pollInput}
+            onchange={(e) => savePoll(e.currentTarget.value)}
+            disabled={savingCfg}
+            aria-label="Check interval"
+            class="mt-2 w-full rounded-lg border border-line bg-surface-2 px-2.5 py-1.5 text-[13px] text-ink outline-none focus:border-accent"
+          >
+            <option value="5">Every 5 seconds</option>
+            <option value="15">Every 15 seconds</option>
+            <option value="60">Every minute</option>
+            <option value="300">Every 5 minutes</option>
+            <option value="3600">Every hour</option>
+          </select>
+        </div>
+
+        <div class="border-b border-line px-4 py-3.5 sm:border-b-0 sm:border-r">
+          <div class="text-[12.5px] font-semibold text-ink">Load files automatically</div>
+          <p class="mt-0.5 text-[11.5px] text-ink-3">
+            Off means files wait here until you load them.
           </p>
-        {:else}
-          <p class="mb-2 text-[13px] text-ink-2">
-            <span class="font-mono">SFTP_PUBLIC_HOST</span> is not set and this request carried no host
-            we could read. Type the host a partner would dial — it is baked into every snippet below.
+          <button
+            onclick={toggleAuto}
+            disabled={savingCfg}
+            role="switch"
+            aria-checked={autoLoad}
+            class="mt-2 inline-flex items-center gap-2.5 text-[12.5px] text-ink disabled:opacity-60"
+          >
+            <span
+              class="relative h-[22px] w-[38px] shrink-0 rounded-full transition-colors {autoLoad
+                ? 'bg-accent'
+                : 'bg-line'}"
+            >
+              <span
+                class="absolute top-[3px] h-4 w-4 rounded-full bg-surface shadow transition-all {autoLoad
+                  ? 'left-[19px]'
+                  : 'left-[3px]'}"
+              ></span>
+            </span>
+            {autoLoad ? 'On' : 'Off'}
+          </button>
+        </div>
+
+        <div class="px-4 py-3.5">
+          <div class="flex items-center gap-1.5 text-[12.5px] font-semibold text-ink">
+            What a file does <Lock size={13} class="text-ink-3" />
+          </div>
+          <p class="mt-0.5 text-[11.5px] text-ink-3">
+            A file always replaces the rows it covers. Merging left deleted products in the catalog
+            forever.
           </p>
-        {/if}
-        <div class="mb-3 flex items-center gap-2">
+          <span
+            class="mt-2 inline-flex items-center gap-2 rounded-lg border border-line bg-surface-2 px-2.5 py-1.5 text-[12.5px] text-ink-2"
+          >
+            <Lock size={13} /> Replaces all rows
+          </span>
+        </div>
+      </div>
+    </section>
+
+    <!-- file list -->
+    <section class="overflow-hidden rounded-[14px] border border-line bg-surface">
+      <div class="flex flex-wrap gap-1 border-b border-line px-3 py-2.5">
+        {#each [['all', 'All', files.length], ['wait', 'Waiting', counts.wait], ['ok', 'Loaded', counts.ok], ['bad', 'Rejected', counts.bad]] as [id, label, n] (id)}
+          <button
+            onclick={() => (filter = id)}
+            aria-selected={filter === id}
+            role="tab"
+            class="inline-flex items-center gap-1.5 rounded-[9px] border px-3 py-1.5 text-[13px] transition-colors
+              {filter === id
+              ? 'border-accent/30 bg-accent-soft font-semibold text-accent'
+              : 'border-transparent font-medium text-ink-2 hover:bg-surface-2 hover:text-ink'}"
+          >
+            {label}<span class="tnum text-[11.5px] opacity-75">{n}</span>
+          </button>
+        {/each}
+      </div>
+
+      {#if loading}
+        <div class="space-y-2 p-4">
+          {#each [1, 2, 3] as i (i)}<div class="skel h-8"></div>{/each}
+        </div>
+      {:else if !shown.length}
+        <p class="px-5 py-10 text-center text-[13px] text-ink-3">
+          {filter === 'all' ? 'No files yet — nothing has been sent.' : 'Nothing here.'}
+        </p>
+      {:else}
+        <div class="overflow-x-auto">
+          <table class="tbl">
+            <thead>
+              <tr>
+                <th>File</th>
+                <th class="hidden sm:table-cell">Contains</th>
+                <th>Status</th>
+                <th class="num hidden sm:table-cell">Rows</th>
+                <th class="num hidden sm:table-cell">Size</th>
+                <th class="num">When</th>
+              </tr>
+            </thead>
+            <tbody>
+              {#each shown as f (f.stored_as)}
+                <tr
+                  role="button"
+                  tabindex="0"
+                  aria-current={selected?.stored_as === f.stored_as}
+                  onclick={() => openFile(f)}
+                  onkeydown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      openFile(f);
+                    }
+                  }}
+                >
+                  <td>
+                    <div class="flex items-center gap-3">
+                      <span
+                        class="w-[3px] self-stretch rounded-sm {f.state === 'ok'
+                          ? 'bg-success'
+                          : f.state === 'bad'
+                            ? 'bg-danger'
+                            : 'bg-warning'}"
+                        style="min-height:30px"
+                      ></span>
+                      <span class="min-w-0">
+                        <span class="block break-all font-mono text-[12.5px] text-ink">{f.name}</span>
+                        <span class="block text-[11px] text-ink-3">{FOLDER_LABEL[f.folder]}</span>
+                      </span>
+                    </div>
+                  </td>
+                  <td class="hidden sm:table-cell">
+                    <span class="rounded-full border border-line bg-surface-2 px-2 py-0.5 text-[11.5px] text-ink-2">
+                      {KIND[f.kind] ?? 'Unknown'}
+                    </span>
+                  </td>
+                  <td>
+                    <span
+                      class="inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-0.5 text-[11.5px] font-semibold
+                        {f.state === 'ok'
+                        ? 'bg-success-soft text-success'
+                        : f.state === 'bad'
+                          ? 'bg-danger-soft text-danger'
+                          : 'bg-warning-soft text-warning'}"
+                    >
+                      <span class="h-1.5 w-1.5 rounded-full bg-current"></span>
+                      {STATE_LABEL[f.state]}
+                    </span>
+                  </td>
+                  <td class="num hidden sm:table-cell text-ink-2">
+                    {f.rows == null ? '—' : Number(f.rows).toLocaleString()}
+                  </td>
+                  <td class="num hidden sm:table-cell text-ink-2">{size(f.size)}</td>
+                  <td class="num text-ink-2">{when(f.mtime)}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+      {/if}
+    </section>
+    <p class="mt-3 text-[12px] text-ink-3">
+      Pick any row to see what happened to it, download the copy we kept, or try it again.
+    </p>
+  {/if}
+
+  <!-- ================= CONNECT ================= -->
+  {#if tab === 'connect'}
+    <section class="mb-4 rounded-[14px] border border-line bg-surface p-4">
+      <div class="mb-3 flex items-center gap-2">
+        <Server size={16} class="text-ink-2" />
+        <span class="text-[14px] font-medium text-ink">Where the partner connects</span>
+      </div>
+
+      {#if envHost}
+        <p class="mb-3 rounded-r-lg border-l-[3px] border-success bg-success-soft px-3.5 py-2.5 text-[12.5px] text-ink">
+          Set on the server. This is the address, not a guess.
+        </p>
+      {:else if usingDetected}
+        <p class="mb-3 rounded-r-lg border-l-[3px] border-warning bg-warning-soft px-3.5 py-2.5 text-[12.5px] text-ink">
+          <span class="font-semibold">Confirm this address.</span> We are guessing it from the address
+          you opened this page on. Behind a proxy, or if the file port is published on a different name,
+          this is wrong — and every command below is wrong with it.
+        </p>
+      {/if}
+      {#if isLocal}
+        <p class="mb-3 rounded-r-lg border-l-[3px] border-danger bg-danger-soft px-3.5 py-2.5 text-[12.5px] text-ink">
+          <span class="font-semibold">That is this machine.</span> A partner cannot reach
+          <span class="font-mono">{host}</span> from anywhere else — set the real hostname before
+          sending any of this out.
+        </p>
+      {/if}
+
+      <div class="flex flex-wrap items-end gap-2">
+        <label class="min-w-[220px] flex-1">
+          <span class="mb-1.5 block text-[10.5px] font-bold uppercase tracking-wider text-ink-3">Address</span>
           <input
             type="text"
             value={hostInput}
-            oninput={(e) => saveHost(e.currentTarget.value)}
+            oninput={(e) => (hostInput = e.currentTarget.value)}
+            disabled={Boolean(envHost)}
             spellcheck="false"
-            placeholder="sftp.example.com"
-            class="flex-1 rounded-lg border border-line bg-surface-2 px-3 py-2 font-mono text-[13px] text-ink outline-none focus:border-accent"
+            placeholder="sftp.yourcompany.com"
+            class="w-full rounded-lg border border-line bg-surface-2 px-3 py-2 text-[13px] text-ink outline-none focus:border-accent disabled:opacity-60"
           />
-          {#if usingDetected && !hostTouched}
-            <button
-              onclick={confirmDetected}
-              class="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-line px-2.5 py-2 text-[12px] text-ink-2 transition-colors hover:bg-surface-2"
-            >
-              <Check size={13} /> Confirm
-            </button>
-          {/if}
-        </div>
-        {#if isLocal}
-          <p class="mb-3 flex items-start gap-1.5 text-[12.5px] text-warning">
-            <AlertTriangle size={14} class="mt-0.5 shrink-0" />
-            <span>
-              <span class="font-mono">{host}</span> only resolves on this machine. A partner's server
-              cannot connect to it — use the public hostname or IP.
-            </span>
-          </p>
+        </label>
+        {#if !envHost}
+          <button
+            onclick={() => saveHost(hostInput)}
+            class="rounded-lg border border-line bg-surface px-3.5 py-2 text-[13px] font-medium text-ink hover:bg-surface-2"
+          >
+            Save
+          </button>
         {/if}
-      {/if}
-
-      <div class="grid gap-x-8 gap-y-2 text-[13px] sm:grid-cols-2">
-        <div class="flex justify-between gap-4">
-          <span class="text-ink-2">Host</span>
-          <span class="font-mono text-ink">{hostKnown ? host : 'not configured'}</span>
-        </div>
-        <div class="flex justify-between gap-4">
-          <span class="text-ink-2">Port</span><span class="tnum font-mono text-ink">{port}</span>
-        </div>
-        <div class="flex justify-between gap-4">
-          <span class="text-ink-2">User</span><span class="font-mono text-ink">{user}</span>
-        </div>
-        <div class="flex justify-between gap-4">
-          <span class="text-ink-2">Upload path</span><span class="font-mono text-ink">{path}</span>
-        </div>
       </div>
 
-      <!-- 2. Password -->
-      <div class="mt-4 border-t border-line pt-4">
-        <div class="mb-1 flex items-center gap-2">
-          <Lock size={14} class="text-ink-2" />
-          <span class="text-[13px] font-medium text-ink">Password</span>
-          <Badge tone="warn">shared account</Badge>
-        </div>
-        <p class="mb-2 text-[12.5px] text-ink-3">
-          One credential for the whole <span class="font-mono">{user}</span> account — everyone who has
-          it uploads as the same user, and rotating it means re-issuing it to every partner. Prefer key
-          auth below for anything long-lived.
-        </p>
-        <div class="flex items-center gap-2">
-          <span
-            class="flex-1 rounded-lg border border-line bg-surface-2 px-3 py-2 font-mono text-[13px] text-ink"
-            >{revealed ? conn.password : '•'.repeat(Math.max(8, conn.password.length))}</span
-          >
-          <button
-            onclick={() => (revealed = !revealed)}
-            class="inline-flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-2 text-[12px] text-ink-2 transition-colors hover:bg-surface-2"
-          >
-            {#if revealed}<EyeOff size={13} /> Hide{:else}<Eye size={13} /> Reveal{/if}
-          </button>
-          <button
-            onclick={() => copy('pw', conn.password)}
-            class="inline-flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-2 text-[12px] text-ink-2 transition-colors hover:bg-surface-2"
-          >
-            {#if copied === 'pw'}<Check size={13} /> Copied{:else}<Copy size={13} /> Copy{/if}
-          </button>
-        </div>
+      <div class="mt-4 flex flex-wrap gap-x-7 gap-y-1.5 border-t border-line pt-3 text-[12.5px]">
+        <span><span class="text-ink-3">Port</span> <span class="tnum font-mono text-ink">{port}</span></span>
+        <span><span class="text-ink-3">User</span> <span class="font-mono text-ink">{user}</span></span>
+        <span><span class="text-ink-3">Folder</span> <span class="font-mono text-ink">{path}</span></span>
       </div>
+    </section>
 
-      <p class="mt-4 border-t border-line pt-3 text-[12px] text-ink-3">
-        Auto-ingest polls every {conn.poll_seconds}s. A file is only read once its size stops changing,
-        so a slow upload is never ingested half-written.
-      </p>
-    {/if}
-  </section>
-
-  {#if conn}
-    <!-- 3. Snippets -->
-    {@render block(
-      'sftp',
-      'Interactive session',
-      sftpSnippet,
-      'One-off or manual pushes. `cd upload` first — a file dropped in the home directory is not watched.'
-    )}
-    {@render block('scp', 'One-shot push (scp)', scpSnippet, 'Single file, no session — the simplest thing that works.')}
-    {@render block(
-      'cron',
-      'Nightly push (cron)',
-      cronSnippet,
-      'Unattended export from the partner’s box. Runs at 01:15; the agent picks it up within the poll interval.'
-    )}
-    {@render block(
-      'py',
-      'Python (paramiko)',
-      pythonSnippet,
-      'Drop into an existing pipeline. Uploads to a .part name and renames — atomic, so the watcher never sees a partial file.'
-    )}
-    {@render block('winscp', 'WinSCP (Windows)', winscpSnippet, 'Paste into a new WinSCP site.')}
-
-    <!-- 4. Filename rules -->
-    <section class="mb-6 rounded-[14px] border border-line bg-surface p-4">
-      <div class="mb-1 flex items-center gap-2">
-        <FileCheck2 size={16} class="text-ink-2" />
-        <span class="text-[14px] font-medium text-ink">Filename rules</span>
+    <section class="mb-4 rounded-[14px] border border-line bg-surface p-4">
+      <div class="mb-3 flex items-center gap-2">
+        <Lock size={16} class="text-ink-2" />
+        <span class="text-[14px] font-medium text-ink">Shared password</span>
+        <button
+          onclick={() => (revealed = !revealed)}
+          class="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1 text-[12px] text-ink-2 hover:bg-surface-2"
+        >
+          {#if revealed}<EyeOff size={13} /> Hide{:else}<Eye size={13} /> Show{/if}
+        </button>
       </div>
-      <p class="mb-3 text-[13px] text-ink-2">
-        <span class="font-medium text-ink">The filename is the contract.</span> Nothing reads the file's
-        contents to work out what it is — the <em>name</em> decides, and a name that matches nothing is
-        moved to <span class="font-mono">failed/</span> without being ingested.
-      </p>
-
-      <div class="mb-3 grid gap-2 text-[13px] sm:grid-cols-2">
-        {#each conn.rules.kinds as k (k.kind)}
-          <div class="rounded-lg border border-line bg-surface-2 px-3 py-2">
-            <div class="mb-1 text-[12px] uppercase tracking-wide text-ink-3">{k.kind}</div>
-            <div class="flex flex-wrap gap-1.5">
-              {#each k.keywords as kw (kw)}
-                <span class="rounded border border-line bg-surface px-1.5 py-0.5 font-mono text-[12px] text-ink"
-                  >{kw}</span
-                >
-              {/each}
-            </div>
-          </div>
-        {/each}
+      <div class="flex flex-wrap items-center gap-2.5">
+        <code
+          class="rounded-lg border border-line bg-surface-2 px-3.5 py-2 text-[14px] tracking-wider text-ink"
+          >{revealed ? (conn?.password ?? '') : '••••••••'}</code
+        >
+        <button
+          onclick={() => copy('pw', conn?.password ?? '')}
+          class="inline-flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1.5 text-[12px] text-ink-2 hover:bg-surface-2"
+        >
+          {#if copied === 'pw'}<Check size={13} /> Copied{:else}<Copy size={13} /> Copy{/if}
+        </button>
       </div>
-      <p class="mb-3 text-[12.5px] text-ink-3">
-        The name must contain one of those words (case-insensitive) and end in
-        {#each conn.rules.extensions as ext, i (ext)}<span class="font-mono text-ink-2">{ext}</span
-          >{i < conn.rules.extensions.length - 1 ? ' or ' : ''}{/each}. Nothing else is read.
-      </p>
-
-      <div class="grid gap-4 sm:grid-cols-2">
-        <div>
-          <div class="mb-1.5 flex items-center gap-1.5 text-[13px] font-medium text-ink">
-            <Check size={14} class="text-accent" /> Good
-          </div>
-          <ul class="space-y-1">
-            {#each conn.rules.good as g (g.name)}
-              <li class="text-[12.5px]">
-                <span class="font-mono text-ink">{g.name}</span>
-                <span class="text-ink-3"> → {g.kind}</span>
-              </li>
-            {/each}
-          </ul>
-        </div>
-        <div>
-          <div class="mb-1.5 flex items-center gap-1.5 text-[13px] font-medium text-ink">
-            <AlertTriangle size={14} class="text-warning" /> Bad
-          </div>
-          <ul class="space-y-1">
-            {#each conn.rules.bad as b (b.name)}
-              <li class="text-[12.5px]">
-                <span class="font-mono text-ink">{b.name}</span>
-                <span class="text-ink-3"> → {conn.rules.unmatched_dir}</span>
-              </li>
-            {/each}
-          </ul>
-        </div>
-      </div>
-
-      <p class="mt-3 border-t border-line pt-3 text-[12.5px] text-ink-3">
-        After a run: recognised files move to <span class="font-mono">{conn.rules.archive_dir}</span>,
-        unrecognised or broken ones to <span class="font-mono">{conn.rules.unmatched_dir}</span> —
-        both listed below. A file still being written is skipped until its size stops changing.
+      <p class="mt-3 rounded-r-lg border-l-[3px] border-danger bg-danger-soft px-3.5 py-2.5 text-[12.5px] text-ink">
+        <span class="font-semibold">Everyone with this password is the same account to us.</span>
+        There is no way to tell one sender from another, and no way to cut one off without cutting
+        off all of them. Give each partner a key instead — then you revoke one line and the rest keep
+        working.
       </p>
     </section>
 
-    <!-- 5. Partner keys -->
-    <section class="mb-6 rounded-[14px] border border-line bg-surface p-4">
-      <div class="mb-1 flex items-center gap-2">
+    <section class="rounded-[14px] border border-line bg-surface p-4">
+      <div class="mb-3 flex items-center gap-2">
+        <FileText size={16} class="text-ink-2" />
+        <span class="text-[14px] font-medium text-ink">Ready-to-run commands</span>
+        <span class="ml-auto text-[12px] text-ink-3">Address filled in from above</span>
+      </div>
+      <div class="space-y-3">
+        {#each snippets as s (s.key)}
+          <div class="overflow-hidden rounded-xl border border-line">
+            <div class="flex items-center gap-2 border-b border-line bg-surface-2 px-3.5 py-2">
+              <span class="text-[12.5px] font-semibold text-ink">{s.title}</span>
+              <span class="text-[11.5px] text-ink-3">{s.note}</span>
+              <button
+                onclick={() => copy(s.key, s.body)}
+                class="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface px-2 py-0.5 text-[12px] text-ink-2 hover:bg-surface-2"
+              >
+                {#if copied === s.key}<Check size={12} /> Copied{:else}<Copy size={12} /> Copy{/if}
+              </button>
+            </div>
+            <pre class="overflow-x-auto px-3.5 py-3 text-[11.5px] leading-relaxed text-ink-2"><code
+                >{s.body}</code
+              ></pre>
+          </div>
+        {/each}
+      </div>
+    </section>
+  {/if}
+
+  <!-- ================= RULES ================= -->
+  {#if tab === 'rules'}
+    <section class="rounded-[14px] border border-line bg-surface p-4">
+      <div class="mb-2 flex items-center gap-2">
+        <FileCheck2 size={16} class="text-ink-2" />
+        <span class="text-[14px] font-medium text-ink">The name decides what a file is</span>
+      </div>
+      <p class="mb-3.5 text-[13px] text-ink-2">
+        Nothing opens a file to work out what it holds — <span class="font-medium text-ink"
+          >the name decides</span
+        >. A name that matches nothing is set aside without being read.
+      </p>
+
+      {#if conn?.rules}
+        <div class="mb-3 grid gap-2 sm:grid-cols-2">
+          {#each conn.rules.kinds as k (k.kind)}
+            <div class="rounded-lg border border-line bg-surface-2 px-3 py-2">
+              <div class="mb-1.5 text-[11px] uppercase tracking-wide text-ink-3">
+                {KIND[k.kind] ?? k.kind}
+              </div>
+              <div class="flex flex-wrap gap-1.5">
+                {#each k.keywords as kw (kw)}
+                  <span class="rounded border border-line bg-surface px-1.5 py-0.5 font-mono text-[12px] text-ink">
+                    {kw}
+                  </span>
+                {/each}
+              </div>
+            </div>
+          {/each}
+        </div>
+        <p class="mb-4 text-[12.5px] text-ink-3">
+          The name must contain one of those words — upper or lower case — and end in
+          {#each conn.rules.extensions as ext, i (ext)}<span class="font-mono text-ink-2">{ext}</span
+            >{i < conn.rules.extensions.length - 1 ? ' or ' : ''}{/each}. Nothing else is read.
+        </p>
+
+        <div class="grid gap-5 sm:grid-cols-2">
+          <div>
+            <div class="mb-2 flex items-center gap-1.5 text-[12.5px] font-semibold text-ink">
+              <Check size={14} class="text-success" /> Works
+            </div>
+            <ul class="space-y-1.5">
+              {#each conn.rules.good as g (g.name)}
+                <li class="text-[12.5px]">
+                  <span class="font-mono text-ink">{g.name}</span>
+                  <span class="text-ink-3"> → {KIND[g.kind] ?? g.kind}</span>
+                </li>
+              {/each}
+            </ul>
+          </div>
+          <div>
+            <div class="mb-2 flex items-center gap-1.5 text-[12.5px] font-semibold text-ink">
+              <AlertTriangle size={14} class="text-warning" /> Set aside
+            </div>
+            <ul class="space-y-1.5">
+              {#each conn.rules.bad as b (b.name)}
+                <li class="text-[12.5px]">
+                  <span class="font-mono text-ink">{b.name}</span>
+                  <span class="text-ink-3"> → no matching word</span>
+                </li>
+              {/each}
+            </ul>
+          </div>
+        </div>
+
+        <p class="mt-4 border-t border-line pt-3 text-[12.5px] text-ink-3">
+          Once read, a file is kept under <span class="font-medium text-ink-2">Loaded</span>; one we
+          could not use is kept under <span class="font-medium text-ink-2">Rejected</span>. A file
+          still being written is left alone until its size stops changing.
+        </p>
+      {/if}
+    </section>
+  {/if}
+
+  <!-- ================= KEYS ================= -->
+  {#if tab === 'keys'}
+    <section class="rounded-[14px] border border-line bg-surface p-4">
+      <div class="mb-2 flex items-center gap-2">
         <KeyRound size={16} class="text-ink-2" />
         <span class="text-[14px] font-medium text-ink">Partner keys</span>
-        <Badge>{keys.length} registered</Badge>
+        <span class="ml-auto text-[12px] text-ink-3">Live on their next connection — no restart</span>
       </div>
-      <p class="mb-3 text-[13px] text-ink-2">
-        Paste a partner's <span class="font-medium text-ink">public</span> key and it works on their
-        <span class="font-medium text-ink">next connection</span> — no restart: the SFTP server re-reads
-        its key list every time someone connects. In production the shared password is disabled, so
-        <span class="font-medium text-ink">the key is the access</span> — registering one grants it and
-        deleting one revokes it, immediately.
+      <p class="mb-3.5 text-[13px] text-ink-2">
+        A key replaces the shared password for one partner. Revoke a key and only that partner is cut
+        off.
       </p>
 
       {#if keysError}
-        <p class="mb-3 flex items-start gap-1.5 rounded-lg border border-line bg-surface-2 px-3 py-2 text-[12.5px] text-warning">
+        <p class="flex items-start gap-1.5 rounded-lg border border-line bg-surface-2 px-3 py-2 text-[12.5px] text-warning">
           <AlertTriangle size={14} class="mt-0.5 shrink-0" />
           <span>{keysError}</span>
         </p>
       {:else}
-        <!-- registered keys -->
         {#if keys.length}
-          <div class="mb-4 overflow-hidden rounded-xl border border-line">
+          <div class="mb-3 overflow-hidden rounded-xl border border-line">
             <table class="tbl">
               <thead>
-                <tr>
-                  <th>Label</th>
-                  <th>Fingerprint</th>
-                  <th>Added</th>
-                  <th></th>
-                </tr>
+                <tr><th>Label</th><th>Fingerprint</th><th>Added</th><th></th></tr>
               </thead>
               <tbody>
                 {#each keys as k (k.label)}
                   <tr>
-                    <td class="text-ink">{k.label}<span class="ml-2 text-[11px] text-ink-3">{k.type}</span></td>
-                    <td class="font-mono text-[11.5px] text-ink-2">{k.fingerprint}</td>
+                    <td class="text-ink"
+                      >{k.label}<span class="ml-2 text-[11px] text-ink-3">{k.type}</span></td
+                    >
+                    <td class="break-all font-mono text-[11.5px] text-ink-2">{k.fingerprint}</td>
                     <td class="text-ink-2">{addedOn(k.added_at)}</td>
                     <td class="text-right">
                       {#if confirmDelete === k.label}
                         <button
                           onclick={() => removeKey(k.label)}
                           disabled={keyBusy}
-                          class="rounded-lg border border-line px-2 py-1 text-[12px] text-danger transition-colors hover:bg-surface-2 disabled:opacity-60"
+                          class="rounded-lg border border-danger/40 px-2 py-1 text-[12px] text-danger hover:bg-danger-soft disabled:opacity-60"
                         >
                           Revoke {k.label}?
                         </button>
@@ -742,7 +1069,7 @@ ssh-keygen -lf ~/.ssh/pharma_sftp.pub`;
                         <button
                           onclick={() => (confirmDelete = k.label)}
                           aria-label={`Revoke ${k.label}`}
-                          class="rounded-lg border border-line px-2 py-1 text-ink-3 transition-colors hover:bg-surface-2 hover:text-danger"
+                          class="rounded-lg border border-line px-2 py-1 text-ink-3 hover:bg-surface-2 hover:text-danger"
                         >
                           <Trash2 size={13} />
                         </button>
@@ -753,25 +1080,19 @@ ssh-keygen -lf ~/.ssh/pharma_sftp.pub`;
               </tbody>
             </table>
           </div>
-          <p class="mb-4 text-[12px] text-ink-3">
-            Check the fingerprint against the one the partner reads you from
-            <span class="font-mono">ssh-keygen -lf</span> — that, not the key text, is what tells you
-            you registered the right key.
-          </p>
         {:else}
-          <p class="mb-4 rounded-lg border border-line bg-surface-2 px-3 py-2 text-[12.5px] text-ink-3">
-            No keys registered — every partner is on the shared password above.
+          <p class="mb-3 rounded-lg border border-line bg-surface-2 px-3 py-2 text-[12.5px] text-ink-3">
+            No keys yet — every partner is on the shared password.
           </p>
         {/if}
 
-        <!-- add a key -->
-        <div class="rounded-xl border border-line bg-surface-2 p-3">
-          <div class="mb-2 text-[13px] font-medium text-ink">Register a key</div>
+        <div class="rounded-xl border border-line bg-surface-2 p-3.5">
+          <div class="mb-2.5 text-[13px] font-semibold text-ink">Add a key</div>
           <input
             type="text"
             bind:value={keyLabel}
             spellcheck="false"
-            placeholder="label — e.g. acme-pharma (letters, digits, . - _)"
+            placeholder="who it is for — e.g. acme-pharma"
             class="mb-2 w-full rounded-lg border border-line bg-surface px-3 py-2 text-[13px] text-ink outline-none focus:border-accent"
           />
           <textarea
@@ -781,283 +1102,344 @@ ssh-keygen -lf ~/.ssh/pharma_sftp.pub`;
             placeholder="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA… partner@corp"
             class="mb-2 w-full resize-y rounded-lg border border-line bg-surface px-3 py-2 font-mono text-[12px] text-ink outline-none focus:border-accent"
           ></textarea>
-          <div class="flex items-center gap-2">
+          <button
+            onclick={addKey}
+            disabled={keyBusy || !keyLabel.trim() || !keyMaterial.trim()}
+            class="inline-flex items-center gap-1.5 rounded-lg bg-accent px-3 py-2 text-[12.5px] font-medium text-on-accent hover:bg-accent-hover disabled:opacity-60"
+          >
+            {#if keyBusy}<Loader2 size={14} class="animate-spin" />{:else}<Plus size={14} />{/if}
+            Register key
+          </button>
+          <p class="mt-2.5 text-[12px] text-ink-3">
+            <span class="font-medium text-ink-2">Check the fingerprint against what they read you</span>
+            from <span class="font-mono">ssh-keygen -lf</span>. A key pasted out of an email nobody
+            verified is a way in for whoever sent that email. Send the
+            <span class="font-mono">.pub</span> line only — never their private key.
+          </p>
+        </div>
+
+        <div class="mt-4 border-t border-line pt-3">
+          <div class="mb-2 flex items-center">
+            <span class="text-[13px] font-medium text-ink">Send this to the partner</span>
             <button
-              onclick={addKey}
-              disabled={keyBusy || !keyLabel.trim() || !keyMaterial.trim()}
-              class="inline-flex items-center gap-1.5 rounded-lg bg-accent px-3 py-2 text-[12.5px] font-medium text-on-accent transition-colors hover:bg-accent-hover disabled:opacity-60"
+              onclick={() => copy('keygen', keygenSnippet)}
+              class="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1 text-[12px] text-ink-2 hover:bg-surface-2"
             >
-              <Plus size={14} />
-              {keyBusy ? 'Saving' : 'Register key'}
+              {#if copied === 'keygen'}<Check size={13} /> Copied{:else}<Copy size={13} /> Copy{/if}
             </button>
-            <span class="text-[12px] text-ink-3">
-              The <span class="font-mono">.pub</span> line only — never their private key.
-            </span>
           </div>
-          {#if keyErr}
-            <p class="mt-2 flex items-start gap-1.5 text-[12.5px] text-danger">
-              <AlertTriangle size={14} class="mt-0.5 shrink-0" />
-              <span>{keyErr}</span>
+          <pre
+            class="overflow-x-auto rounded-[14px] border border-line bg-surface-2 p-4 text-[12.5px] leading-relaxed text-ink"><code
+              >{keygenSnippet}</code
+            ></pre>
+        </div>
+      {/if}
+    </section>
+  {/if}
+
+  <!-- ================= CLEAN UP ================= -->
+  {#if tab === 'clean'}
+    <section class="mb-4 rounded-[14px] border border-line bg-surface p-4">
+      <div class="mb-2 flex items-center gap-2">
+        <Eraser size={16} class="text-ink-2" />
+        <span class="text-[14px] font-medium text-ink">Remove products nobody sends any more</span>
+      </div>
+      <p class="mb-3.5 text-[13px] text-ink-2">
+        Every file we load stamps the products it contains. A product that has not appeared in any
+        file for a long time is probably discontinued — this removes those.
+        <span class="font-medium text-ink">The number is always shown before anything is deleted.</span>
+      </p>
+      <div class="flex flex-wrap items-end gap-2.5">
+        <label class="w-[180px]">
+          <span class="mb-1.5 block text-[10.5px] font-bold uppercase tracking-wider text-ink-3">Not seen in</span>
+          <select
+            bind:value={staleDays}
+            class="w-full rounded-lg border border-line bg-surface-2 px-2.5 py-1.5 text-[13px] text-ink outline-none focus:border-accent"
+          >
+            <option value={30}>30 days</option>
+            <option value={60}>60 days</option>
+            <option value={90}>90 days</option>
+            <option value={180}>180 days</option>
+          </select>
+        </label>
+        <button
+          onclick={previewStale}
+          disabled={previewing}
+          class="rounded-lg border border-line bg-surface px-3.5 py-2 text-[13px] font-medium text-ink hover:bg-surface-2 disabled:opacity-60"
+        >
+          {previewing ? 'Checking' : 'Show me how many'}
+        </button>
+      </div>
+
+      {#if stalePreview}
+        <div class="mt-4">
+          {#if stalePreview.count === 0}
+            <p class="rounded-r-lg border-l-[3px] border-success bg-success-soft px-3.5 py-2.5 text-[12.5px] text-ink">
+              Nothing to remove — every product has been sent within {staleDays} days.
             </p>
-          {/if}
-          {#if keyMsg}
-            <p class="mt-2 flex items-start gap-1.5 text-[12.5px] text-ink-2">
-              <Check size={14} class="mt-0.5 shrink-0 text-accent" />
-              <span>{keyMsg}</span>
+          {:else}
+            <p class="rounded-r-lg border-l-[3px] border-warning bg-warning-soft px-3.5 py-2.5 text-[12.5px] text-ink">
+              <span class="font-semibold">{stalePreview.count.toLocaleString()} products</span>
+              have not appeared in any file for {staleDays} days.
+              {#if stalePreview.legacy_count}
+                <br /><span class="text-ink-2">
+                  Of those, {stalePreview.legacy_count.toLocaleString()} have never been stamped at all
+                  — they were loaded before we started recording it, so their real age is unknown.
+                </span>
+              {/if}
             </p>
+            <div class="mt-3 flex flex-wrap items-center gap-2.5">
+              <button
+                onclick={purgeStale}
+                disabled={purging}
+                class="inline-flex items-center gap-1.5 rounded-lg bg-danger px-3.5 py-2 text-[13px] font-medium text-white hover:opacity-90 disabled:opacity-60"
+              >
+                <Trash2 size={14} />
+                {purging ? 'Removing' : `Delete ${stalePreview.count.toLocaleString()} products`}
+              </button>
+              <span class="text-[12px] text-ink-3">This cannot be undone.</span>
+            </div>
           {/if}
         </div>
       {/if}
-
-      <div class="mt-4 border-t border-line pt-3">
-        <div class="mb-2 flex items-center">
-          <span class="text-[13px] font-medium text-ink">Send this to the partner</span>
-          <button
-            onclick={() => copy('keygen', keygenSnippet)}
-            class="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1 text-[12px] text-ink-2 transition-colors hover:bg-surface-2"
-          >
-            {#if copied === 'keygen'}<Check size={13} /> Copied{:else}<Copy size={13} /> Copy{/if}
-          </button>
-        </div>
-        <pre
-          class="overflow-x-auto rounded-[14px] border border-line bg-surface-2 p-4 text-[12.5px] leading-relaxed text-ink"><code
-            >{keygenSnippet}</code
-          ></pre>
-      </div>
     </section>
 
-    <!-- 6. Ingest settings -->
-    {#if ingestCfg}
-      <section class="mb-6 rounded-[14px] border border-line bg-surface p-4">
-        <div class="mb-1 flex items-center gap-2">
-          <RefreshCw size={16} class="text-ink-2" />
-          <span class="text-[14px] font-medium text-ink">Ingest settings</span>
-        </div>
-        <p class="mb-4 text-[13px] text-ink-2">
-          Sync happens when a partner pushes a file — there is no schedule. An inventory file
-          <span class="font-medium text-ink">fully replaces</span> stock (it is a snapshot); an article
-          file <span class="font-medium text-ink">merges</span> into the catalog (or full-syncs, below).
-        </p>
-
-        <!-- poll interval -->
-        <div class="mb-4 border-t border-line pt-4">
-          <div class="mb-1 flex items-center gap-2">
-            <Clock size={14} class="text-ink-2" />
-            <span class="text-[13px] font-medium text-ink">Poll interval</span>
-          </div>
-          <p class="mb-2 text-[12.5px] text-ink-3">
-            How often the worker looks for new drops. A file is only read once its size stops changing,
-            so this is the longest a stable file waits. 5–3600 seconds.
-          </p>
-          <div class="flex items-center gap-2">
-            <input
-              type="number"
-              min="5"
-              max="3600"
-              bind:value={pollInput}
-              class="w-28 rounded-lg border border-line bg-surface-2 px-3 py-2 font-mono text-[13px] text-ink outline-none focus:border-accent"
-            />
-            <span class="text-[12.5px] text-ink-3">seconds</span>
-            <button
-              onclick={savePoll}
-              disabled={savingCfg || !pollInput}
-              class="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface px-3 py-2 text-[12.5px] font-medium text-ink transition-colors hover:bg-surface-2 disabled:opacity-60"
-            >
-              <Check size={14} />
-              {savingCfg ? 'Saving' : 'Save'}
-            </button>
-          </div>
-        </div>
-
-        <!-- catalog mode -->
-        <div class="mb-4 border-t border-line pt-4">
-          <div class="mb-1 flex items-center gap-2">
-            <FileSpreadsheet size={14} class="text-ink-2" />
-            <span class="text-[13px] font-medium text-ink">Article file mode</span>
-          </div>
-          <p class="mb-3 text-[12.5px] text-ink-3">
-            How an incoming article export changes the catalog.
-          </p>
-          <div class="grid gap-2 sm:grid-cols-2">
-            <button
-              onclick={() => setMode('merge')}
-              disabled={savingCfg}
-              class="rounded-xl border p-3 text-left transition-colors disabled:opacity-60 {ingestCfg.catalog_mode ===
-              'merge'
-                ? 'border-accent bg-accent-soft'
-                : 'border-line bg-surface-2 hover:bg-surface'}"
-            >
-              <div class="mb-0.5 flex items-center gap-1.5 text-[13px] font-medium text-ink">
-                {#if ingestCfg.catalog_mode === 'merge'}<Check size={14} class="text-accent" />{/if}
-                Merge
-              </div>
-              <div class="text-[12px] text-ink-2">
-                Add new articles and update existing ones. Nothing is ever deleted.
-              </div>
-            </button>
-            <button
-              onclick={() => setMode('full_sync')}
-              disabled={savingCfg}
-              class="rounded-xl border p-3 text-left transition-colors disabled:opacity-60 {ingestCfg.catalog_mode ===
-              'full_sync'
-                ? 'border-warning bg-surface-2'
-                : 'border-line bg-surface-2 hover:bg-surface'}"
-            >
-              <div class="mb-0.5 flex items-center gap-1.5 text-[13px] font-medium text-ink">
-                {#if ingestCfg.catalog_mode === 'full_sync'}<Check size={14} class="text-warning" />{/if}
-                Full sync <span class="text-[11px] font-normal text-ink-3">default</span>
-              </div>
-              <div class="flex items-start gap-1 text-[12px] text-ink-2">
-                <AlertTriangle size={13} class="mt-0.5 shrink-0 text-warning" />
-                <span>Deletes catalog rows not present in the latest article file.</span>
-              </div>
-            </button>
-          </div>
-        </div>
-
-        {#if cfgErr}
-          <p class="mb-2 flex items-start gap-1.5 text-[12.5px] text-danger">
-            <AlertTriangle size={14} class="mt-0.5 shrink-0" /><span>{cfgErr}</span>
-          </p>
-        {/if}
-        {#if cfgMsg}
-          <p class="mb-2 flex items-start gap-1.5 text-[12.5px] text-ink-2">
-            <Check size={14} class="mt-0.5 shrink-0 text-accent" /><span>{cfgMsg}</span>
-          </p>
-        {/if}
-
-        <!-- stale purge -->
-        <div class="border-t border-line pt-4">
-          <div class="mb-1 flex items-center gap-2">
-            <Trash2 size={14} class="text-ink-2" />
-            <span class="text-[13px] font-medium text-ink">Remove stale articles</span>
-          </div>
-          <p class="mb-2 text-[12.5px] text-ink-3">
-            Manually drop catalog rows not seen in a recent article file — the operator-triggered
-            alternative to full sync. Preview first; nothing is deleted until you confirm.
-          </p>
-          <div class="mb-2 flex items-center gap-2">
-            <span class="text-[12.5px] text-ink-2">Not seen in</span>
-            <input
-              type="number"
-              min="1"
-              bind:value={staleDays}
-              class="w-20 rounded-lg border border-line bg-surface-2 px-3 py-2 font-mono text-[13px] text-ink outline-none focus:border-accent"
-            />
-            <span class="text-[12.5px] text-ink-2">days</span>
-            <button
-              onclick={previewStale}
-              disabled={previewing || !staleDays}
-              class="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-line bg-surface px-3 py-2 text-[12.5px] font-medium text-ink transition-colors hover:bg-surface-2 disabled:opacity-60"
-            >
-              <Eye size={14} />
-              {previewing ? 'Checking' : 'Preview'}
-            </button>
-          </div>
-
-          {#if stalePreview}
-            <div class="rounded-xl border border-line bg-surface-2 p-3">
-              <p class="text-[13px] text-ink">
-                <span class="font-medium">{stalePreview.count.toLocaleString()}</span>
-                {stalePreview.count === 1 ? 'row would be removed' : 'rows would be removed'}
-                {#if stalePreview.legacy_count > 0}
-                  <span class="text-ink-2">
-                    (includes {stalePreview.legacy_count.toLocaleString()} never-updated legacy
-                    {stalePreview.legacy_count === 1 ? 'row' : 'rows'} — rows with no last-seen date yet)
-                  </span>
-                {/if}
-              </p>
-              {#if stalePreview.count > 0}
-                <div class="mt-3 flex items-center gap-2">
-                  {#if purgeConfirm}
-                    <button
-                      onclick={purgeStale}
-                      disabled={purging}
-                      class="inline-flex items-center gap-1.5 rounded-lg border border-line px-3 py-2 text-[12.5px] font-medium text-danger transition-colors hover:bg-surface disabled:opacity-60"
-                    >
-                      <Trash2 size={14} />
-                      {purging ? 'Removing' : `Remove ${stalePreview.count.toLocaleString()} rows`}
-                    </button>
-                    <button
-                      onclick={() => (purgeConfirm = false)}
-                      class="rounded-lg px-2 py-2 text-[12.5px] text-ink-3 hover:text-ink"
-                    >
-                      Cancel
-                    </button>
-                  {:else}
-                    <button
-                      onclick={() => (purgeConfirm = true)}
-                      class="inline-flex items-center gap-1.5 rounded-lg border border-line px-3 py-2 text-[12.5px] font-medium text-ink transition-colors hover:bg-surface"
-                    >
-                      <Trash2 size={14} /> Remove…
-                    </button>
-                  {/if}
-                </div>
-              {/if}
-            </div>
-          {/if}
-
-          {#if purgeErr}
-            <p class="mt-2 flex items-start gap-1.5 text-[12.5px] text-danger">
-              <AlertTriangle size={14} class="mt-0.5 shrink-0" /><span>{purgeErr}</span>
-            </p>
-          {/if}
-          {#if purgeMsg}
-            <p class="mt-2 flex items-start gap-1.5 text-[12.5px] text-ink-2">
-              <Check size={14} class="mt-0.5 shrink-0 text-accent" /><span>{purgeMsg}</span>
-            </p>
-          {/if}
-        </div>
-      </section>
-    {/if}
+    <section class="rounded-[14px] border border-line bg-surface p-4">
+      <div class="mb-2 flex items-center gap-2">
+        <Play size={16} class="text-ink-2" />
+        <span class="text-[14px] font-medium text-ink">Load everything waiting, now</span>
+      </div>
+      <p class="mb-3 text-[13px] text-ink-2">
+        Reads every file sitting in the folder right now, without waiting for the next check. Use
+        this after dropping files by hand, or when automatic loading is off.
+      </p>
+      <button
+        onclick={ingestNow}
+        disabled={ingesting}
+        class="inline-flex items-center gap-2 rounded-lg bg-accent px-3.5 py-2 text-[13px] font-medium text-on-accent hover:bg-accent-hover disabled:opacity-60"
+      >
+        <RefreshCw size={15} class={ingesting ? 'animate-spin' : ''} />
+        {ingesting ? 'Reading' : 'Load everything waiting'}
+      </button>
+    </section>
   {/if}
-
-  <!-- file lists -->
-  <div class="mb-2 mt-2 flex items-center gap-2 text-[14px] font-medium text-ink">
-    <FolderOpen size={16} /> Files
-    {#if status.incoming_dir}
-      <span class="font-mono text-[12px] font-normal text-ink-3">on the server at {status.incoming_dir}/</span>
-    {/if}
-  </div>
-  <p class="mb-4 text-[13px] text-ink-2">
-    A pushed file lands in <span class="font-mono text-ink">upload/</span> (Pending), and within
-    {status.poll_seconds ?? 15}s the worker moves it to <span class="font-mono text-ink">upload/archive/</span>
-    when it loads or <span class="font-mono text-ink">upload/failed/</span> when the name or contents are wrong.
-  </p>
-
-  {#each [ ['Pending', status.pending, Clock, 'upload/', 'just arrived — not yet ingested'], ['Archived', status.archived, Check, 'upload/archive/', 'ingested and filed away'], ['Failed', status.failed, AlertTriangle, 'upload/failed/', 'rejected — bad filename or parse error'] ] as [title, rows, Icon, folder, hint]}
-    <section class="mb-6">
-      <div class="mb-2 flex items-center gap-2 text-[14px] font-medium text-ink">
-        <Icon size={15} /> {title}
-        <span class="font-mono text-[12px] font-normal text-ink-3">{folder}</span>
-        <Badge>{rows.length}</Badge>
-      </div>
-      <div class="overflow-hidden rounded-xl border border-line bg-surface">
-        {#if rows.length === 0}
-          <p class="px-5 py-4 text-[13px] text-ink-3">No files here — {hint}.</p>
-        {:else}
-          <div class="max-h-[240px] overflow-y-auto">
-          <table class="tbl">
-            <thead>
-              <tr>
-                <th>File</th>
-                <th class="num">Size</th>
-                <th class="num">Modified</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each rows as f (f.name)}
-                <tr>
-                  <td class="text-ink"><FileSpreadsheet size={14} class="mr-1.5 inline align-text-bottom text-ink-3" />{f.name}</td>
-                  <td class="num text-ink-2">{size(f.size)}</td>
-                  <td class="num text-ink-2">{when(f.mtime)}</td>
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-          </div>
-        {/if}
-      </div>
-    </section>
-  {/each}
 {/if}
+
+<!-- ================= DRAWER ================= -->
+{#if selected}
+  <button
+    class="fixed inset-0 z-40 cursor-default bg-black/35"
+    aria-label="Close details"
+    onclick={() => (selected = null)}
+  ></button>
+  <aside
+    class="fixed bottom-0 right-0 top-0 z-50 flex w-full max-w-[470px] flex-col border-l border-line bg-surface shadow-2xl"
+    role="dialog"
+    aria-modal="true"
+    aria-label={selected.name}
+  >
+    <div class="flex items-start gap-3 border-b border-line px-5 py-4">
+      <div class="min-w-0 flex-1">
+        <p class="text-[10.5px] font-bold uppercase tracking-wider text-ink-3">
+          {KIND[selected.kind] ?? 'Unknown'}
+        </p>
+        <h2 class="mt-1 break-all font-mono text-[13px] font-semibold leading-snug text-ink">
+          {selected.name}
+        </h2>
+      </div>
+      <button
+        onclick={() => (selected = null)}
+        aria-label="Close"
+        class="rounded-lg p-1.5 text-ink-3 hover:bg-surface-2 hover:text-ink"
+      >
+        <X size={17} />
+      </button>
+    </div>
+
+    <div class="flex-1 overflow-y-auto px-5 py-4">
+      {#if selected.detail}
+        <p
+          class="rounded-r-lg border-l-[3px] px-3.5 py-2.5 text-[12.5px] leading-relaxed text-ink
+            {selected.state === 'ok'
+            ? 'border-success bg-success-soft'
+            : selected.state === 'bad'
+              ? 'border-danger bg-danger-soft'
+              : 'border-warning bg-warning-soft'}"
+        >
+          {selected.detail}
+        </p>
+      {/if}
+
+      <!--
+        The shrink override lives HERE, on the file it applies to, next to the
+        number it would delete — not in the settings card. A file is refused
+        because of what IT contains, so the decision to take it anyway belongs
+        to that file and expires with it.
+      -->
+      {#if selected.state === 'bad'}
+        <div class="mt-3.5 rounded-xl border border-warning/40 p-3.5">
+          <button
+            onclick={() => (allowShrink = !allowShrink)}
+            role="switch"
+            aria-checked={allowShrink}
+            class="inline-flex items-center gap-2.5 text-[12.5px] font-semibold text-ink"
+          >
+            <span
+              class="relative h-[22px] w-[38px] shrink-0 rounded-full transition-colors {allowShrink
+                ? 'bg-warning'
+                : 'bg-line'}"
+            >
+              <span
+                class="absolute top-[3px] h-4 w-4 rounded-full bg-surface shadow transition-all {allowShrink
+                  ? 'left-[19px]'
+                  : 'left-[3px]'}"
+              ></span>
+            </span>
+            Load it anyway
+          </button>
+          <p class="mt-2 text-[12px] leading-relaxed text-ink-3">
+            Skips the guard that refuses a file which would delete more than half the rows. Only do
+            this if you know the partner really did discontinue them.
+            <span class="font-medium text-ink-2">Applies to this file only.</span>
+          </p>
+        </div>
+      {/if}
+
+      <dl class="mt-4 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-[12.5px]">
+        <dt class="text-ink-3">Arrived</dt>
+        <dd class="tnum m-0 font-mono text-ink">{when(selected.mtime)}</dd>
+        <dt class="text-ink-3">Size</dt>
+        <dd class="tnum m-0 font-mono text-ink">{size(selected.size)}</dd>
+        <dt class="text-ink-3">Rows loaded</dt>
+        <dd class="tnum m-0 font-mono text-ink">
+          {selected.rows == null ? 'none' : Number(selected.rows).toLocaleString()}
+        </dd>
+        <dt class="text-ink-3">Kept as</dt>
+        <dd class="m-0 break-all font-mono text-ink">{selected.stored_as}</dd>
+      </dl>
+
+      <p class="mt-5 text-[10.5px] font-bold uppercase tracking-wider text-ink-3">What happened</p>
+      {#if eventsLoading}
+        <div class="mt-3 space-y-2">
+          {#each [1, 2, 3] as i (i)}<div class="skel h-8"></div>{/each}
+        </div>
+      {:else if !events.length}
+        <p class="mt-2.5 text-[12.5px] leading-relaxed text-ink-3">
+          No history for this file. It arrived before we started keeping one, or the recorder was
+          unavailable at the time — the file itself is unaffected.
+        </p>
+      {:else}
+        <ol class="mt-3 list-none p-0">
+          {#each events as e, i (e.id)}
+            <li class="relative pb-4 pl-6">
+              <span
+                class="absolute left-[3px] top-1 h-2.5 w-2.5 rounded-full border-2 {e.status === 'ok'
+                  ? 'border-success bg-success'
+                  : e.status === 'bad'
+                    ? 'border-danger bg-danger'
+                    : 'border-warning bg-warning'}"
+              ></span>
+              {#if i < events.length - 1}
+                <span class="absolute bottom-0 left-[7px] top-4 w-px bg-line"></span>
+              {/if}
+              <div class="text-[13px] font-medium text-ink">{STEP_TITLE[e.step] ?? e.step}</div>
+              <div class="tnum mt-0.5 text-[11px] text-ink-3">
+                {new Date(e.at).toLocaleTimeString()}
+              </div>
+              {#if e.detail}
+                <div class="mt-1 text-[12px] leading-relaxed text-ink-2">{e.detail}</div>
+              {/if}
+            </li>
+          {/each}
+        </ol>
+      {/if}
+    </div>
+
+    <div class="flex flex-wrap gap-2 border-t border-line px-5 py-3.5">
+      {#if selected.state === 'wait'}
+        <button
+          disabled
+          class="inline-flex items-center gap-1.5 rounded-lg border border-line px-3.5 py-2 text-[13px] text-ink opacity-45"
+        >
+          <Download size={14} /> Not ready yet
+        </button>
+      {:else}
+        <button
+          onclick={() => download(selected)}
+          disabled={busyFile === selected.name}
+          class="inline-flex items-center gap-1.5 rounded-lg bg-accent px-3.5 py-2 text-[13px] font-medium text-on-accent hover:bg-accent-hover disabled:opacity-60"
+        >
+          <Download size={14} /> Download
+        </button>
+        <button
+          onclick={() => retry(selected)}
+          disabled={busyFile === selected.name}
+          class="inline-flex items-center gap-1.5 rounded-lg border border-line px-3.5 py-2 text-[13px] font-medium text-ink hover:bg-surface-2 disabled:opacity-60"
+        >
+          {#if busyFile === selected.name}
+            <Loader2 size={14} class="animate-spin" />
+          {:else}
+            <RotateCcw size={14} />
+          {/if}
+          {selected.state === 'bad' ? 'Try again' : 'Load again'}
+        </button>
+        {#if confirmDeleteFile === selected.stored_as}
+          <button
+            onclick={() => removeFile(selected)}
+            disabled={busyFile === selected.name}
+            class="inline-flex items-center gap-1.5 rounded-lg bg-danger px-3.5 py-2 text-[13px] font-medium text-white hover:opacity-90 disabled:opacity-60"
+          >
+            <Trash2 size={14} /> Delete the file?
+          </button>
+          <button
+            onclick={() => (confirmDeleteFile = '')}
+            class="rounded-lg px-2.5 py-2 text-[13px] text-ink-3 hover:text-ink"
+          >
+            Cancel
+          </button>
+        {:else}
+          <button
+            onclick={() => (confirmDeleteFile = selected.stored_as)}
+            class="inline-flex items-center gap-1.5 rounded-lg border border-danger/35 px-3.5 py-2 text-[13px] font-medium text-danger hover:bg-danger-soft"
+          >
+            <Trash2 size={14} /> Delete
+          </button>
+        {/if}
+      {/if}
+    </div>
+  </aside>
+{/if}
+
+<!-- ================= TOASTS ================= -->
+{#if toasts.length}
+  <div class="fixed bottom-5 right-5 z-[60] flex flex-col gap-2">
+    {#each toasts as t (t.id)}
+      <div
+        role="status"
+        class="max-w-[340px] rounded-xl border border-line border-l-[3px] bg-surface px-4 py-3 text-[12.5px] text-ink shadow-lg
+          {t.bad ? 'border-l-danger' : 'border-l-success'}"
+      >
+        {t.message}
+      </div>
+    {/each}
+  </div>
+{/if}
+
+<script module>
+  // Step keys come from app/ingest_events.py. The backend supplies the sentence
+  // (`detail`); this is only the heading above it, so a step the frontend has
+  // not heard of still renders — it just shows its raw key.
+  export const STEP_TITLE = {
+    arrived: 'Arrived over SFTP',
+    waiting: 'Waiting for the upload to finish',
+    detected: 'Read the name',
+    unrecognised: 'Could not tell what this is',
+    checked: 'Checked',
+    rejected: 'Rejected',
+    loaded: 'Replaced the data',
+    indexed: 'Rebuilt search',
+    cache_cleared: 'Cleared saved answers',
+    stored: 'Copy kept',
+    set_aside: 'Kept for you to look at'
+  };
+</script>
