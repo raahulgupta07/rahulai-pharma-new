@@ -158,12 +158,27 @@
   // Inline spans. `t` is ALREADY escaped.
   function inline(t) {
     return t
-      // Inline code. The content may contain no `*` and no whitespace: 53% of
-      // this catalog's names use a backtick as an apostrophe (PARACAP
-      // PARACETAMOL 10`S), and a permissive [^`]+ pairs that stray backtick
-      // with the one opening a code span later on the line, eating the bold
-      // marker between them. Excluding `*`/space makes that span unmatchable.
-      .replace(/`([^`\s*]+)`/g, '<code>$1</code>')
+      // Inline code. Two restrictions, both forced by real product names.
+      //
+      // (a) The content may contain no `*` and no whitespace: 53% of this
+      // catalog's names use a backtick as an apostrophe (PARACAP PARACETAMOL
+      // 10`S), and a permissive [^`]+ pairs that stray backtick with the one
+      // opening a code span later on the line, eating the bold marker between
+      // them. Excluding `*`/space makes that span unmatchable.
+      //
+      // (b) The opening backtick may not follow a letter or digit. (a) alone is
+      // not enough — checked against all 2,790 backticked names in the live
+      // catalog, exactly one still pairs its own two apostrophes with nothing
+      // but printable characters between them:
+      //     REAL SLIM SHAKE 20`S(VANILLA/S`BERRY/CHOCO)
+      //   -> REAL SLIM SHAKE 20<code>S(VANILLA/S</code>BERRY/CHOCO)
+      // An apostrophe backtick always follows the word it belongs to (20`S,
+      // WOODS`), while a genuine span opens at a line start or after space,
+      // `(` or `:`. Anchoring on that costs nothing: every code span the model
+      // actually emits — an article code in parens, a tool name mid-sentence, a
+      // table cell — still matches. Falling back to a literal backtick is the
+      // safe failure; corrupting a product name is not.
+      .replace(/(^|[^0-9A-Za-z])`([^`\s*]+)`/g, '$1<code>$2</code>')
       .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
       .replace(/(^|[^*])\*([^*]+)\*/g, '$1<em>$2</em>')
       // Links. The URL group is anchored to a literal http(s):// scheme, so a
