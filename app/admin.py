@@ -183,7 +183,12 @@ async def catalog(
     if category:
         params.append(category)
         conds.append(f"category ILIKE '%'||${len(params)}||'%'")
-    where = "WHERE " + " AND ".join(conds)
+    # Guarded, like every sibling listing: with no search and no category
+    # `conds` is empty, and an unguarded "WHERE " emits `FROM catalog WHERE
+    # ORDER BY` — a syntax error, i.e. a 500 on the Data page's default view.
+    # It was safe until the stub filter above was removed, because that
+    # condition was always present.
+    where = ("WHERE " + " AND ".join(conds)) if conds else ""
     params.append(limit)
     params.append(offset)
     return await q(
@@ -266,16 +271,36 @@ async def catalog_one(
 
 @router.get("/inventory")
 async def inventory(
-    site: str = "", search: str = "", status: str = "", limit: int = 100, offset: int = 0
+    site: str = "",
+    search: str = "",
+    status: str = "",
+    limit: int = 100,
+    offset: int = 0,
+    scope: Optional[str] = Depends(caller_store_scope),
 ) -> List[Dict]:
     """Inventory rows, optionally filtered by site, article code and/or stock status.
 
     `status` is one of: in (>=20), low (1–19), out (0).
+
+    Scoped exactly like ``catalog_one``: this endpoint had NO scope dependency at
+    all, so a branch-pinned admin listing inventory read every sibling branch's
+    stock and price row by row — the leak `catalog_one` was fixed for, reachable
+    from the Data page's default view rather than a per-article drawer.
+
+    The two site predicates below do different jobs and only one of them is a
+    scope. ``site`` is the operator's own search box, so a substring ILIKE is
+    right there (same reasoning as the unscoped branch of ``tools.list_sites``).
+    ``scope`` is an enforced boundary, so it goes through ``_site_clause`` — and
+    it is ANDed, never substituted, so a pinned caller who types a sibling's code
+    into the filter narrows to nothing instead of crossing the boundary.
     """
 
     limit = min(max(limit, 1), 500)
     offset = max(offset, 0)
     conds, params = [], []
+    if scope:
+        params.append(scope)
+        conds.append(_site_clause("i.site_code", f"${len(params)}"))
     if site:
         params.append(site)
         conds.append(f"i.site_code ILIKE '%'||${len(params)}||'%'")
@@ -310,16 +335,36 @@ async def inventory(
 
 
 @router.get("/stores")
-async def stores() -> List[Dict]:
-    """Per-site summary from the materialized view (fast). Falls back to live."""
+async def stores(scope: Optional[str] = Depends(caller_store_scope)) -> List[Dict]:
+    """Per-site summary from the materialized view (fast). Falls back to live.
 
+    Scoped for the same reason as ``inventory`` above: unscoped, this listed
+    every branch's SKU count, unit count and stock VALUE to a branch-pinned
+    admin. It is an aggregate rather than per-row stock, but a competitor
+    branch's inventory value is exactly the kind of thing the store pin exists to
+    withhold.
+
+    Both the view and the live fallback are filtered, or the leak would reappear
+    the moment ``mv_store_summary`` is missing — the branch nobody tests.
+    """
+
+    scope_sql = (" WHERE " + _site_clause("site_code", "$1")) if scope else ""
+    args = [scope] if scope else []
     try:
-        rows = await q("SELECT site_code, skus, units, value FROM mv_store_summary ORDER BY value DESC")
+        rows = await q(
+            "SELECT site_code, skus, units, value FROM mv_store_summary"
+            + scope_sql
+            + " ORDER BY value DESC",
+            *args,
+        )
     except Exception:  # view missing -> live aggregate
         rows = await q(
             """SELECT site_code, COUNT(*) AS skus, SUM(stock_qty) AS units,
                       ROUND(SUM(price * stock_qty)) AS value
-                 FROM inventory GROUP BY site_code ORDER BY value DESC"""
+                 FROM inventory"""
+            + scope_sql
+            + " GROUP BY site_code ORDER BY value DESC",
+            *args,
         )
     for r in rows:
         r["units"] = int(r["units"] or 0)
@@ -927,6 +972,34 @@ async def cors_origins_remove(origin: str) -> Dict:
 
 class AnswerStyleUpdate(BaseModel):
     style: str
+
+
+@router.get("/releases")
+async def releases() -> Dict:
+    """Full release history + the running build, for the console's Version page.
+
+    Admin-only (the router already requires a bearer token) while `/version`
+    is public: a version string tells an attacker nothing, but the changelog
+    names which fixes are absent from an older deployment.
+
+    Read from CHANGELOG.md on every call rather than cached — the file is a few
+    KB, it changes only on deploy, and a stale release note is exactly the thing
+    this page exists to prevent.
+    """
+
+    from app import release_notes
+    from app.version import version_info
+
+    entries = release_notes.load()
+    return {
+        "current": version_info(),
+        "releases": entries,
+        # So the UI can flag the case where the running build is not the one the
+        # notes describe — a rebuild that skipped the changelog, or a changelog
+        # edited without a rebuild. Both have to be visible or the page lies.
+        "notes_match_build": bool(entries) and entries[0]["version"] == version_info()["version"],
+        "known_sections": list(release_notes.KNOWN_SECTIONS),
+    }
 
 
 @router.get("/answer-style", dependencies=[Depends(require_super_admin)])

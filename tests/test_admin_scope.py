@@ -79,6 +79,40 @@ def _ensure_schema():
     )
 
 
+# ---- decoy branches --------------------------------------------------------
+
+# Synthetic site codes that CONTAIN a scope token but are a different branch:
+# `200059-CCZZ` contains `20005`, `20099-CCYKX` contains `CCYK`. Anchored
+# matching (`tools._site_clause`) excludes them; a substring `ILIKE '%x%'`
+# returns them. They belong to no real branch, so deleting by site_code alone is
+# always safe.
+DECOY_SITES = ("200059-CCZZ", "20099-CCYKX")
+
+
+def _purge_decoys():
+    """Drop every decoy row, whatever article it was hung off.
+
+    Cleanup used to live only in a `finally`, which a killed run never reaches —
+    and a stranded decoy makes the NEXT run fail somewhere else entirely, where
+    it reads as a live scope leak. (Observed: this cost a reviewer a real
+    investigation. A stray `TESTOL` catalog row from a killed fixture was still
+    in the dev DB when it was written.) Seeding now purges first, so a run
+    inherits a clean slate instead of trusting the previous run to have exited
+    politely.
+    """
+
+    _pg("DELETE FROM inventory WHERE site_code = ANY($1::text[])", list(DECOY_SITES))
+
+
+def _seed_decoy(article_code: str, site: str, stock: int = 999):
+    _purge_decoys()
+    _pg(
+        """INSERT INTO inventory (article_code, site_code, stock_qty, price)
+           VALUES ($1,$2,$3,100)""",
+        article_code, site, stock,
+    )
+
+
 # ---- fixtures --------------------------------------------------------------
 
 
@@ -269,6 +303,159 @@ def test_catalog_one_scope_accepts_prefix_and_suffix_site_tokens(
         assert sites == [seeded_article["mine"]]
     finally:
         a.drop()
+
+
+@pytest.mark.parametrize(
+    "token_form, decoy",
+    [("20005", "200059-CCZZ"), ("CCYK", "20099-CCYKX")],
+)
+def test_catalog_one_scope_does_not_substring_match_a_sibling(
+    api_client, seeded_article, token_form, decoy
+):
+    """The scope must match ANCHORED, not as a substring.
+
+    The three branches the fixture seeds are all substring-DISJOINT from the
+    scope tokens, so they cannot tell a correct matcher from a wrong one:
+    swapping `_site_clause` for the documented-bad `site_code ILIKE '%'||$2||'%'`
+    leaves every other test in this file green (verified by doing it). That is
+    the exact leak CLAUDE.md records shipping — a prefix-shaped `store_id`
+    substring-matching a sibling, one store reading another's stock.
+
+    So seed a decoy whose code CONTAINS the token but is a different branch:
+    `200059-CCZZ` contains `20005`, `20099-CCYKX` contains `CCYK`. Anchored
+    matching (full code / numeric prefix / alpha suffix) excludes both; a
+    substring match returns them.
+    """
+
+    _seed_decoy(seeded_article["code"], decoy)
+    a = _Admin(store_id=token_form)
+    try:
+        r = api_client.get(f"/admin/catalog/{seeded_article['code']}", headers=a.headers)
+        assert r.status_code == 200
+        body = r.json()
+        assert [s["site_code"] for s in body["sites"]] == [seeded_article["mine"]]
+        assert body["total_stock"] == 10        # never 1009 — the decoy's stock
+    finally:
+        a.drop()
+        _purge_decoys()
+
+
+# ---- 4b. the same scope, on the OTHER endpoints that read inventory --------
+
+
+def test_inventory_listing_scopes_a_pinned_admin(api_client, seeded_article):
+    """`GET /admin/inventory` had NO scope dependency at all.
+
+    Same leak as `catalog_one`, but reachable from the Data page's default view
+    rather than a per-article drawer: a branch-pinned admin listing inventory got
+    every sibling branch's stock and price, row by row.
+    """
+
+    a = _Admin(store_id=seeded_article["mine"])
+    try:
+        rows = api_client.get(
+            "/admin/inventory",
+            params={"search": seeded_article["code"], "limit": 500},
+            headers=a.headers,
+        ).json()
+        assert [r["site_code"] for r in rows] == [seeded_article["mine"]]
+        assert seeded_article["sibling"] not in {r["site_code"] for r in rows}
+    finally:
+        a.drop()
+
+
+def test_inventory_site_filter_cannot_widen_past_the_scope(api_client, seeded_article):
+    """The `site` filter is the operator's search box; the scope is a boundary.
+
+    They are ANDed, never substituted — so a pinned caller who types a sibling's
+    code into the filter gets NOTHING, not the sibling. If the filter replaced
+    the scope, the leak would be a query parameter away.
+    """
+
+    a = _Admin(store_id=seeded_article["mine"])
+    try:
+        rows = api_client.get(
+            "/admin/inventory",
+            params={"site": seeded_article["sibling"], "search": seeded_article["code"]},
+            headers=a.headers,
+        ).json()
+        assert rows == []
+    finally:
+        a.drop()
+
+
+@pytest.mark.parametrize("token_form, decoy", [("20005", "200059-CCZZ"), ("CCYK", "20099-CCYKX")])
+def test_inventory_scope_does_not_substring_match_a_sibling(
+    api_client, seeded_article, token_form, decoy
+):
+    """Anchored, not substring — the decoy technique, applied to this endpoint."""
+
+    _seed_decoy(seeded_article["code"], decoy)
+    a = _Admin(store_id=token_form)
+    try:
+        rows = api_client.get(
+            "/admin/inventory",
+            params={"search": seeded_article["code"], "limit": 500},
+            headers=a.headers,
+        ).json()
+        assert [r["site_code"] for r in rows] == [seeded_article["mine"]]
+    finally:
+        a.drop()
+        _purge_decoys()
+
+
+def test_inventory_unscoped_admin_keeps_the_full_view(api_client, seeded_article, admin):
+    rows = api_client.get(
+        "/admin/inventory",
+        params={"search": seeded_article["code"], "limit": 500},
+        headers=admin.headers,
+    ).json()
+    assert len({r["site_code"] for r in rows}) == 3
+
+
+def test_stores_summary_scopes_a_pinned_admin(api_client, seeded_article):
+    """`GET /admin/stores` listed every branch's SKU count, units and stock VALUE.
+
+    An aggregate rather than per-row stock, but a sibling branch's inventory
+    value is exactly what the store pin exists to withhold.
+    """
+
+    a = _Admin(store_id=seeded_article["mine"])
+    try:
+        rows = api_client.get("/admin/stores", headers=a.headers).json()
+        assert [r["site_code"] for r in rows] == [seeded_article["mine"]]
+    finally:
+        a.drop()
+
+
+@pytest.mark.parametrize("partial_token", ["2000", "CC"])
+def test_stores_summary_scope_is_anchored(api_client, partial_token):
+    """A PARTIAL token must match no branch — not every branch.
+
+    No seeding here on purpose. `/admin/stores` reads `mv_store_summary`, and a
+    row inserted into `inventory` is not in the view until it is refreshed, so a
+    seeded decoy would be invisible to BOTH a correct and a substring matcher —
+    a test that cannot fail. The real 53 site codes supply a better decoy for
+    free: every one of them starts `2000` and every one contains `CC`, while
+    NONE has `2000` or `CC` as its numeric prefix or alpha suffix.
+
+    So anchored matching returns zero branches and `ILIKE '%2000%'` returns all
+    53 — this is verbatim the trap `_site_clause`'s docstring records ("a token
+    like `200` matched every site"). Zero is also the right direction to fail: a
+    pin to a branch that does not exist shows nothing.
+    """
+
+    a = _Admin(store_id=partial_token)
+    try:
+        rows = api_client.get("/admin/stores", headers=a.headers).json()
+        assert rows == []
+    finally:
+        a.drop()
+
+
+def test_stores_summary_unscoped_admin_keeps_every_branch(api_client, admin):
+    rows = api_client.get("/admin/stores", headers=admin.headers).json()
+    assert len(rows) > 1
 
 
 def test_catalog_one_unscoped_admin_keeps_the_full_view(api_client, seeded_article, admin):
