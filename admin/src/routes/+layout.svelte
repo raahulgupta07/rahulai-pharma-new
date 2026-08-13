@@ -37,7 +37,8 @@
     Sparkles,
     Lock,
     Building,
-    BookOpen
+    BookOpen,
+    Tag
   } from '@lucide/svelte';
   import ToastHost from '$lib/aurora/ToastHost.svelte';
 
@@ -200,6 +201,19 @@
     location.reload();
   }
 
+  // ---- build stamp ----
+  // /version is PUBLIC, so this needs no token and works on the login screen
+  // too — which is where you want it when someone cannot get in and you are
+  // trying to establish what they are running. Failure is silent: a missing
+  // version stamp must never be able to break the console shell.
+  let build = $state(null);
+  if (browser) {
+    fetch(API + '/version')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => (build = d))
+      .catch(() => {});
+  }
+
   // ---- dark mode ----
   let dark = $state(false);
   if (browser) {
@@ -254,7 +268,8 @@
         { href: '/auth', label: 'Authentication', icon: KeyRound },
         { href: '/agent', label: 'Agent', icon: Bot },
         { href: '/embed', label: 'Embed widget', icon: Code2 },
-        { href: '/docs', label: 'Integration guide', icon: BookOpen }
+        { href: '/docs', label: 'Integration guide', icon: BookOpen },
+        { href: '/version', label: 'Version', icon: Tag }
       ]
     }
   ];
@@ -685,6 +700,29 @@
             </a>
           {/each}
         {/each}
+
+        <!--
+          Build stamp, always visible. The point is that nobody has to go
+          looking: when a pharmacist reports "it did X", the version is already
+          on their screen. A dev build says so plainly rather than showing a
+          release number it does not have.
+        -->
+        {#if build}
+          <a
+            href={base + '/version'}
+            class="mt-4 block rounded-[9px] px-2.5 py-2 text-[11px] text-ink-3 transition-colors hover:bg-surface-2 hover:text-ink-2"
+          >
+            <span class="font-semibold">v{build.version}</span>
+            {#if build.is_release_build}
+              <span class="ml-1 font-mono">{build.git_sha_short}</span>
+            {:else}
+              <span
+                class="ml-1 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
+                >dev build</span
+              >
+            {/if}
+          </a>
+        {/if}
       </aside>
 
       {#if fullBleed}

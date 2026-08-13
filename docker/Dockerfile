@@ -19,8 +19,23 @@ RUN pip install --no-cache-dir --upgrade pip \
 
 COPY app/ ./app/
 COPY data/ ./data/
+# The release notes are read at runtime by app/release_notes.py, which looks
+# one directory ABOVE app/ — so this must land at /app/CHANGELOG.md. Without it
+# the Version page renders empty in the container and only in the container,
+# which is the kind of difference nobody notices until a customer asks.
+COPY CHANGELOG.md ./CHANGELOG.md
 # admin static build → /app/admin_build (api._mount_admin serves it at /admin)
 COPY --from=admin /admin/build ./admin_build
+
+# Build stamp. Passed by the deploy command, e.g.
+#   docker compose build --build-arg GIT_SHA=$(git rev-parse HEAD) \
+#                        --build-arg BUILT_AT=$(date -u +%FT%TZ) api
+# Unset, the app reports "dev" and the console badges it as an unreleased
+# build — deliberately, because a wrong build stamp is worse than none.
+ARG GIT_SHA=dev
+ARG BUILT_AT=""
+ENV GIT_SHA=$GIT_SHA
+ENV BUILT_AT=$BUILT_AT
 
 EXPOSE 8000
 
