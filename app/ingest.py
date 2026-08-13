@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -126,22 +127,31 @@ def parse_catalog(path: str, report: Optional[Dict] = None) -> List[Dict]:
     matched = sorted(c for c in _CATALOG_MAP if c in df.columns)
     df = df.rename(columns=_CATALOG_MAP)
 
-    rows: List[Dict] = []
-    seen = set()
-    brand_fallbacks = 0
+    # Same last-wins rule as parse_inventory, for the same reason: a repeated
+    # article_code means the export disagrees with itself, and the later row is
+    # the more recent record. First-wins was silent here too.
+    by_code: "OrderedDict[str, Dict]" = OrderedDict()
+    fallback_codes: set = set()
+    duplicates = 0
     for _, r in df.iterrows():
         code = _clean(r.get("article_code"))
-        if not code or code in seen:
+        if not code:
             continue
-        seen.add(code)
+        if code in by_code:
+            duplicates += 1
         brand = _clean(r.get("brand_name"))
         if not brand:
             # brand_name is NOT NULL, so a blank has to become something. Using
             # the code keeps the row loadable, but it is indistinguishable from
             # a backfill stub downstream — count it so callers can alarm on it.
             brand = code
-            brand_fallbacks += 1
-        rows.append({
+            fallback_codes.add(code)
+        else:
+            # A later named row supersedes an earlier nameless one, so the
+            # fallback must be un-counted rather than left to inflate the stub
+            # figure that /ready alarms on.
+            fallback_codes.discard(code)
+        by_code[code] = {
             "article_code": code,
             "brand_name": brand,
             "generic_name": _clean(r.get("generic_name")),
@@ -153,7 +163,10 @@ def parse_catalog(path: str, report: Optional[Dict] = None) -> List[Dict]:
             "mm_reg": _clean(r.get("mm_reg")),
             "mm_label": _clean(r.get("mm_label")),
             "status": _clean(r.get("status")),
-        })
+        }
+
+    rows = list(by_code.values())
+    brand_fallbacks = len(fallback_codes)
 
     if report is not None:
         report.update({
@@ -163,7 +176,14 @@ def parse_catalog(path: str, report: Optional[Dict] = None) -> List[Dict]:
             "columns_matched": matched,
             "columns_missing": sorted(set(_CATALOG_MAP) - set(matched)),
             "brand_fallbacks": brand_fallbacks,
+            "duplicates": duplicates,
         })
+    if duplicates:
+        logger.warning(
+            "catalog parse: %s repeated article_code(s) in %s — kept the LAST "
+            "row for each. %d rows in file, %d loaded.",
+            duplicates, Path(path).name, len(df), len(rows),
+        )
     if "Brand Name" not in matched:
         # Every row will land nameless. Loud, because the symptom downstream is
         # a chat agent that answers "not found" for products that are in stock.
@@ -175,7 +195,7 @@ def parse_catalog(path: str, report: Optional[Dict] = None) -> List[Dict]:
     return rows
 
 
-def parse_inventory(path: str) -> List[Tuple]:
+def parse_inventory(path: str, report: Optional[Dict] = None) -> List[Tuple]:
     """Parse balance_stock into inventory tuples (deduped on article+site)."""
 
     if _is_csv(path):
@@ -184,17 +204,34 @@ def parse_inventory(path: str) -> List[Tuple]:
         df = pd.read_excel(path)
     df.columns = [str(c).strip() for c in df.columns]
 
-    records: List[Tuple] = []
-    seen = set()
+    # Keyed by (article, site) so a repeat overwrites: LAST occurrence wins.
+    #
+    # It used to be first-wins (`if key in seen: continue`) and silent. Both
+    # halves were wrong. Measured live on 2026-08-13 by sending a file with a
+    # repeated (article, site) pair: the later quantity was discarded, the
+    # earlier one loaded, and nothing anywhere said so — the check reported
+    # "111,605 usable rows" and the load reported 111,604, a difference the
+    # operator had no way to explain.
+    #
+    # Last-wins is the right default for this export. The file carries an
+    # ascending `id` column, so a later row is the more recently written
+    # record: a correction, or a second movement for the same product at the
+    # same branch. Keeping the earlier one means shipping a stock number the
+    # partner's own system has already superseded.
+    #
+    # The count is returned to the caller either way, because the real defect
+    # was the silence, not the choice — a duplicate means the partner's export
+    # disagrees with itself, and somebody should see that.
+    by_key: "OrderedDict[Tuple[str, str], Tuple]" = OrderedDict()
+    duplicates = 0
     for _, r in df.iterrows():
         code = _clean(r.get("article_code"))
         site = _clean(r.get("site_code"))
         if not code or not site:
             continue
         key = (code, site)
-        if key in seen:
-            continue
-        seen.add(key)
+        if key in by_key:
+            duplicates += 1
         try:
             qty = int(float(r.get("stock_qty")))
         except (TypeError, ValueError):
@@ -205,8 +242,24 @@ def parse_inventory(path: str) -> List[Tuple]:
                 price = None
         except (TypeError, ValueError):
             price = None
-        records.append((code, site, None, qty, price, "MMK"))
-    return records
+        by_key[key] = (code, site, None, qty, price, "MMK")
+
+    if report is not None:
+        report.update({
+            "file": Path(path).name,
+            "rows_in_file": int(len(df)),
+            "rows_parsed": len(by_key),
+            "duplicates": duplicates,
+        })
+    if duplicates:
+        # WARNING, not debug: the partner's export contradicts itself, and the
+        # row counts the operator sees will not add up without this line.
+        logger.warning(
+            "inventory parse: %s repeated (article, site) row(s) in %s — kept the "
+            "LAST value for each. %d rows in file, %d loaded.",
+            duplicates, Path(path).name, len(df), len(by_key),
+        )
+    return list(by_key.values())
 
 
 # ---- loading ---------------------------------------------------------------
@@ -303,16 +356,26 @@ async def ingest_catalog(path: str, mode: str = "full_sync") -> Dict:
         Path(path).name, len(rows), deleted,
         report.get("brand_fallbacks"), report.get("columns_matched"),
     )
-    return {"rows": len(rows), "deleted": deleted, "report": report, "ok": True}
+    return {
+        "rows": len(rows),
+        "deleted": deleted,
+        "report": report,
+        # Lifted out of the report so the watcher's operator-facing line can
+        # reach it without knowing the report's shape.
+        "duplicates": int(report.get("duplicates") or 0),
+        "ok": True,
+    }
 
 
-async def ingest_inventory(path: str) -> int:
+async def ingest_inventory(path: str, report: Optional[Dict] = None) -> int:
     """Full-replace inventory (truncate + bulk COPY), then backfill stubs.
 
-    Returns inventory row count.
+    Returns inventory row count. Pass ``report`` to receive parse diagnostics
+    in place — ``rows_in_file``, ``rows_parsed`` and ``duplicates`` — which is
+    how the operator-facing ingest event explains why those two counts differ.
     """
 
-    records = await asyncio.to_thread(parse_inventory, path)
+    records = await asyncio.to_thread(parse_inventory, path, report)
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -519,11 +582,15 @@ async def ingest_file(
             )
         return {"file": Path(path).name, "kind": "catalog",
                 "rows": res["rows"], "deleted": res["deleted"],
+                "duplicates": res.get("duplicates", 0),
                 "report": res.get("report", {}),
                 "validation": report.as_dict()}
     if kind == "inventory":
-        n = await ingest_inventory(path)
+        parse_report: Dict = {}
+        n = await ingest_inventory(path, report=parse_report)
         return {"file": Path(path).name, "kind": "inventory", "rows": n,
+                "duplicates": int(parse_report.get("duplicates") or 0),
+                "report": parse_report,
                 "validation": report.as_dict()}
     return {"file": Path(path).name, "kind": "unknown", "rows": 0,
             "validation": report.as_dict()}

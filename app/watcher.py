@@ -93,11 +93,29 @@ def _checked_line(report: Dict) -> str:
 
 def _loaded_line(kind: str, result: Dict) -> str:
     rows = int(result.get("rows") or 0)
+
+    # A repeated key means the partner's own export disagrees with itself, and
+    # without this line the counts do not add up: the check reports the rows it
+    # read, the load reports the rows it kept, and the operator is left staring
+    # at a difference nothing explains. Silence here was the actual defect —
+    # the de-duplication itself is fine and unavoidable.
+    dupes = int(result.get("duplicates") or 0)
+    repeated = (
+        f" {dupes:,} line(s) repeated the same "
+        f"{'product' if kind == 'catalog' else 'product at the same branch'}"
+        f" — the last value was used."
+        if dupes
+        else ""
+    )
+
     if kind == "catalog":
         deleted = int(result.get("deleted") or 0)
         gone = f" {deleted:,} no longer in the file were removed." if deleted else ""
-        return f"Replaced the product list — {rows:,} products.{gone}"
-    return f"Replaced all stock — {rows:,} rows. Blanks, zeroes and negatives kept as written."
+        return f"Replaced the product list — {rows:,} products.{gone}{repeated}"
+    return (
+        f"Replaced all stock — {rows:,} rows. "
+        f"Blanks, zeroes and negatives kept as written.{repeated}"
+    )
 
 
 def _indexed_line(stubs, embedded, edges) -> str:

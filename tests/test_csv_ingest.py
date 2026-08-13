@@ -31,7 +31,11 @@ def _catalog_df() -> pd.DataFrame:
             "Generic Name": ["Paracetamol", "Ibuprofen", "Paracetamol"],
             "Composition": ["500mg", "200mg", "500mg"],
             "Category": ["OTC", "OTC", "OTC"],
-            "Indication": ["ကိုယ်ပူချိန်ကျစေရန်", "Pain relief", "Fever"],
+            # Burmese sits on the LAST A001 row, i.e. the one that survives
+            # de-duplication (last-wins, changed 2026-08-13). It used to be on
+            # the first; leaving it there would have quietly stopped testing
+            # the UTF-8 round-trip while still passing on an ASCII value.
+            "Indication": ["Fever", "Pain relief", "ကိုယ်ပူချိန်ကျစေရန်"],
             "Dosage": ["1 tab", "1 tab", "1 tab"],
             "Side Effect": [None, "Nausea", None],
             "MM_Reg": ["R1", "R2", "R1"],
@@ -85,10 +89,15 @@ def test_parse_inventory_csv(tmp_path):
     ).to_csv(path, index=False, encoding="utf-8-sig")
 
     records = parse_inventory(str(path))
-    assert len(records) == 3  # dupe (A001, S1) dropped
+    assert len(records) == 3  # dupe (A001, S1) collapsed
     rec = {(r[0], r[1]): r for r in records}
-    assert rec[("A001", "S1")][3] == 10
-    assert rec[("A001", "S1")][4] == 1500.5
+    # LAST occurrence wins, changed 2026-08-13. This asserted 10 (the first
+    # row) because that is what the code did, not because first-wins was ever
+    # chosen: the balance export carries an ascending `id`, so the later row is
+    # the more recent record and keeping the earlier one ships a quantity the
+    # partner's system has already superseded. See tests/test_ingest_duplicates.py.
+    assert rec[("A001", "S1")][3] == 99
+    assert rec[("A001", "S1")][4] == 1.0
     assert rec[("A002", "S1")][3] is None  # unparseable qty -> unknown, not 0
     assert rec[("A003", "S2")][4] is None  # non-numeric price -> unknown, not 0.0
     assert all(r[5] == "MMK" for r in records)
