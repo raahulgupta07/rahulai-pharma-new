@@ -99,6 +99,41 @@ misapply without the safety line below.
 products, list ALL of them the tool returned (do not cap at 5) — the user needs the \
 full set to choose.
 
+SOMEONE DESCRIBES A SYMPTOM (not a product name)
+- "I have a headache", "my child has a fever", "ခေါင်းကိုက်တယ်" is a PERSON \
+asking for help, not a database query. Answering it with one product name and a \
+price reads as a vending machine. A counter assistant would not do that, and the \
+answer is worse for it.
+- Open with ONE short human line that acknowledges what they said. One clause, \
+not a paragraph, and never a fake feeling — "Sorry to hear that." is enough.
+- Then ask ONE short question before recommending anything. Real counters use \
+WWHAM (Who is it for / What are the symptoms / How long / what Action already \
+taken / other Medication). Five questions is an interrogation in a chat window, \
+so ask the two that change the answer most, in one sentence: WHO it is for and \
+HOW LONG. Example: "Is it for you, and how long has it been going on?"
+- REFER, do not recommend, when any of these appear — say plainly that a \
+pharmacist or doctor should see this, and stop:
+  * symptoms lasting more than about a week, or getting worse
+  * a baby, a young child, someone pregnant or breastfeeding
+  * they already take regular or prescription medicine (interaction risk)
+  * anything severe or frightening — chest pain, breathing trouble, a bad head \
+injury, blood, fainting, a stiff neck with fever, a rash that does not fade
+- When you do suggest products, offer 2-3 CHOICES rather than silently picking \
+one, and give each a short plain reason ("paracetamol, gentle on the stomach" / \
+"ibuprofen, better if there is swelling"). Never present one product as "the" \
+answer when the shelf holds several — that is a decision the customer should \
+make with the pharmacist, not one the widget makes for them.
+- Say what the medicine IS in plain words before any code. The article code is \
+for staff picking a box off a shelf; put it at the end of the line, never at the \
+front of an answer to someone describing how they feel.
+- Never diagnose. Say what a product is normally used for; do not tell somebody \
+what is wrong with them.
+- Plain words still means NO provenance narration. Never open a line with \
+"According to the catalog", "In our system", "Based on our records" or similar. \
+State the fact directly — the whole answer comes from the data, and announcing \
+that on every reply is throat-clearing. (Warmer wording made this drift back; it \
+is pinned by voice_no_provenance_preamble in the field-feedback eval.)
+
 SEARCH STRATEGY (be persistent, then verify)
 - If a name search returns nothing, do NOT give up — try search_by_meaning with \
 the user's need (symptom, generic, or category) before concluding the item is \
@@ -287,6 +322,24 @@ def prompt_for_style(style: str, base: str = BILINGUAL_SYSTEM_PROMPT) -> str:
 # Selectable chat models for the in-app A/B picker. Only ids in this allowlist
 # may be requested per-message (anything else falls back to the configured
 # default). Prices are USD per 1M tokens (in / out) from OpenRouter.
+# Output budget for every answer-side model call. `max_tokens` caps reasoning
+# AND content together on these Gemini models, and reasoning cannot be turned
+# off ("Reasoning is mandatory for this endpoint and cannot be disabled").
+# At 2048 the tool loop spent ~1,450 tokens reasoning and truncated real
+# answers mid-table:
+#     "| **BIOGESIC PARA 250MG SUSPENSION 60ML (S`BERRY)** | 100000001000"
+# Measured live 2026-08-13 on a substitute list and a price filter — the two
+# question shapes CMHL asked to be shown in full. See app/fastpath.py for the
+# same defect on the phrasing call.
+ANSWER_MAX_TOKENS = 8192
+
+# Reasoning is what starves the answer above, and it is also most of the
+# latency: the same substitute question runs 46.4s unset vs 18.6s at "low",
+# and a price filter 16.7s vs 5.9s. Tool selection was unaffected in both.
+# "none" is rejected by the endpoint with a 400.
+ANSWER_REASONING_EFFORT = "low"
+
+
 SELECTABLE_MODELS = [
     {
         "id": "google/gemini-2.5-flash-lite",
@@ -386,7 +439,8 @@ def build_agent(model_id: str | None = None, style: str = "standard") -> Agent:
     model = OpenRouter(
         id=answer_id,
         api_key=settings.openrouter_api_key,
-        max_tokens=2048,   # room for a full substitute list (see RESPONSE STYLE exception); still caps essays
+        max_tokens=ANSWER_MAX_TOKENS,
+        reasoning_effort=ANSWER_REASONING_EFFORT,
     )
     extra: dict = {}
     # Router/answer split: the cheap router_model drives the tool-selection loop,
@@ -399,12 +453,14 @@ def build_agent(model_id: str | None = None, style: str = "standard") -> Agent:
         model = OpenRouter(
             id=settings.router_model,
             api_key=settings.openrouter_api_key,
-            max_tokens=2048,
+            max_tokens=ANSWER_MAX_TOKENS,
+            reasoning_effort=ANSWER_REASONING_EFFORT,
         )
         extra["output_model"] = OpenRouter(
             id=answer_id,
             api_key=settings.openrouter_api_key,
-            max_tokens=2048,
+            max_tokens=ANSWER_MAX_TOKENS,
+            reasoning_effort=ANSWER_REASONING_EFFORT,
         )
     return Agent(
         model=model,
@@ -441,7 +497,8 @@ def build_learning_agent(model_id: str | None = None, style: str = "standard") -
         model = OpenRouter(
             id=model_id or settings.openrouter_model,
             api_key=settings.openrouter_api_key,
-            max_tokens=2048,   # room for a full substitute list (see RESPONSE STYLE exception); still caps essays
+            max_tokens=ANSWER_MAX_TOKENS,
+            reasoning_effort=ANSWER_REASONING_EFFORT,
         )
         lm = LearningMachine(
             db=db,
@@ -499,7 +556,8 @@ def build_history_agent(model_id: str | None = None, style: str = "standard") ->
         model = OpenRouter(
             id=model_id or settings.openrouter_model,
             api_key=settings.openrouter_api_key,
-            max_tokens=2048,
+            max_tokens=ANSWER_MAX_TOKENS,
+            reasoning_effort=ANSWER_REASONING_EFFORT,
         )
         return Agent(
             model=model,

@@ -268,6 +268,11 @@ def build_phrasing_input(
     )
 
 
+# Total output budget for the phrasing call — reasoning tokens plus answer
+# tokens. See the comment in get_phrasing_agent for why this is not 1024.
+PHRASING_MAX_TOKENS = 4096
+
+
 @lru_cache(maxsize=8)
 def get_phrasing_agent(model_id: Optional[str] = None):
     """Return a cached, tool-less Agno agent used only to phrase facts.
@@ -287,7 +292,26 @@ def get_phrasing_agent(model_id: Optional[str] = None):
     model = OpenRouter(
         id=chosen,
         api_key=settings.openrouter_api_key,
-        max_tokens=1024,
+        # `max_tokens` caps reasoning AND content together, and these Gemini
+        # models will not answer without reasoning ("Reasoning is mandatory for
+        # this endpoint and cannot be disabled" — a 400 on reasoning.enabled
+        # false). At 1024 the model spent 979 tokens thinking and had ~41 left
+        # for the answer, so EVERY hot-intent reply was cut mid-sentence:
+        # "BIOGESIC 500MG 10`S (article code: 1000000131948) has 395 on the".
+        # Measured live, both languages, both intents. It reads as a broken
+        # widget, and a stock answer stopping before the number is worse than
+        # no answer in a pharmacy.
+        #
+        # 4096 leaves room for the longest real reply — a 53-branch stock list
+        # is ~1,300 output tokens — while still capping essays. Do not lower it
+        # without re-measuring `reasoning_tokens`, which is the part that grows.
+        max_tokens=PHRASING_MAX_TOKENS,
+        # Low effort, because restating a FACTS block needs no deliberation.
+        # Unset, reasoning ran 979–1,453 tokens per call; low takes it to ~0.
+        # That is what starves the answer above, and it is also most of the
+        # latency: the same call goes 8.5s -> 3.6s. Verified accepted by all
+        # three SELECTABLE_MODELS. "none" is rejected by the endpoint.
+        reasoning_effort="low",
     )
     return Agent(
         model=model,
