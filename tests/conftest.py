@@ -10,12 +10,45 @@ test recreates a fresh pool on its own running loop. This is a test-only
 concern — in production the pool is created once inside the serving loop.
 """
 
+import os
+import re
+
 import pytest
 from fastapi.testclient import TestClient
 
-import app.cache as cache
-import app.db as db
 from app.config import get_settings
+
+# --- Redis isolation: this must run before anything builds a client ---------
+#
+# The suite writes real keys — the emb1/pk1 embed credential below, cache
+# entries, rate-limit counters. Pointed at the URL the running stack serves
+# from, `_register_test_credential` rewrites `pharmacy:credentials` on the LIVE
+# instance, and every deployed embed starts 401-ing until someone re-seeds it.
+# That happened three times before this fix; it is silent, and it looks like an
+# auth bug rather than a test-suite bug.
+#
+# So the whole suite is redirected to a scratch DB **on the same server**: same
+# host, same port, different DB index. Nothing else about the environment
+# changes, and no test needs to know. Override with TEST_REDIS_DB if 15 is in
+# use for something else.
+TEST_REDIS_DB = os.environ.get("TEST_REDIS_DB", "15")
+
+
+def _isolate_redis_db() -> str:
+    """Rewrite REDIS_URL to the scratch DB and drop the cached Settings."""
+
+    live = os.environ.get("REDIS_URL") or get_settings().redis_url
+    isolated = re.sub(r"/\d+$", "", live.rstrip("/")) + f"/{TEST_REDIS_DB}"
+    os.environ["REDIS_URL"] = isolated
+    get_settings.cache_clear()  # the live URL is already cached by the read above
+    return isolated
+
+
+LIVE_REDIS_URL = os.environ.get("REDIS_URL") or get_settings().redis_url
+TEST_REDIS_URL = _isolate_redis_db()
+
+import app.cache as cache  # noqa: E402 — must import after the URL is rewritten
+import app.db as db  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -67,7 +100,26 @@ def api_client():
     Using TestClient as a context manager runs the app lifespan and keeps a
     single event loop for the duration, so the loop-bound asyncpg/redis clients
     are reused across requests (mirroring uvicorn's single-loop runtime).
+
+    A current event loop must exist before that starts. On Python 3.9,
+    ``asyncio.run`` CLOSES its loop and leaves the thread with none set, so any
+    test using it (several here call it directly through ``_pg``) poisons every
+    later ``api_client`` in the same process::
+
+        RuntimeError: There is no current event loop in thread 'MainThread'.
+
+    It surfaced as an ERROR at fixture setup, not a failure, so the test never
+    ran and the suite still reported "17 passed, 1 error" — green enough to
+    scroll past. Installing a fresh loop when none is current makes the fixture
+    independent of whatever ran before it.
     """
+
+    import asyncio
+
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
 
     from app.api import app
 

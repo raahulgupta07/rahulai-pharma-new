@@ -214,13 +214,34 @@ def test_dev_credential_can_be_disabled_for_prod():
 
 
 def test_reload_endpoint_bumps_version(api_client):
+    """Reload must invalidate every cached answer — i.e. move the version.
+
+    This asserted ``== before + 1`` and was intermittently red: observed
+    ``assert 734 == 727 + 1``. Exactly-one-bump is not the endpoint's contract.
+    ``reload_data`` calls ``reload_from_data_dir()``, which bumps once per file
+    it loads, and only then bumps again itself — so the step size is 1 + however
+    many files happen to be sitting in the data dir when the suite runs. The
+    test was encoding the state of a directory, not a guarantee of the code.
+
+    What actually matters for cache freshness (see CLAUDE.md) is that the
+    version MOVED FORWARD, since the version is what namespaces every cached
+    answer. A strictly-greater assertion is the real invariant and cannot flake;
+    it still fails if a future refactor drops the bump, which is the regression
+    worth catching — a reload that serves stale stock for a full TTL.
+    """
+
     before = api_client.get("/ready").json()["data_version"]
     r = api_client.post("/api/embed/reload")
     assert r.status_code == 200
     body = r.json()
     assert body["status"] == "reloaded"
     assert body["catalog_rows"] >= 1
-    assert body["data_version"] == before + 1
+    assert body["data_version"] > before
+
+    # The bump must be visible to everything reading the version, not just in
+    # the response body — a reload that reports a new version while /ready
+    # still serves the old one would leave the cache live.
+    assert api_client.get("/ready").json()["data_version"] >= body["data_version"]
 
 
 # ---- semantic answer cache -------------------------------------------------
