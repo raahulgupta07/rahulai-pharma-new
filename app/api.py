@@ -32,7 +32,12 @@ from pydantic import BaseModel
 from contextlib import asynccontextmanager
 
 from app.agent import get_agent
-from app.answer_filter import LeakFilter, fallback_for, filter_answer
+from app.answer_filter import (
+    LeakFilter,
+    contains_reasoning,
+    fallback_for,
+    filter_answer,
+)
 from app.disclaimer import apply_policy as apply_disclaimer
 from app.cache import (
     bump_data_version,
@@ -328,7 +333,9 @@ async def _refresh_cors_loop() -> None:
             raise
 
 
-app = FastAPI(title="CitCare Pharmacy Agent", lifespan=lifespan)
+from app.version import VERSION as _APP_VERSION
+
+app = FastAPI(title="CitCare Pharmacy Agent", version=_APP_VERSION, lifespan=lifespan)
 
 
 def cors_origins() -> list[str]:
@@ -590,42 +597,104 @@ from app.admin import router as admin_router  # noqa: E402
 app.include_router(admin_router, dependencies=[Depends(require_admin)])
 
 
+# ---- the admin SPA -----------------------------------------------------------
+#
+# Path alone CANNOT tell an SPA deep link from a mistyped API call under /admin:
+# /admin/users, /admin/stores, /admin/graph, /admin/conversations and
+# /admin/learning are each BOTH a real API route and a real page in
+# admin/src/routes/. So a prefix convention (/admin/api/*) or a hardcoded route
+# allowlist would either break a page or drift the moment someone adds one.
+#
+# What does separate them is what the CLIENT asked for. A deep link is a browser
+# document navigation: it sends `Sec-Fetch-Dest: document` (every current
+# browser) and an Accept that names text/html. An API miss — the SPA's own fetch
+# wrapper, curl, a scanner — sends neither; browser fetch() defaults to
+# `Accept: */*` and `Sec-Fetch-Dest: empty`. Negotiating on that is the only rule
+# here that cannot mislabel a legitimate deep link.
+_ADMIN_INDEX = None  # set by _mount_admin() when a build is present
+
+
+def _is_document_navigation(headers) -> bool:
+    """True when this request is a browser navigating to a page, not a data call.
+
+    Sec-Fetch-Dest wins when present: a browser fetch() to an API route sends
+    `empty`, and trusting Accept alone there would hand it the HTML shell.
+    Accept is the fallback for clients that send no Sec-Fetch-* at all.
+    """
+
+    dest = headers.get("sec-fetch-dest")
+    if dest:
+        return dest == "document"
+    return "text/html" in headers.get("accept", "")
+
+
+def _is_spa_route_path(path: str) -> bool:
+    """A page path under /admin — i.e. not an asset request.
+
+    A request for a *file* (anything with an extension in its last segment) is
+    never a page. Keeping it out means a missing .js still 404s instead of
+    returning the shell, which fails in confusing ways.
+    """
+
+    if path != "/admin" and not path.startswith("/admin/"):
+        return False
+    return "." not in path.rsplit("/", 1)[-1]
+
+
+@app.middleware("http")
+async def spa_deep_link(request, call_next):
+    """Serve the SPA shell for browser navigations under /admin, before routing.
+
+    This runs ahead of the router on purpose, and it is the ONLY reason
+    /admin/users survives a cold reload: the API route of the same name is
+    registered before the static mount (correctly — the SPA's fetch calls must
+    win), so without this a refresh of that page rendered raw `{"detail":...}`
+    from require_admin instead of the console.
+
+    Only GET/HEAD navigations are diverted, and only to the public shell, which
+    /admin/ already serves unauthenticated — no API route loses its auth check,
+    because a fetch() is never `Sec-Fetch-Dest: document`.
+    """
+
+    if (
+        _ADMIN_INDEX is not None
+        and request.method in ("GET", "HEAD")
+        and _is_spa_route_path(request.url.path)
+        and _is_document_navigation(request.headers)
+    ):
+        from fastapi.responses import FileResponse
+
+        return FileResponse(_ADMIN_INDEX)
+    return await call_next(request)
+
+
 # Serve the built admin SPA at /admin when present (single-deploy option).
 def _mount_admin() -> None:
+    global _ADMIN_INDEX
     from pathlib import Path
 
     from fastapi.staticfiles import StaticFiles
-    from starlette.exceptions import HTTPException as StarletteHTTPException
 
     class SPAStatics(StaticFiles):
-        """StaticFiles that serves index.html for unknown paths.
+        """StaticFiles for the built SPA. Misses 404 — they are API misses.
 
-        The build is a client-routed SPA: adapter-static emits one index.html
-        and no per-route file. Plain StaticFiles 404s on a deep link like
-        /admin/chat, so the app only worked while you never reloaded. Client
-        routes are indistinguishable from typos here, so every miss falls back
-        to the shell and the router sorts it out.
+        This used to fall back to index.html for any extensionless miss, which
+        is how `GET /admin/nonexistent-xyz` answered **200 text/html** and how a
+        traversal attempt that failed to match the SFTP download route came back
+        200 with the admin shell. Nothing leaked, but a scanner reading status
+        codes flags it and a broken API call looks like a working page.
 
-        The /admin/* API routes are registered on `app` before this mount, so
-        they take precedence and never reach this fallback.
+        Deep links are handled ahead of routing by spa_deep_link(), which only
+        the browser's own navigation headers can trigger, so everything that
+        reaches this mount and misses is a data request for something that does
+        not exist. It gets the JSON 404 it asked for.
         """
-
-        async def get_response(self, path: str, scope):
-            try:
-                return await super().get_response(path, scope)
-            except StarletteHTTPException as exc:
-                if exc.status_code != 404:
-                    raise
-                # Never mask a missing asset as the shell — a 200 text/html for
-                # a .js request breaks in confusing ways.
-                if "." in path.rsplit("/", 1)[-1]:
-                    raise
-                return await super().get_response("index.html", scope)
 
     for cand in (Path(__file__).parent.parent / "admin" / "build",
                  Path("/app/admin_build")):
         if cand.is_dir():
             app.mount("/admin", SPAStatics(directory=str(cand), html=True), name="admin")
+            _ADMIN_INDEX = str(cand / "index.html")
             break
 
 
@@ -850,10 +919,13 @@ async def _answer(
             out = await fastpath.get_phrasing_agent(model).arun(phrase_prompt)
             # The fast path answers only HOT_HAVE / HOT_WHERE — stock and
             # price — so the safety line never belongs on it.
-            content = apply_disclaimer(
-                filter_answer(getattr(out, "content", str(out))), force=False
-            )
-            await set_cached_answer(message, store_id, content, model=model, version=version)
+            raw = getattr(out, "content", str(out))
+            content = apply_disclaimer(filter_answer(raw), force=False)
+            # Never cache an answer that showed reasoning. See the note in
+            # answer_filter.contains_reasoning: caching one turns a rare glitch
+            # into the permanent reply for that question.
+            if not contains_reasoning(raw):
+                await set_cached_answer(message, store_id, content, model=model, version=version)
             await _remember(client_session, model, session_id, user_id, message, content)
             return content, False
 
@@ -868,11 +940,12 @@ async def _answer(
         metrics.incr("llm_calls")
         metrics.record_llm()
         out = await get_agent(model, with_history=bool(client_session), style=style).arun(prompt, **run_kw)
-        content = apply_disclaimer(filter_answer(getattr(out, "content", str(out))))
+        raw_answer = getattr(out, "content", str(out))
+        content = apply_disclaimer(filter_answer(raw_answer))
     finally:
         reset_store_scope(token)
 
-    if not follow_up:
+    if not follow_up and not contains_reasoning(raw_answer):
         await set_cached_answer(message, store_id, content, model=model, version=version)
     return content, False
 
@@ -906,6 +979,26 @@ async def widget_js():
 @app.get("/health")
 async def health() -> Dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/version")
+async def version() -> Dict[str, Any]:
+    """Which build is this, and what changed in it.
+
+    PUBLIC on purpose, and therefore deliberately thin: version, build stamp,
+    and the newest release note only. Whoever is debugging a deployment needs
+    to read it without an admin token — including on the CMHL host we cannot
+    reach — and "which version are you on?" has been unanswerable until now.
+
+    The full history is admin-only (`GET /admin/releases`). A version string
+    tells an attacker nothing they could not infer from behaviour; the full
+    changelog tells them which fixes are absent, which is worth a token.
+    """
+
+    from app import release_notes
+    from app.version import version_info
+
+    return {**version_info(), "latest_release": release_notes.latest()}
 
 
 @app.get("/api/embed/models")

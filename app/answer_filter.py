@@ -72,6 +72,21 @@ PROMPT_ECHOES = (
     "if a tool returns nothing",
     "answer strictly from tool results",
     "safety disclaimer should be",
+    # Section headings of BILINGUAL_SYSTEM_PROMPT and the answer-length
+    # directive, quoted back verbatim. Seen live on 2026-08-13 through the
+    # embed API — the whole answer was the model reciting its own rules:
+    #     And ANSWER LENGTH - CRISP rules:
+    #     "Answer in ONE short line. Give only the product name, article
+    #      code, and the single figure asked for (stock or price)."
+    #     Wait, if it's a scope limit:
+    # None of the existing markers matched, so it reached the customer AND was
+    # cached, then served in 0ms to everyone who asked again.
+    "answer length",
+    "answer in one short line",
+    "response style",
+    "search strategy",
+    "stock answers — what must be in them",
+    "stock answers - what must be in them",
 )
 
 # Deliberation openers — decisive only at the start of a paragraph.
@@ -123,7 +138,12 @@ _DRAFTING = re.compile(
         # so this slipped through. Deliberately requires a following pronoun or
         # article, because "wait 30 minutes before eating" is a real dosage
         # instruction and must never be mistaken for deliberation.
-        | \bwait,\s+(?:the|this|that|i|we|it|actually|no)\b
+        | \bwait,\s+(?:the|this|that|i|we|it|actually|no
+                     # Widened 2026-08-13: the live leak read "Wait, if it's a
+                     # scope limit:" and "Wait, let's keep" — neither matched.
+                     # Still requires the comma, so the dosage instruction
+                     # "wait 30 minutes before eating" is untouched.
+                     |if|but|maybe|perhaps|should|let|do|does|is|are|when|why|how)\b
         | ->\s*wait\b
     )""",
     re.IGNORECASE | re.VERBOSE,
@@ -233,6 +253,26 @@ class LeakFilter:
 
         rest, self._buf = self._buf, ""
         return self._release(rest) if rest.strip() else ""
+
+
+def contains_reasoning(text: str) -> bool:
+    """True when any paragraph of a finished answer looks like deliberation.
+
+    Exists so a caller can decide NOT to cache. Filtering is best-effort by
+    nature — the model can always invent a new shape of self-narration — but a
+    leak that gets cached stops being a rare event and becomes a permanent one:
+    measured live on 2026-08-13, a single leaked answer was then served from
+    Redis in 0.00s to every subsequent asker for the whole TTL.
+
+    So the rule is: if anything about an answer looked like reasoning, that
+    answer is disposable. Recomputing it costs one LLM call; caching it costs
+    every future customer the same broken reply.
+    """
+
+    f = LeakFilter()
+    f.feed(text or "")
+    f.flush()
+    return f.leaked
 
 
 def filter_answer(text: str, fallback: bool = True) -> str:
