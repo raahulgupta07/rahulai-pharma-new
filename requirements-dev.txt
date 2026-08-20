@@ -1,0 +1,18 @@
+# Test-only dependencies. NOT installed into the image — docker/Dockerfile
+# installs requirements.txt alone, and a test runner has no business shipping to
+# a pharmacy's server.
+#
+#   ./venv/bin/python -m pip install -r requirements-dev.txt
+
+-r requirements.txt
+
+# Runs the suite across processes. It is a pure speed change, not a behaviour
+# change, and it works here without touching a single test because the suite was
+# already built for process isolation: `tests/dbguard.py` names its database
+# `pharmacy_test_s<pid>_<uuid>` and `tests/conftest.py::_claim_redis_db` claims
+# one Redis index per PID out of 15. Each worker is its own process, so each
+# gets its own database and its own Redis.
+#
+# Measured on this laptop (14 cores), same result every way — 1076 passed, 5
+# skipped: serial 449s, `-n 8` 103s, `-n 12` 80s.
+pytest-xdist>=3.8

@@ -118,13 +118,7 @@ class TestListing:
         (drop / "still-arriving_stock.xlsx").write_text("a")
         (drop / "archive" / "1782107161_balance_stock.xlsx").write_text("bb")
         (drop / "failed" / "1782093344_articles-export.csv").write_text("ccc")
-
-        async def _no_events():
-            return {}
-
-        monkeypatch.setattr("app.ingest_events.latest", _no_events)
-        monkeypatch.setattr(admin.cache, "get_poll_seconds", _num(15))
-        monkeypatch.setattr(admin.cache, "get_ingest_enabled", _num(True))
+        _no_history(monkeypatch)
 
         res = await admin.sftp_files()
         by_name = {f["name"]: f for f in res["files"]}
@@ -132,49 +126,171 @@ class TestListing:
         assert by_name["still-arriving_stock.xlsx"]["state"] == "wait"
         assert by_name["balance_stock.xlsx"]["state"] == "ok"
         assert by_name["articles-export.csv"]["state"] == "bad"
-        assert res["counts"] == {"wait": 1, "ok": 1, "bad": 1}
+        assert res["counts"] == {"wait": 1, "ok": 1, "bad": 1, "live": 1}
 
     @pytest.mark.asyncio
-    async def test_history_is_matched_on_the_partner_name(self, drop, monkeypatch):
-        """The event log keys on what arrived; the file on disk carries our prefix.
+    async def test_an_archived_copy_gets_ITS_OWN_run_not_the_newest_for_its_name(
+        self, drop, monkeypatch
+    ):
+        """The bug this endpoint shipped with, pinned.
 
-        Match them on the stamped name and every archived file looks like it has
-        no history at all — the drawer would be empty for exactly the files that
-        have the most to show.
+        History used to be looked up by the partner's filename, so every stored
+        copy of ``balance_stock.xlsx`` inherited the newest run for that name.
+        On 2026-08-13 the newest run was a REJECTION two minutes after a
+        successful load, so five archived copies that had each loaded 111,654
+        rows displayed a rejected run and an em-dash where their count belonged.
         """
 
         (drop / "archive" / "1782107161_balance_stock.xlsx").write_text("x")
+        (drop / "archive" / "1782207161_balance_stock.xlsx").write_text("yy")
 
-        async def _events():
-            return {"balance_stock.xlsx": {
-                "kind": "inventory", "step": "cache_cleared", "detail": "Cleared saved answers.",
-                "data": {"rows": 111654}, "run_id": "abc",
-            }}
+        _history(
+            monkeypatch,
+            by_stamped={
+                "1782107161_balance_stock.xlsx": _run("inventory", 111654, "loaded"),
+                "1782207161_balance_stock.xlsx": _run("inventory", 120628, "loaded"),
+            },
+            # The name-keyed summary is deliberately WRONG for both of them.
+            by_name={"balance_stock.xlsx": _run("inventory", None, "rejected")},
+        )
 
-        monkeypatch.setattr("app.ingest_events.latest", _events)
-        monkeypatch.setattr(admin.cache, "get_poll_seconds", _num(15))
-        monkeypatch.setattr(admin.cache, "get_ingest_enabled", _num(True))
+        rows = {f["stored_as"]: f for f in (await admin.sftp_files())["files"]}
+        assert rows["1782107161_balance_stock.xlsx"]["rows"] == 111654
+        assert rows["1782207161_balance_stock.xlsx"]["rows"] == 120628
+        assert all(r["step"] == "loaded" for r in rows.values())
+
+    @pytest.mark.asyncio
+    async def test_a_file_still_in_the_drop_folder_matches_on_the_partner_name(
+        self, drop, monkeypatch
+    ):
+        """It has no stamp yet — the stamp is chosen when the file is MOVED.
+
+        So the name-keyed summary is the only one that can describe it, and it
+        is correct there precisely because the file has not been superseded.
+        """
+
+        (drop / "balance_stock.xlsx").write_text("x")
+        _history(
+            monkeypatch,
+            by_stamped={},
+            by_name={"balance_stock.xlsx": _run("inventory", None, "waiting")},
+        )
 
         row = (await admin.sftp_files())["files"][0]
-        assert row["kind"] == "inventory"
-        assert row["rows"] == 111654
-        assert row["stored_as"] == "1782107161_balance_stock.xlsx"
+        assert row["state"] == "wait"
+        assert row["step"] == "waiting"
+        assert row["live"] is False, "a file that has not loaded cannot be live"
 
     @pytest.mark.asyncio
     async def test_a_file_with_no_history_still_lists(self, drop, monkeypatch):
-        """Files predating the table, or written while the recorder was down."""
+        """Files predating the table, or written while the recorder was down.
+
+        The kind falls back to the FILENAME rather than staying unknown: the
+        live marker needs a kind for every file, and the name is what the
+        loader itself classifies on.
+        """
 
         (drop / "archive" / "1700000000_balance_stock.xlsx").write_text("x")
-
-        async def _none():
-            return {}
-
-        monkeypatch.setattr("app.ingest_events.latest", _none)
-        monkeypatch.setattr(admin.cache, "get_poll_seconds", _num(15))
-        monkeypatch.setattr(admin.cache, "get_ingest_enabled", _num(True))
+        _no_history(monkeypatch)
 
         row = (await admin.sftp_files())["files"][0]
-        assert row["state"] == "ok" and row["kind"] is None and row["detail"] is None
+        assert row["state"] == "ok"
+        assert row["kind"] == "inventory"
+        assert row["detail"] is None
+
+
+class TestLive:
+    """Which file did the data actually come from?
+
+    Both loaders replace their own table outright, so exactly one file per kind
+    is live and every other copy is history kept for download and retry.
+    """
+
+    @pytest.mark.asyncio
+    async def test_one_live_file_per_kind_and_the_rest_are_superseded(
+        self, drop, monkeypatch
+    ):
+        for stamp in ("1782107161", "1782207161", "1782307161"):
+            (drop / "archive" / f"{stamp}_balance_stock.xlsx").write_text("x")
+        (drop / "archive" / "1782107000_articles-export.xlsx").write_text("y")
+        _no_history(monkeypatch)
+
+        res = await admin.sftp_files()
+        live = [f["stored_as"] for f in res["files"] if f["live"]]
+
+        assert sorted(live) == [
+            "1782107000_articles-export.xlsx",
+            "1782307161_balance_stock.xlsx",
+        ], live
+        assert res["counts"]["live"] == 2
+
+    @pytest.mark.asyncio
+    async def test_a_rejected_newer_file_does_not_take_live_from_the_loaded_one(
+        self, drop, monkeypatch
+    ):
+        """The case that actually happened, and the reason "newest" is not enough.
+
+        10:52 a stock file loaded; 10:54 another arrived and the shrink guard
+        refused it. The newest upload is the rejected one, but the data in the
+        database is still the 10:52 load — so that is what "live" has to mean.
+        """
+
+        (drop / "archive" / "1782107161_balance_stock.xlsx").write_text("x")
+        (drop / "failed" / "1782107281_balance_stock.xlsx").write_text("zz")
+        _no_history(monkeypatch)
+
+        rows = {f["stored_as"]: f for f in (await admin.sftp_files())["files"]}
+        assert rows["1782107161_balance_stock.xlsx"]["live"] is True
+        assert rows["1782107281_balance_stock.xlsx"]["live"] is False
+        assert rows["1782107281_balance_stock.xlsx"]["state"] == "bad"
+
+    @pytest.mark.asyncio
+    async def test_a_kind_that_never_loaded_has_no_live_file(self, drop, monkeypatch):
+        """Nothing is live until something has actually replaced the data."""
+
+        (drop / "balance_stock.xlsx").write_text("x")           # still arriving
+        (drop / "failed" / "1782107281_articles-export.xlsx").write_text("y")
+        _no_history(monkeypatch)
+
+        res = await admin.sftp_files()
+        assert res["counts"]["live"] == 0
+        assert not any(f["live"] for f in res["files"])
+
+    @pytest.mark.asyncio
+    async def test_an_unrecognised_file_is_never_live(self, drop, monkeypatch):
+        """No kind means it replaced no table, whatever folder it ended up in."""
+
+        (drop / "archive" / "1782107161_quarterly-notes.xlsx").write_text("x")
+        _no_history(monkeypatch)
+
+        res = await admin.sftp_files()
+        assert res["files"][0]["kind"] is None
+        assert res["files"][0]["live"] is False
+        assert res["counts"]["live"] == 0
+
+
+def _run(kind, rows, step):
+    return {
+        "kind": kind, "step": step, "status": "ok", "detail": None,
+        "data": {} if rows is None else {"rows": rows}, "run_id": "r-" + str(rows),
+    }
+
+
+def _history(monkeypatch, by_stamped, by_name):
+    async def _stamped():
+        return by_stamped
+
+    async def _named():
+        return by_name
+
+    monkeypatch.setattr("app.ingest_events.latest_by_stamped", _stamped)
+    monkeypatch.setattr("app.ingest_events.latest", _named)
+    monkeypatch.setattr(admin.cache, "get_poll_seconds", _num(15))
+    monkeypatch.setattr(admin.cache, "get_ingest_enabled", _num(True))
+
+
+def _no_history(monkeypatch):
+    _history(monkeypatch, by_stamped={}, by_name={})
 
 
 def _num(value):

@@ -113,21 +113,21 @@ class ValidationReport:
 def _read_frame(path: str, kind: str) -> pd.DataFrame:
     """Load the sheet the same way the real parser will.
 
-    Must mirror ``parse_catalog`` / ``parse_inventory`` exactly: the article
-    export hides its header under a 4-row banner, the balance export does not.
-    Validating a differently-read frame would pass files the loader then chokes
-    on, which is worse than no validation at all.
+    The catalog half DELEGATES to ``ingest.read_catalog_frame`` rather than
+    mirroring it — validating a differently-read frame would pass files the
+    loader then chokes on (or, as happened with CMHL's 2026-08-18 export,
+    reject one the loader could have read). The balance export has no banner
+    and is read straight.
     """
 
     is_csv = Path(path).suffix.lower() == ".csv"
     if kind == "catalog":
-        if is_csv:
-            df = pd.read_csv(path, encoding="utf-8-sig")
-            df.columns = [str(c).strip() for c in df.columns]
-            if not any(c in df.columns for c in _CATALOG_MAP):
-                df = pd.read_csv(path, skiprows=4, encoding="utf-8-sig")
-        else:
-            df = pd.read_excel(path, skiprows=4)
+        # Delegated, not mirrored. This function used to hold its own copy of
+        # the header logic under a comment telling the next person to keep the
+        # two in step; they drifted anyway. One reader now.
+        from app.ingest import read_catalog_frame
+
+        df = read_catalog_frame(path)
     else:
         df = pd.read_csv(path, encoding="utf-8-sig") if is_csv else pd.read_excel(path)
     df.columns = [str(c).strip() for c in df.columns]

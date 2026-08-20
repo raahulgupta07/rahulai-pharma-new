@@ -26,25 +26,19 @@ import pytest
 
 from app import auth as authmod
 from app.config import get_settings
+
+from tests.pgconn import pg
 from app.ingest import detect_kind
 
 
 def _pg(query: str, *args, fetch: bool = False):
-    """One statement on a private connection — never app.db's loop-bound pool."""
+    """One statement on a private connection — never app.db's loop-bound pool.
 
-    async def go():
-        import asyncpg
+    One connection per PROCESS, not per statement — see tests/pgconn.py for
+    why the previous arrangement was the suite's whole wall clock.
+    """
 
-        conn = await asyncpg.connect(get_settings().postgres_url)
-        try:
-            if fetch:
-                return [dict(r) for r in await conn.fetch(query, *args)]
-            await conn.execute(query, *args)
-            return None
-        finally:
-            await conn.close()
-
-    return asyncio.run(go())
+    return pg(query, *args, fetch=fetch)
 
 
 class _Admin:

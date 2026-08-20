@@ -22,3 +22,16 @@ ldap3
 authlib
 
 aiomysql
+
+# The IANA time zone database, for zoneinfo.ZoneInfo.
+#
+# python:3.12-slim ships an incomplete /usr/share/zoneinfo: `Asia/Yangon`
+# resolves but `Asia/Rangoon`, `Asia/Calcutta` and the whole `US/*` family do
+# not. Those are legitimate tzdata LINKS that browsers and operating systems
+# still report — Chrome on this machine reports `Asia/Rangoon`, not
+# `Asia/Yangon` — so the analytics `tz` validator rejected the zone the user's
+# own browser sent and every panel on the console rendered a 400.
+#
+# Found by looking at the page. Every curl check passed, because they all sent
+# the canonical name.
+tzdata

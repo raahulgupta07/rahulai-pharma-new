@@ -13,6 +13,27 @@ sftp :2222   drop article*/balance* xlsx → auto-ingested
 ingest-worker  polls SFTP, loads, backfills, busts cache
 ```
 
+### Two stacks, two sets of ports
+
+The ports above are the BASE stack (`docker-compose.yml` alone). `docker-compose.optimized.yml`
+overlays a second set so both can run at once — it is the one currently deployed, and every
+port in it differs:
+
+| | base | optimized |
+|---|---|---|
+| api | 8088 | **8091** |
+| postgres | 5433 | **5434** |
+| redis | 6380 | **6381** |
+| sftp | 2222 | **2223** |
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.optimized.yml up -d   # project: pharmacy-opt
+```
+
+Every `localhost:8088` in this runbook is the base stack. If you are on the deployed one,
+read 8091. Check which you have with `docker ps` — the optimized containers are named
+`pharmacy-opt-*`.
+
 ## Run
 
 ```bash
@@ -40,7 +61,20 @@ curl localhost:8088/metrics   # ops counters
 
 ## Daily data refresh
 
-Two ways, both "replace old, add new" (catalog merges, inventory full-replaces):
+**The catalog file is authoritative — it does not merge.** `ingest_catalog` runs in
+`mode="full_sync"` by default (`app/ingest.py:294`): every row in the file is upserted and
+stamped with this run's timestamp, and then
+
+```sql
+DELETE FROM catalog WHERE last_seen IS DISTINCT FROM <this run>
+```
+
+removes everything the file did not contain, as discontinued. Uploading a partial catalog
+export therefore **deletes every product missing from it**. This runbook used to say
+"catalog merges", which is the opposite, and acting on it would empty most of the catalog.
+Inventory full-replaces as well.
+
+Two ways to trigger it:
 - **SFTP**: upload `articles-export*.xlsx` + `balance_stock*.xlsx` → worker auto-ingests within ~15s → archives file → busts cache. New articles auto-embedded.
 - **Manual**: `curl -X POST localhost:8088/api/embed/reload` (from data dir) or `/api/embed/ingest` (from SFTP dir).
 
@@ -58,7 +92,8 @@ Point Laravel `CITYAGENT_BASE_URL` at `http://<host>:8088`.
 ## Tests & checks
 
 ```bash
-./venv/bin/python -m pytest tests/ -q          # 38 pass (fast, no LLM, no cost)
+./venv/bin/python -m pytest tests/ -q          # ~1320 pass in ~2min (no LLM, no cost)
+./scripts/test.sh                              # same, 8 xdist workers, ~30s
 RUN_LIVE=1 ./venv/bin/python -m evals.run_eval # live LLM accuracy (Claude, costs $)
 ./venv/bin/locust -f evals/locustfile.py --host http://localhost:8088 \
    --users 50 --spawn-rate 10 --run-time 60s --headless   # load

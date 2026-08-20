@@ -31,27 +31,21 @@ import pytest
 from app import auth as authmod
 from app.config import Settings, get_settings
 
+from tests.pgconn import pg
+
 # Imported at collection time, not inside a test: app.api pulls in agno, which
 # builds an asyncio.Lock() at import (see test_approval.py).
 from app.api import cors_origins
 
 
 def _pg(query: str, *args, fetch: bool = False):
-    """Run one statement on a private connection. Never touches app.db's pool."""
+    """Run one statement on a private connection. Never touches app.db's pool.
 
-    async def go():
-        import asyncpg
+    One connection per PROCESS, not per statement — see tests/pgconn.py for why
+    the previous arrangement was the suite's whole wall clock.
+    """
 
-        conn = await asyncpg.connect(get_settings().postgres_url)
-        try:
-            if fetch:
-                return [dict(r) for r in await conn.fetch(query, *args)]
-            await conn.execute(query, *args)
-            return None
-        finally:
-            await conn.close()
-
-    return asyncio.run(go())
+    return pg(query, *args, fetch=fetch)
 
 
 def _ensure_schema():
@@ -499,12 +493,21 @@ def test_scope_is_server_side_and_cannot_be_set_by_the_client(api_client, seeded
 
 
 def test_users_patch_sets_and_clears_the_store_pin(api_client, admin):
-    """The pin is assignable server-side, so the feature is reachable without SQL."""
+    """The pin is assignable server-side, so the feature is reachable without SQL.
 
+    ⚠️ The PATCH now needs a **super_admin** caller: `PATCH /admin/users/{id}`
+    was narrowed from `require_admin` to `require_super_admin` because `role` was
+    caller-supplied, so any admin could promote themselves (see
+    `tests/test_authz_gates.py`). The plain-`admin` fixture is kept for the
+    `GET /admin/users` read, which deliberately stayed open — that half of this
+    test is now also a regression guard on the read staying readable.
+    """
+
+    caller = _Admin(role="super_admin")
     target = _Admin()
     try:
         r = api_client.patch(
-            f"/admin/users/{target.id}", json={"store_id": "20005-CCYK"}, headers=admin.headers
+            f"/admin/users/{target.id}", json={"store_id": "20005-CCYK"}, headers=caller.headers
         )
         assert r.status_code == 200 and r.json()["store_id"] == "20005-CCYK"
 
@@ -513,11 +516,12 @@ def test_users_patch_sets_and_clears_the_store_pin(api_client, admin):
 
         # "" clears the pin back to the global view (distinct from None = unchanged).
         r = api_client.patch(
-            f"/admin/users/{target.id}", json={"store_id": ""}, headers=admin.headers
+            f"/admin/users/{target.id}", json={"store_id": ""}, headers=caller.headers
         )
         assert r.status_code == 200 and r.json()["store_id"] is None
     finally:
         target.drop()
+        caller.drop()
 
 
 # ---- 5. drug_alias write path ----------------------------------------------

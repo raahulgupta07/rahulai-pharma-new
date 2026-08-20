@@ -5,7 +5,33 @@
     <link rel="icon" type="image/svg+xml" href="%sveltekit.assets%/favicon.svg" />
     <link rel="apple-touch-icon" href="%sveltekit.assets%/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- The shipped default. It is also the fallback: if /brand 404s, fails, or
+         this install was never branded, this is the correct title and nothing
+         overwrites it. -->
     <title>City Pharma admin</title>
+    <!--
+      Branding is loaded over the network by +layout.svelte, which sets
+      document.title once it answers. On a branded install that leaves a visible
+      flash of the previous product's name in the tab. This applies the LAST
+      known values synchronously, before first paint; the layout still
+      re-applies the authoritative ones a moment later, so a stale cache
+      self-corrects rather than sticking. No cache = the default above, which is
+      exactly what an unbranded install should show.
+    -->
+    <script>
+      try {
+        var n = localStorage.getItem('brand_product_name');
+        if (n) document.title = n + ' admin';
+        var ic = localStorage.getItem('brand_icon');
+        if (ic && /^https?:\/\//i.test(ic) && new URL(ic).origin === location.origin) {
+          var l = document.querySelector('link[rel="icon"]');
+          if (l) {
+            l.removeAttribute('type');
+            l.setAttribute('href', ic);
+          }
+        }
+      } catch (e) {}
+    </script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
     %sveltekit.head%
   </head>

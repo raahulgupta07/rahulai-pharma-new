@@ -25,6 +25,8 @@ from app import auth as authmod
 from app import cache
 from app.config import get_settings
 
+from tests.pgconn import pg
+
 # Force app.api's import (and agno's import-time asyncio.Lock) during collection,
 # while a loop exists — the run()/asyncio.run tests here otherwise clear it
 # before api_client's first import. Same guard as tests/test_admin_scope.py.
@@ -183,19 +185,13 @@ class _Admin:
 
 
 def _pg(query: str, *args, fetch: bool = False):
-    async def go():
-        import asyncpg
+    """Run one statement on a private connection. Never touches app.db's pool.
 
-        conn = await asyncpg.connect(get_settings().postgres_url)
-        try:
-            if fetch:
-                return [dict(r) for r in await conn.fetch(query, *args)]
-            await conn.execute(query, *args)
-            return None
-        finally:
-            await conn.close()
+    One connection per PROCESS, not per statement — see tests/pgconn.py for
+    why the previous arrangement was the suite's whole wall clock.
+    """
 
-    return asyncio.run(go())
+    return pg(query, *args, fetch=fetch)
 
 
 @pytest.fixture

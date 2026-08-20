@@ -15,18 +15,69 @@ any of them resolves to the same row, so they keep one identity and one role.
 may do.** Roles (`super_admin`, `admin`, `user`) live only in Postgres and are set
 in the admin panel. Nothing in a Keycloak token or an LDAP group can grant them.
 
-**There is no self-signup.** If someone authenticates successfully against
-Keycloak but has no `users` row, the login is *refused*:
+**There is no self-signup, and by default an external login never creates a
+user.** If someone authenticates successfully against Keycloak but has no `users`
+row, the login is *refused*:
 
 > no account for this email — ask an administrator to create one
 
-This is deliberate and it is the main thing protecting you. Create the user in the
-admin panel first (Users → New), with the email exactly as the IdP will report it.
-The consequence: a person who administers the Keycloak realm cannot create a
-pharmacy admin by adding a realm user. They would also need admin access here.
+Create the user in the admin panel first (Users → New), with the email exactly as
+the IdP will report it. The consequence: a person who administers the Keycloak
+realm cannot create a pharmacy admin by adding a realm user. They would also need
+admin access here.
 
 Order of checks on `POST /auth/login`: local password first, then LDAP if enabled.
 The Keycloak button is a separate route (`/auth/sso/login`).
+
+### Just-in-time provisioning (optional, OFF by default)
+
+Hand-creating every user is fine for a handful of pharmacists and painful for a
+site. Two runtime settings — **`oidc_auto_create`** and **`ldap_auto_create`**,
+per source, both `false` unless you turn them on in Configuration →
+Authentication — change the refusal above into a *provisioning* step:
+
+* an unknown email that the IdP has authenticated gets a `users` row;
+* the row is always **`role = 'user'`** — no Keycloak claim, group or mapper can
+  make it an admin, because the role is a literal in the INSERT and is not a
+  parameter of any function on that path;
+* the row is always **`approved = false`**, so the person lands on the *pending
+  administrator approval* screen and reaches nothing until an admin approves
+  them (Users → Access → Approve). **JIT removes the typing, not the approval.**
+* an `auth_events` row (`user_autocreate`) records the source and the email.
+
+What it does *not* do: it never touches an existing row. A disabled account is
+still refused rather than resurrected, an existing role is never rewritten, and
+the email is normalised (trimmed + lower-cased) before the lookup, so JIT cannot
+create a second row shadowing a user whose address differs only in case.
+
+### Sign-in mode
+
+**`signin_mode`** (runtime setting; also reported by public `GET /auth/config` so
+the login screen renders the right controls):
+
+| mode | effect |
+|---|---|
+| `local` | SSO is not offered; `GET /auth/sso/login` answers **403**, and a callback already in flight is refused too. |
+| `hybrid` | **default** — password and SSO both available. Today's behaviour. |
+| `sso_only` | password sign-in is refused *after* the password is verified, with a "sign in with single sign-on" message (**403**). |
+
+⚠️ **`sso_only` always exempts a `super_admin`.** Without that carve-out, one
+mis-typed discovery URL locks every human out of the console — including the
+person who has to fix the realm — and the only way back in is editing Redis on
+the box. The break-glass account keeps its local password. The check runs *after*
+authentication, never before, so an anonymous caller cannot use the difference in
+responses to learn which addresses are super_admins.
+
+### Provider branding
+
+**`oidc_provider_type`** — one of `keycloak` (default), `entra`, `google`,
+`generic`. Cosmetic only: it picks the logo and the default button label on the
+login screen. `oidc_provider_name` remains the display label ("Sign in with
+…"). Both are returned by `GET /auth/config` and `GET /admin/auth-overview`.
+
+All five settings live in the same effective-config layer as the rest of the
+`ldap_*` / `oidc_*` keys (env default, overlaid by a Redis override written from
+the admin page), are read fresh on every login, and need no restart.
 
 ---
 
@@ -47,9 +98,24 @@ Realm → Clients → **Create client**
 | Web origins | `https://pharmacy.example.com` |
 
 > Keycloak 26 defaults **Client authentication** to Off, which yields a *public*
-> client with no secret. Do not leave it there. The backend skips `id_token`
-> signature verification precisely because it redeems the code over TLS
-> authenticated with `client_secret`; a public client removes that guarantee.
+> client with no secret. Turn it On anyway — a confidential client is one more
+> thing an attacker has to have.
+>
+> The backend no longer *depends* on that, though. It used to skip `id_token`
+> signature verification, on the reasoning that the code is redeemed over TLS
+> authenticated with `client_secret` — a guarantee a public client silently
+> removes. The `id_token` is now **verified against the realm JWKS**
+> (`jwks_uri` from this discovery document): RS256/ES256 only, `iss` must match
+> the realm, and the client must be named in `aud` **or** in `azp` — Keycloak
+> puts `aud: "account"` in the id_token and identifies the client in `azp`, so a
+> plain audience check would reject every real login. The authorize request also
+> carries a `nonce`, which must come back in the id_token.
+>
+> Key rotation is handled by refetching `jwks_uri` **once** when a token arrives
+> with an unknown `kid`. There is no "use the first key in the set" fallback: on
+> a rotation the first key is the new one and the token in hand is signed by the
+> old, so such a fallback turns a clear "unknown key id" into a confusing
+> signature error. A JWKS that cannot be fetched produces a 401, never a 500.
 
 Then Clients → `pharmacy-agent` → **Credentials** → copy the client secret.
 

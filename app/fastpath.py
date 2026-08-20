@@ -26,9 +26,12 @@ branch's rows.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 from app import tools
 from app.resolver import Resolution, resolve
@@ -190,6 +193,29 @@ async def answer(message: str, store_id: Optional[str]) -> Optional[Dict[str, An
         facts["article_code"] = top.article_code
         facts["brand_name"] = top.brand_name
         facts["generic_name"] = top.generic_name
+
+        # What the product IS, not just how many boxes there are. Without this
+        # the fast path can only ever produce a warehouse line —
+        # "395 units at site 20043-CCSJ" — because stock rows carry no
+        # composition, no indication and no price context. The catalog has an
+        # indication for 4,877 of 5,292 products; leaving it out was why the
+        # two hottest questions got the least human answers.
+        #
+        # One indexed lookup by primary key, no LLM, and it stays inside the
+        # fast path's budget. Degrades to a warehouse answer rather than an
+        # error if the row is missing (a stub), which is the honest fallback.
+        try:
+            detail = await tools.get_article_info(top.article_code)
+            if detail:
+                row = detail[0] if isinstance(detail, list) else detail
+                facts["product"] = {
+                    k: row.get(k)
+                    for k in ("composition", "indication", "dosage", "category")
+                    if isinstance(row, dict) and row.get(k)
+                }
+        except Exception:  # noqa: BLE001 — detail is a bonus, never a blocker
+            logger.warning("fast path: catalog detail lookup failed for %s", top.article_code)
+
         if intent == HOT_HAVE:
             facts["rows"] = await tools.get_stock(top.article_code)
         else:
@@ -225,8 +251,19 @@ one. Briefly list the candidate brand names + article codes and ask the user \
 which they mean.
 - For "find_at_other_stores" rows, the quantities belong to OTHER branches, not \
 the user's own store — say so.
-- Be concise: lead with the product name, article code, and stock. No clinical \
-essays or dosing advice.
+- Lead with the PRODUCT, not the warehouse. Open with what it is in plain words \
+— name, and if FACTS has a "product" block, one short clause from its \
+composition or indication ("BIOGESIC 500MG — paracetamol, for fever and mild \
+pain"). Then price and availability. The article code goes at the END of the \
+line, never at the front: a member of the public reading a 13-digit number \
+learns nothing from it.
+- Do not list every branch. Say it is available and give the branch with the \
+most stock, or the one they asked about — "in stock at most branches" beats a \
+53-row dump. They can ask for the rest.
+- Give the price when FACTS has one. "Do you have it" is nearly always also \
+"how much is it", and answering half of that forces a second question.
+- Be concise: two or three short lines. No clinical essays, and no dosing \
+advice unless the FACTS carry a dosage and the user asked for it.
 - Sound like the pharmacist at the counter, not a database. Say "2 left" or \
 "62 on the shelf", not "stock quantity: 2 units". No preamble — never open with \
 "According to the catalog", "Based on our records" or similar. The whole answer \
@@ -282,14 +319,16 @@ def get_phrasing_agent(model_id: Optional[str] = None):
     """
 
     from agno.agent import Agent
-    from agno.models.openrouter import OpenRouter
 
-    from app.agent import ALLOWED_MODEL_IDS
+    from app.agent import ALLOWED_MODEL_IDS, InstrumentedOpenRouter
     from app.config import get_settings
 
     settings = get_settings()
     chosen = model_id if model_id in ALLOWED_MODEL_IDS else settings.openrouter_model
-    model = OpenRouter(
+    # Instrumented, like every other model call. The fast path is ONE call and
+    # is the whole latency story for the two hottest intents, so it is the call
+    # most worth having a per-call row for.
+    model = InstrumentedOpenRouter(
         id=chosen,
         api_key=settings.openrouter_api_key,
         # `max_tokens` caps reasoning AND content together, and these Gemini

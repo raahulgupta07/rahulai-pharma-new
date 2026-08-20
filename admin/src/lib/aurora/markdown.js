@@ -101,14 +101,22 @@ export function renderMarkdown(src) {
       const cells = (r) =>
         r.replace(/^\||\|$/g, '').split('|').map((c) => c.trim());
       const head = cells(line);
+      // The separator row carries the column alignment (`---:` = right). It was
+      // parsed and thrown away, so every stock and price column the agent
+      // deliberately right-aligned rendered flush left. `align` is the only
+      // attribute emitted here, and only ever from this fixed set.
+      const align = cells(lines[i + 1]).map((c) =>
+        /^:-+:$/.test(c) ? 'center' : /-+:$/.test(c) ? 'right' : ''
+      );
+      const at = (n) => (align[n] ? ` align="${align[n]}"` : '');
       i += 2;
       const rows = [];
       while (i < lines.length && lines[i].includes('|')) rows.push(cells(lines[i++]));
       out.push(
         `<table class="md-table"><thead><tr>${head
-          .map((c) => `<th>${inline(c)}</th>`)
+          .map((c, n) => `<th${at(n)}>${inline(c)}</th>`)
           .join('')}</tr></thead><tbody>${rows
-          .map((r) => `<tr>${r.map((c) => `<td>${inline(c)}</td>`).join('')}</tr>`)
+          .map((r) => `<tr>${r.map((c, n) => `<td${at(n)}>${inline(c)}</td>`).join('')}</tr>`)
           .join('')}</tbody></table>`
       );
       continue;

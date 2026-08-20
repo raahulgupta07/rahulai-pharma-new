@@ -1,4 +1,10 @@
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=Noto+Sans+Myanmar:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap');
+/* One loader for every family. Nunito (the old DISPLAY face) is GONE: agentdash
+   has no display face, so `.page-title` and chat headings now run the body
+   stack at the same weight. --font-display is kept as a token so no page has to
+   change; it just points at the sans stack now.
+   Noto Sans Myanmar is load-bearing and stays — the agent answers in Burmese.
+   JetBrains Mono stays for SKU codes, cache keys and file names. */
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+Myanmar:wght@400;500;600&display=swap');
 @import "tailwindcss";
 
 /* Tokens map to runtime CSS vars (--c-*) so they switch in dark mode. */
@@ -25,46 +31,281 @@
   --color-danger-soft: var(--c-danger-soft);
   --color-info: var(--c-info);
   --color-info-soft: var(--c-info-soft);
+  --color-series-1: var(--c-series-1);
+  --color-series-2: var(--c-series-2);
+  --color-series-3: var(--c-series-3);
+  --color-series-4: var(--c-series-4);
+  --color-series-5: var(--c-series-5);
+  --color-series-6: var(--c-series-6);
+  --color-series-other: var(--c-series-other);
+  /* Sign-in showcase. Fixed dark scale — see the block comment on --c-show-bg. */
+  --color-show-bg: var(--c-show-bg);
+  --color-show-bg-2: var(--c-show-bg-2);
+  --color-show-bg-3: var(--c-show-bg-3);
+  --color-show-ink: var(--c-show-ink);
+  --color-show-ink-2: var(--c-show-ink-2);
+  --color-show-ink-3: var(--c-show-ink-3);
+  --color-show-accent: var(--c-show-accent);
+  --color-show-success: var(--c-show-success);
+  --color-show-line: var(--c-show-line);
+  --color-show-line-2: var(--c-show-line-2);
+  --color-rail-bg: var(--c-rail-bg);
+  --color-rail-ink: var(--c-rail-ink);
+  --color-rail-ink-2: var(--c-rail-ink-2);
+  --color-rail-ink-3: var(--c-rail-ink-3);
+  --color-rail-line: var(--c-rail-line);
+  --color-rail-fill: var(--c-rail-fill);
+  --color-rail-fill-2: var(--c-rail-fill-2);
+  --color-rail-link: var(--c-rail-link);
   --font-sans: "IBM Plex Sans", "Noto Sans Myanmar", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-display: "Space Grotesk", "Noto Sans Myanmar", -apple-system, sans-serif;
+  --font-display: "IBM Plex Sans", "Noto Sans Myanmar", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-  --radius-lg: 1rem;
+  /* TYPE SCALE. Ten steps, named by role rather than by t-shirt size, because
+     `text-meta` says what a value is for and `text-xs` only says it is small.
+
+     Measured before it was written: the console used 28 distinct sizes across
+     1,092 declarations and the redesign 21, and the two cluster identically —
+     92.5% of every use sits between 11px and 14px. So the scale is dense where
+     the console actually lives and sparse above it.
+
+     Collapsing 28 values onto these 10 moves nothing in that dense band by more
+     than 0.5px. Six values move further and all six are headings, 13 uses in
+     total. A tie rounds UP: half a pixel either way is a coin toss, and the
+     larger of two equal choices is the safer one for staff reading stock
+     numbers off a shelf-side screen.
+
+     Do not add a step without re-running the measurement. Every one of the 28
+     values this replaced was somebody making a local decision that looked
+     right on its own screen. */
+  --text-micro: 10.5px;      /* uppercase eyebrows, tracked */
+  --text-label: 11.5px;      /* table headers, chip text */
+  --text-meta: 12.5px;       /* dense table cells, captions */
+  --text-body-sm: 13.5px;    /* secondary body */
+  --text-body: 15px;         /* body */
+  --text-title: 18px;        /* card and section titles */
+  --text-heading: 22px;      /* page headings */
+  --text-display: 26px;      /* KPI numbers */
+  --text-display-lg: 32px;
+  --text-hero: 40px;
+
+  /* LEADING FOR BILINGUAL TEXT.
+
+     Myanmar script stacks marks above and below the band Latin sits in, so the
+     same line height that leaves a Latin line breathing room leaves a Burmese
+     one almost none. Measured on this console with the real faces, at the
+     leading these surfaces used to run at:
+
+       15px / 22.5px   Burmese ink 22px   → 0.5px of room   (Latin: 8.2px)
+       13.5px / 20.25  Burmese ink 19.8   → 0.4px           (Latin: 7.3px)
+       12.5px / 18.75  Burmese ink 18.4   → 0.4px           (Latin: 6.8px)
+
+     Two Burmese lines at that leading are touching. Half of what this product
+     answers is Burmese.
+
+     1.9 is the redesign's own number and it is a TOKEN rather than a value
+     typed into five rules, because the Foundations page reads it back and
+     checks every one of those surfaces against it. Applied to the surfaces
+     that CAN hold Myanmar — not the ones that happen to today — because that
+     is what the rule says and because content changes without the CSS being
+     revisited. */
+  --leading-bilingual: 1.9;
+
+  /* RADIUS SCALE. Five steps plus `rounded-full`.
+
+     `--radius-lg` used to be overridden here to 1rem, which made `rounded-lg`
+     16px while `rounded-xl` kept Tailwind's 12px — so lg was BIGGER than xl,
+     across 163 and 74 uses respectively. Nobody reading the class names could
+     have guessed that. The override is gone and every use is named by role.
+
+     14px is the redesign's card corner and the most-used value on both sides
+     (145 uses), so it anchors the scale. Radius ties round DOWN, toward it. */
+  --radius-xs: 3px;          /* skeleton bars, hairline chips */
+  --radius-control: 6px;     /* inputs, small buttons */
+  --radius-card: 10px;       /* buttons, tiles, cards */
+  --radius-panel: 14px;      /* panels, drawers, large cards */
+  --radius-hero: 18px;       /* the largest surfaces */
 }
 
-/* City Pharma teal — LIGHT. Values come straight from the design spec.
-   --c-on-accent is what sits ON a filled accent surface (the hero card); it
-   must flip in dark mode, where the accent itself becomes light. */
+/* LIGHT — the CityCare v2 palette (redesign, adopted 2026-08-19).
+   Values come from `Console - Redesign.dc.html`, taken by usage frequency, and
+   every pair below was measured against all three surfaces before it was
+   written here. Nothing is a derived guess.
+
+   The accent returns to the CityCare logo indigo #2F3293. The console had
+   drifted to Tailwind blue-600 #2563EB; the redesign restores the brand mark as
+   the action colour. Indigo measures BETTER, not worse — 10.51:1 on white
+   against blue-600's 5.17:1.
+
+   --c-ink-3 is #61667E, NOT the redesign's own #666C85. #666C85 measures 4.51:1
+   on --c-surface-2, which passes by 0.01. That margin is the exact shape of the
+   bug this token already shipped once (it held #6B7280 in BOTH themes and was
+   responsible for most of the console's 820 measured contrast failures). #61666E
+   is visually indistinguishable and clears AA by a real margin (4.93:1).
+
+   --c-success IS the accent family, deliberately. The redesign contains no green
+   at all: a healthy service is painted #EAEBF7 / #23266F with a #2F3293 dot, and
+   attention is amber. Good news is quiet, only problems get a warm colour. If a
+   distinct green is wanted back, it is these two lines.
+
+   --c-on-accent is what sits ON a filled accent surface; it FLIPS in dark mode,
+   where the accent itself becomes light. Never white on the dark-mode accent. */
 :root {
-  --c-page:oklch(98% 0.004 240); --c-surface:#ffffff; --c-surface-2:oklch(96% 0.006 240);
-  --c-ink:oklch(19% 0.015 240); --c-ink-2:oklch(42% 0.014 240); --c-ink-3:oklch(58% 0.012 240);
-  --c-accent:oklch(46% 0.10 195); --c-accent-hover:oklch(40% 0.11 195); --c-accent-soft:oklch(94% 0.03 195);
-  --c-accent-2:oklch(62% 0.14 55); --c-accent-2-soft:oklch(95% 0.04 70);
+  --c-page:#F5F6FA; --c-surface:#ffffff; --c-surface-2:#EDEFF6;
+  --c-ink:#14162E; --c-ink-2:#474C63; --c-ink-3:#61667E;
+  --c-accent:#2F3293; --c-accent-hover:#23266F; --c-accent-soft:#EAEBF7;
+  --c-accent-2:#C8CBDC; --c-accent-2-soft:#EDEFF6;
   --c-on-accent:#ffffff;
-  --c-line:oklch(88% 0.008 240); --c-line-2:oklch(93% 0.006 240);
-  --c-success:oklch(55% 0.13 150); --c-success-soft:oklch(94% 0.05 150);
-  --c-warning:oklch(65% 0.15 80); --c-warning-soft:oklch(95% 0.05 85);
-  --c-danger:oklch(55% 0.18 25); --c-danger-soft:oklch(95% 0.05 25);
-  --c-info:oklch(52% 0.10 230); --c-info-soft:oklch(94% 0.03 230);
-  --shadow-card:0 1px 2px rgba(20,30,40,.04), 0 4px 16px rgba(20,30,40,.05);
-  --shadow-pop:0 16px 40px rgba(10,20,25,.15);
+  --c-line:#E2E4EE; --c-line-2:#EEF0F7;
+  --c-success:#23266F; --c-success-soft:#EAEBF7;
+  --c-warning:#8A4A04; --c-warning-soft:#FEF6EA;
+  --c-danger:#C1272D; --c-danger-soft:#FBE3E4;
+  --c-info:#2F3293; --c-info-soft:#EAEBF7;
+
+  /* CHART SERIES SCALE — six categorical fills plus one fold band.
+
+     This used to be two colours, and everything past the second was borrowed:
+     charts reached for --c-accent-2, --c-success, --c-line-2 and a six-entry
+     wheel that CYCLED. Measured on the running console, a ten-category stacked
+     bar was painted with five distinct fills — five pairs of categories sharing
+     a swatch with nothing on screen saying so. --c-accent-2 (a de-emphasis
+     colour) measured 2.24:1 as a data series on --c-surface in dark and 1.61:1
+     in light; --c-line-2 carrying the "Miss" bar measured 1.18:1 dark and
+     1.14:1 light. Those two are chart fills that cannot be seen at all.
+
+     The rule these values satisfy, and the rule they DELIBERATELY do not:
+
+     * EVERY fill here clears WCAG 1.4.11 (3:1) against all three surfaces a
+       chart is drawn on — --c-page, --c-surface, --c-surface-2 — in its own
+       theme. Worst margin in this palette is 3.67:1 (light) and 3.65:1 (dark).
+
+     * They are NOT 3:1 against each other, and no palette can be. WCAG contrast
+       is a pure luminance ratio, so k mutually-3:1 colours need
+       L(i+1) >= 3*(L(i)+0.05)-0.05; from L=0 that chain is 0 -> 0.100 -> 0.400
+       -> 1.300, and white is 1.0. THREE is the ceiling for the entire sRGB
+       gamut, and once every fill must also clear 3:1 against a near-black page
+       (L >= 0.115 on --c-page) the chain becomes 0.115 -> 0.445 -> 1.436 and
+       the ceiling is TWO. A six-colour palette claiming mutual 3:1 does not
+       exist. Series are separated PERCEPTUALLY instead: minimum CIEDE2000
+       distance is 19.7 in light and 19.3 in dark, across the six series, the
+       fold band, --c-danger and --c-warning together.
+
+     * Two segments that touch in a stacked bar are separated by a
+       surface-coloured stroke rather than by their own contrast — see
+       StackedBars.svelte / Donut.svelte. That turns an unsatisfiable
+       segment-vs-segment constraint into segment-vs-surface, which every fill
+       above already clears.
+
+     Hues are spaced on OKLCH around the two that were already spoken for
+     (--c-danger at 25 degrees, --c-warning at 58): 275 (the accent), 328, 150,
+     192, 235, 108. series-1 IS the accent by construction — a chart's first
+     series and the console's action colour must not drift apart.
+
+     The green and cyan are a deliberate departure from "the redesign contains
+     no green at all". That rule is about CHROME, where a colour carries a
+     verdict; a chart's fifth category carries no verdict and needs hue distance
+     that a monochrome indigo ramp cannot supply. The arithmetic above is why.
+
+     --c-series-other is the fold band: charts do not cycle, they group the tail
+     into one labelled "Other (n)" band. It is also what a de-emphasised but
+     MEANINGFUL series is painted in — a "Miss" bar and a "Target" line are read
+     off the chart, so they get a legible neutral rather than a hairline. */
+  --c-series-1:var(--c-accent); --c-series-2:#A256A1;
+  --c-series-3:#258D48; --c-series-4:#008A86;
+  --c-series-5:#0481B3; --c-series-6:#7F7C00;
+  --c-series-other:#5B5D65;
+
+  /* Sign-in showcase panel. This is the ONE surface in the console that is dark
+     in both themes: it is a product demo, not a page, and agentdash's own
+     sign-in showcase is a fixed navy panel too. So these do NOT flip in
+     html.dark — they are defined here and inherited there.
+
+     They exist because the panel used --c-accent, which in LIGHT mode is
+     blue-600 #2563EB and measured 3.0:1 on the panel's own near-black. Every
+     accent-coloured word in the demo was below AA for half the console's users.
+     --c-show-accent is blue-400 (7.0:1 on --c-show-bg) and cannot drift with
+     the theme. Do not reach for --c-accent inside the showcase. */
+  --c-show-bg:#0A0B1C; --c-show-bg-2:#141633; --c-show-bg-3:#23266F;
+  --c-show-ink:#EEF0F7; --c-show-ink-2:#C7CAEA; --c-show-ink-3:#9AA0C4;
+  --c-show-accent:#9BA0F0; --c-show-success:#9BA0F0;
+  --c-show-line:rgba(255,255,255,.09); --c-show-line-2:rgba(155,160,240,.28);
+
+  /* THE RAIL. Dark in BOTH themes, like the showcase above and for the same
+     reason: it is a fixed piece of the product's identity, not a surface that
+     follows the reader's preference. The console's own light/dark switch moves
+     the page beside it, never the rail.
+
+     --c-rail-ink-3 is #8389B4, NOT the #7D83AE in the design file. That value
+     measures 4.49:1 on #171A47 — one hundredth under AA, on the 9.5px group
+     labels and the 10.5px version row, which are the smallest text in the
+     console. This is the same defect that shipped once already as --c-ink-3;
+     a colour that misses by 0.01 is a colour that misses. #8389B4 is 4.86. */
+  --c-rail-bg:#171A47;
+  --c-rail-ink:#EDEFFA;
+  --c-rail-ink-2:#B7BDE2;
+  --c-rail-ink-3:#8389B4;
+  --c-rail-line:rgba(255,255,255,.09);
+  --c-rail-fill:rgba(255,255,255,.1);
+  --c-rail-fill-2:rgba(255,255,255,.08);
+  --c-rail-link:#5BC8F5;
+
+  --shadow-card:0 1px 2px rgba(0,0,0,.05);
+  --shadow-pop:0 10px 15px -3px rgba(0,0,0,.1), 0 4px 6px -4px rgba(0,0,0,.1);
+  /* Sign-in only. The primary button carries a tinted lift in agentdash; the
+     tint is derived from the accent so re-branding cannot leave a blue shadow
+     under a green button. */
+  --shadow-accent:0 12px 24px -12px color-mix(in srgb, var(--c-accent) 60%, transparent);
+  --shadow-showcase:0 40px 90px -40px rgba(10,20,45,.8);
 }
 
-/* City Pharma teal — DARK. Derived from the light spec: same hues, lightness
-   inverted, chroma eased on large surfaces. Accents are lifted above 70% L so
-   they clear AA on a dark surface, which is why --c-on-accent goes dark. */
+/* DARK — rebuilt on the indigo hue, and REPAIRED.
+
+   The old dark ramp was the single worst thing in the console. Measured across
+   18 destinations: 820 text nodes failed WCAG AA and 735 of them were in dark
+   mode. One token caused most of it — --c-ink-3 held #6B7280 in BOTH themes, so
+   a value chosen to pass on white was also being asked to pass on near-black,
+   where it measures 3.04:1. A token with one value for two themes cannot be
+   right in both; every entry below is a light/dark PAIR by construction.
+
+   Two more that were measured failing and are fixed here: --c-accent (#60A5FA)
+   on --c-accent-soft (#1E3A8A) at 4.07:1, and the native date picker rendering
+   light-on-light because nothing declared `color-scheme`.
+
+   Every pair below clears AA on all three dark surfaces with margin; the
+   tightest is --c-ink-3 at 6.12:1 on --c-surface-2. This is a REPAIR on the new
+   hue, not a reviewed dark design — the redesign ships no dark mode at all (its
+   moon button has no handler and the file contains no dark palette), so the
+   design review of dark still belongs to a later pass.
+
+   --c-on-accent goes near-black because the dark accent is light indigo. */
 html.dark {
-  --c-page:oklch(17% 0.012 240); --c-surface:oklch(21% 0.013 240); --c-surface-2:oklch(25% 0.013 240);
-  --c-ink:oklch(95% 0.006 240); --c-ink-2:oklch(76% 0.012 240); --c-ink-3:oklch(63% 0.012 240);
-  --c-accent:oklch(72% 0.11 195); --c-accent-hover:oklch(78% 0.10 195); --c-accent-soft:oklch(30% 0.05 195);
-  --c-accent-2:oklch(75% 0.13 55); --c-accent-2-soft:oklch(30% 0.06 55);
-  --c-on-accent:oklch(17% 0.012 240);
-  --c-line:oklch(30% 0.012 240); --c-line-2:oklch(36% 0.012 240);
-  --c-success:oklch(72% 0.14 150); --c-success-soft:oklch(27% 0.05 150);
-  --c-warning:oklch(78% 0.13 80); --c-warning-soft:oklch(29% 0.05 80);
-  --c-danger:oklch(70% 0.15 25); --c-danger-soft:oklch(29% 0.06 25);
-  --c-info:oklch(72% 0.11 230); --c-info-soft:oklch(28% 0.05 230);
-  --shadow-card:0 1px 2px rgba(0,0,0,.3), 0 4px 16px rgba(0,0,0,.35);
-  --shadow-pop:0 12px 48px rgba(0,0,0,.5);
+  --c-page:#0B0C1B; --c-surface:#14162E; --c-surface-2:#1D2043;
+  --c-ink:#EEF0F7; --c-ink-2:#C7CAEA; --c-ink-3:#9AA0C4;
+  --c-accent:#9BA0F0; --c-accent-hover:#B8BCF7; --c-accent-soft:#23266F;
+  --c-accent-2:#4A4F72; --c-accent-2-soft:#20234A;
+  --c-on-accent:#0B0C1B;
+  --c-line:#2E3157; --c-line-2:#20234A;
+  --c-success:#9BA0F0; --c-success-soft:#23266F;
+  --c-warning:#F0B357; --c-warning-soft:#3A2708;
+  --c-danger:#F08A8E; --c-danger-soft:#3E1214;
+  --c-info:#9BA0F0; --c-info-soft:#23266F;
+  /* The series scale, dark. Same six hues as light so a series keeps its
+     identity across the switch, lifted to OKL 0.70 so each clears 3:1 on
+     --c-surface-2 (the tightest of the three, at #1D2043). --c-series-2 used to
+     be #C39BE8, 1.06:1 against --c-series-1 directly above it in a stacked bar.
+     See the block comment in :root for why 3:1 BETWEEN series is not achievable
+     and what replaces it. */
+  --c-series-1:var(--c-accent); --c-series-2:#D277D0;
+  --c-series-3:#43B966; --c-series-4:#02B5B2;
+  --c-series-5:#03ABEC; --c-series-6:#A8A400;
+  --c-series-other:#777A82;
+  /* Without this the browser paints its own controls — the date input in the
+     activity filter bar rendered a light picker on the dark bar. */
+  color-scheme: dark;
+  /* The sign-in button's tinted lift. The dark accent is blue-400, so the
+     light-mode 60% tint reads as a glow on a near-black page — halve it. */
+  --shadow-accent:0 12px 24px -12px color-mix(in srgb, var(--c-accent) 30%, transparent);
+  --shadow-card:0 1px 2px rgba(0,0,0,.4);
+  --shadow-pop:0 10px 15px -3px rgba(0,0,0,.5), 0 4px 6px -4px rgba(0,0,0,.5);
 }
 
 html, body { height: 100%; }
@@ -77,58 +318,120 @@ body {
   text-rendering: optimizeLegibility;
 }
 
-/* Display headings (Space Grotesk) */
-.page-title { font-family: var(--font-display); font-weight: 700; letter-spacing: -0.01em; }
+/* Page heading. agentdash's h1 is 18px/600 with no display face and no
+   tracking change; size stays where each page sets it. */
+.page-title { font-family: var(--font-display); font-weight: 600; letter-spacing: -0.011em; }
 
-/* Visible focus ring on every keyboard-focusable element (a11y) */
+/* Visible focus ring on every keyboard-focusable element (a11y).
+
+   The ring is its own token, NOT --color-accent, because the accent is a
+   PAGE colour and two surfaces in this console are dark in both themes. The
+   accent measured 1.57:1 on the rail (#2F3293 on #171A47) and 1.27:1 on the
+   deepest showcase stop — WCAG 1.4.11 asks for 3:1. The rail is the first
+   nineteen tab stops on every screen, so that ring being invisible meant a
+   keyboard user could not see where they were for the first nineteen presses
+   of every page. A ring nobody can see is the same as no ring.
+
+   Each always-dark scope re-points --focus-ring at a colour drawn from its
+   OWN scale, so the ring cannot drift away from its background when the
+   brand accent is re-themed. tests/test_a11y_focus.py measures every pair. */
+:root { --focus-ring: var(--color-accent); }
+.rail { --focus-ring: var(--c-rail-link); }              /* 8.65:1 on --c-rail-bg */
+.showcase-panel { --focus-ring: var(--c-show-accent); }  /* 5.50:1 on the lightest stop */
+
 :where(button, a, select, input, textarea, [role="button"], [tabindex]):focus-visible {
-  outline: 2px solid var(--color-accent);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
-  border-radius: 8px;
+  border-radius: var(--radius-control);
 }
+/* Skip link. The rail is nineteen tab stops and it comes before the content on
+   every screen, so without this a keyboard user pressed Tab nineteen times to
+   reach the page they were already looking at.
+
+   Hidden by TRANSFORM, not by `display:none` or `visibility:hidden` — those
+   two take the link out of the accessibility tree and out of the tab order,
+   which is the whole point of it. It stays focusable at all times and slides
+   into view when it takes focus. `:focus`, not `:focus-visible`: this control
+   exists only to be focused, and there is nothing to hide from a mouse user
+   who has somehow landed on it. */
+.skip-link {
+  position: fixed; top: 10px; left: 10px; z-index: 60;
+  transform: translateY(-300%);
+  background: var(--color-accent); color: var(--color-on-accent);
+  padding: 9px 15px; border-radius: var(--radius-control);
+  font-size: var(--text-body-sm); font-weight: 600; text-decoration: none;
+  /* The ring is drawn INSIDE the pill. --c-on-accent is white in light mode,
+     and at the global +2px offset that put a white ring on the near-white page
+     behind it — 1.08:1, measured. A negative offset lands it on the accent,
+     which is the one background --c-on-accent is guaranteed against. */
+  --focus-ring: var(--c-on-accent);
+}
+.skip-link:focus-visible { outline-offset: -4px; }
+.skip-link:focus { transform: none; }
+
 /* Minimum touch target for interactive controls (WCAG 44px on mobile) */
 @media (pointer: coarse) {
   button, a[role], select, .tap { min-height: 44px; }
 }
 /* Keyboard-clickable table rows */
 .tbl tbody tr[role="button"] { cursor: pointer; }
-.tbl tbody tr[role="button"]:focus-visible { outline: 2px solid var(--color-accent); outline-offset: -2px; }
+.tbl tbody tr[role="button"]:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
 .tnum { font-variant-numeric: tabular-nums; }
 
 /* Opt-in soft elevation (add class="elev" to a card for shadow). */
 .elev { box-shadow: var(--shadow-card); }
 
-.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
+.tbl { width: 100%; border-collapse: collapse; font-size: var(--text-meta); }
 .tbl thead th {
   position: sticky; top: 0; z-index: 1; background: var(--color-surface);
-  text-align: left; font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .05em;
-  color: var(--color-ink-3); padding: 11px 16px; border-bottom: 1px solid var(--color-line);
+  text-align: left; font-weight: 600; font-size: var(--text-label); text-transform: uppercase; letter-spacing: .05em;
+  color: var(--color-ink-3); padding: 10px 16px; border-bottom: 1px solid var(--color-line);
 }
-.tbl tbody td { padding: 12px 16px; border-top: 1px solid var(--color-line); }
+.tbl tbody td { padding: 10px 16px; border-top: 1px solid var(--color-line-2); }
 .tbl tbody tr { transition: background .12s; }
 .tbl tbody tr:hover { background: var(--color-surface-2); }
 .tbl .num { text-align: right; font-variant-numeric: tabular-nums; }
 
-.skel { background: var(--color-surface-2); border-radius: 6px; height: 12px; animation: pulse 1.2s ease-in-out infinite; }
+/* Any line that can hold Myanmar. See --leading-bilingual above: this is not
+   a style preference, it is the difference between 0.4px and 6.5px of room
+   between one line's descenders and the next line's stacked marks. */
+.bilingual { line-height: var(--leading-bilingual); }
+
+.skel { background: var(--color-surface-2); border-radius: var(--radius-control); height: 12px; animation: pulse 1.2s ease-in-out infinite; }
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.45} }
 @media (prefers-reduced-motion: reduce) { * { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; } }
 
 /* ---- chat markdown rendering ---- */
-.md { font-size: 15.5px; line-height: 1.72; color: var(--color-ink); }
+.md { font-size: var(--text-body); line-height: var(--leading-bilingual); color: var(--color-ink); }
 .md p { margin: 0 0 11px; }
 .md p:last-child { margin-bottom: 0; }
-.md .md-h { font-family: var(--font-display); font-weight: 700; letter-spacing: -.01em; margin: 18px 0 9px; line-height: 1.3; }
-.md h2.md-h { font-size: 18px; } .md h3.md-h { font-size: 15.5px; } .md h4.md-h { font-size: 14px; }
+.md .md-h { font-family: var(--font-display); font-weight: 600; letter-spacing: -.011em; margin: 18px 0 9px; line-height: 1.3; }
+.md h2.md-h { font-size: var(--text-title); } .md h3.md-h { font-size: var(--text-body); } .md h4.md-h { font-size: var(--text-body-sm); }
 .md .md-list { margin: 4px 0 12px; padding-left: 22px; }
 .md .md-list li { margin: 3px 0; }
 .md ol.md-list { list-style: decimal; } .md ul.md-list { list-style: disc; }
 .md .md-link { color: var(--color-accent); text-decoration: underline; text-underline-offset: 2px; }
-.md .md-code { font-family: var(--font-mono); font-size: 0.88em; background: var(--color-surface-2); border: 0.5px solid var(--color-line); border-radius: 5px; padding: 1px 5px; }
-.md .md-pre { background: var(--color-surface-2); border: 0.5px solid var(--color-line); border-radius: 11px; padding: 13px 15px; overflow-x: auto; margin: 0 0 12px; }
-.md .md-pre code { font-family: var(--font-mono); font-size: 12.5px; }
-.md .md-table { width: 100%; border-collapse: collapse; font-size: 13.5px; margin: 4px 0 12px; border: 1px solid var(--color-line); border-radius: 11px; overflow: hidden; }
-.md .md-table th { background: var(--color-surface-2); text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--color-ink-3); padding: 8px 12px; font-weight: 700; }
-.md .md-table td { padding: 9px 12px; border-top: 1px solid var(--color-line); }
+.md .md-code { font-family: var(--font-mono); font-size: 0.88em; background: var(--color-surface-2); border: 1px solid var(--color-line); border-radius: var(--radius-control); padding: 1px 5px; }
+.md .md-pre { background: var(--color-surface-2); border: 1px solid var(--color-line); border-radius: var(--radius-card); padding: 13px 15px; overflow-x: auto; margin: 0 0 12px; }
+.md .md-pre code { font-family: var(--font-mono); font-size: var(--text-meta); }
+/* `border-radius` on a table whose `border-collapse` is `collapse` does
+   nothing — the corners were declared and never drawn. `separate` with zero
+   spacing keeps the same single-hairline look AND actually rounds. */
+.md .md-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: var(--text-body-sm); margin: 4px 0 12px; background: var(--color-surface); border: 1px solid var(--color-line); border-radius: var(--radius-panel); overflow: hidden; }
+.md .md-table th { background: var(--color-page); text-align: left; font-size: var(--text-micro); text-transform: uppercase; letter-spacing: .07em; color: var(--color-ink-3); padding: 9px 14px; font-weight: 600; border-bottom: 1px solid var(--color-line); }
+.md .md-table td { padding: 10px 14px; border-top: 1px solid var(--color-line-2); color: var(--color-ink); }
+.md .md-table tbody tr:first-child td { border-top: 0; }
+/* A right-aligned markdown column is a number column. Give it the mono face and
+   tabular figures so the digits line up, which is the whole point of the
+   alignment the agent asked for. */
+.md .md-table td[align='right'], .md .md-table th[align='right'] { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 /* clickable article-code chip */
-.md .md-code-chip { font-family: var(--font-mono); font-size: 0.84em; font-weight: 600; color: var(--color-accent); background: var(--color-accent-soft); border: 0.5px solid color-mix(in srgb, var(--color-accent) 28%, transparent); border-radius: 6px; padding: 0 6px; cursor: pointer; transition: background .12s, color .12s; }
+.md .md-code-chip { font-family: var(--font-mono); font-size: 0.84em; font-weight: 600; color: var(--color-accent); background: var(--color-accent-soft); border: 1px solid color-mix(in srgb, var(--color-accent) 28%, transparent); border-radius: var(--radius-control); padding: 0 6px; cursor: pointer; transition: background .12s, color .12s; }
 .md .md-code-chip:hover { background: var(--color-accent); color: var(--color-on-accent); }
+
+/* Sign-in showcase panel background. A gradient cannot be a colour token, so it
+   lives here rather than in a style attribute on the page. */
+.showcase-panel {
+  background: radial-gradient(120% 120% at 82% -12%,
+              var(--c-show-bg-3) 0%, var(--c-show-bg-2) 52%, var(--c-show-bg) 100%);
+}

@@ -38,6 +38,36 @@ def ldap_on(monkeypatch):
     return s
 
 
+# ldap3 is NOT optional — it is `requirements.txt:21` and the api image has it.
+# The three tests below therefore skip only when the interpreter running pytest
+# is missing a dependency it is supposed to have, which in practice means the
+# system python3 was used instead of ./venv/bin/python. Under the venv they run
+# and pass (ldap3 2.9.1, verified).
+#
+# Scoped to a fixture rather than a module-level `pytest.importorskip`, and this
+# distinction matters: a module-level skip would also retire
+# `test_ldap_rejects_empty_password` and every `test_sso_state_*` in this file,
+# none of which import ldap3. `test_ldap_rejects_empty_password` in particular
+# covers the RFC 4513 unauthenticated-simple-bind bypass and passes fine without
+# ldap3, because the guard rejects the blank password before any bind is built —
+# skipping it would hide the worst of the three bugs this module exists for.
+#
+# `importorskip` catches ImportError and nothing else, so a real regression
+# inside ldap3 still fails loudly instead of quietly skipping.
+LDAP3_MISSING_REASON = (
+    "ldap3 not installed — LDAP bind and TLS guards NOT exercised "
+    "(ldap3 is in requirements.txt; run ./venv/bin/python -m pytest, "
+    "or pip install -r requirements.txt)"
+)
+
+
+@pytest.fixture
+def ldap3_installed():
+    """The real ldap3 module, or skip loudly naming what went unchecked."""
+
+    return pytest.importorskip("ldap3", reason=LDAP3_MISSING_REASON)
+
+
 # ---- LDAP -------------------------------------------------------------------
 
 
@@ -85,7 +115,7 @@ def test_ldap_rejects_blank_username(ldap_on, monkeypatch):
     assert called is False, "blank username reached the LDAP bind"
 
 
-def test_ldap_connection_object_is_always_truthy():
+def test_ldap_connection_object_is_always_truthy(ldap3_installed):
     """The fact the original `if not ldap3.Connection(...)` check depended on.
 
     ldap3's Connection defines neither __bool__ nor __len__, so it is truthy even
@@ -100,7 +130,9 @@ def test_ldap_connection_object_is_always_truthy():
     assert conn.bound is False         # <- what we actually check
 
 
-def test_ldap_bind_failure_is_an_autherror_not_a_500(ldap_on, monkeypatch):
+def test_ldap_bind_failure_is_an_autherror_not_a_500(
+    ldap3_installed, ldap_on, monkeypatch
+):
     """A wrong password must surface as 401, not an uncaught LDAPBindError."""
 
     from ldap3.core.exceptions import LDAPBindError
@@ -115,7 +147,7 @@ def test_ldap_bind_failure_is_an_autherror_not_a_500(ldap_on, monkeypatch):
         run(authmod.login_ldap("someone", "wrong-password"))
 
 
-def test_ldap_tls_validates_certificates_by_default():
+def test_ldap_tls_validates_certificates_by_default(ldap3_installed):
     """LDAPS without cert validation is MITM-able; the default must be strict."""
 
     import ssl
@@ -266,11 +298,26 @@ async def _scrub():
         await c.hdel(cache._CONFIG_KEY, *keys)
 
 
-def test_external_login_cannot_create_a_user():
+def test_external_login_cannot_create_a_user_by_default():
     """No self-signup: a Keycloak realm admin must not be able to mint a pharmacy
-    admin just by creating a realm user with the right email."""
+    admin just by creating a realm user with the right email.
+
+    JIT provisioning (2026-08-17) made creation *possible* but only behind a
+    per-source flag that is off unless an admin turns it on, and what it creates
+    is pending and unprivileged. Both halves are asserted here; the behavioural
+    coverage lives in tests/test_jit_approval.py.
+    """
 
     import inspect
 
-    src = inspect.getsource(authmod._merge_external)
-    assert "INSERT" not in src.upper(), "_merge_external must never create users"
+    cfg = run(authmod.effective_auth())
+    assert cfg.oidc_auto_create is False, "JIT provisioning must default to OFF"
+    assert cfg.ldap_auto_create is False, "JIT provisioning must default to OFF"
+
+    # The only creation path an external login can reach. `role` and `approved`
+    # are SQL literals there — no parameter, so no IdP claim can set either.
+    src = inspect.getsource(authmod._autocreate_external)
+    body = src[src.index("INSERT INTO users"):]
+    assert "'user'" in body and "FALSE" in body
+    assert "role" not in inspect.signature(authmod._autocreate_external).parameters
+    assert "approved" not in inspect.signature(authmod._autocreate_external).parameters

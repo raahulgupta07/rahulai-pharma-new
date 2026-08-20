@@ -1,48 +1,57 @@
 <script>
-  import { API_BASE } from '$lib/apiBase.js';
   import { onMount } from 'svelte';
   import PageHeader from '$lib/PageHeader.svelte';
+  import { ApiError, getJSON } from '$lib/api.js';
+  import ErrorState from '$lib/ErrorState.svelte';
 
-  const base = API_BASE;
-
-  // Fixed relation colors that read in both light and dark modes.
+  // Categorical relation colours, drawn from the CityCare v2 palette so the
+  // canvas does not sit in a different colour world from the page around it.
+  // These are CATEGORIES, not a series — they encode which kind of edge this
+  // is, so they have to stay distinguishable from each other, and each is also
+  // rendered as text on a 12% tint (see `alpha`), so each clears AA on the
+  // light surfaces: indigo 10.51, amber 6.86, purple 9.50, slate 5.66.
+  // The relation is always labelled as well, so colour is never the only cue.
   const REL = {
-    generic: '#3B82F6', // blue
-    contains: '#D97706', // amber (ingredient)
-    treats: '#16A34A' // green
+    generic: '#2F3293', // indigo (the accent)
+    contains: '#8A4A04', // amber (ingredient)
+    treats: '#5B2D8E' // purple — the palette carries no green
   };
   // Node fills by type.
-  const TYPE_COL = { drug: '#1E40AF', ing: '#D97706', cond: '#16A34A' };
+  const TYPE_COL = { drug: '#23266F', ing: '#8A4A04', cond: '#5B2D8E' };
   const TYPE_LABEL = { drug: 'Medicine', ing: 'Ingredient', cond: 'Condition' };
 
   const EDGE_META = [
     { key: 'has_generic', label: 'shared generic', color: REL.generic },
     { key: 'contains', label: 'ingredients', color: REL.contains },
-    { key: 'in_category', label: 'categories', color: '#64748B' },
+    { key: 'in_category', label: 'categories', color: '#61667E' },
     { key: 'treats', label: 'treats', color: REL.treats }
   ];
 
   let counts = $state(null);
+  let countsError = $state(null);
   let panel = $state(null); // node detail payload from /admin/graph/node
+  let panelError = $state(null);
   let panelLoading = $state(false);
   let graphEmpty = $state(false);
+  // The error OBJECT (an ApiError carries .status), never a pre-baked string:
+  // 401, 403 and a dead backend are three different things to tell someone.
   let graphError = $state(null);
 
   let svgEl; // bound <svg>
 
-  async function getJSON(path) {
-    const r = await fetch(base + path);
-    if (!r.ok) throw new Error(r.status === 401 ? 'session expired — sign in again' : `request failed (${r.status})`);
-    return r.json();
-  }
-
   async function loadCounts() {
-    try { counts = await getJSON('/admin/graph'); } catch { counts = null; }
+    countsError = null;
+    try {
+      counts = await getJSON('/admin/graph');
+    } catch (e) {
+      counts = null;
+      countsError = e;
+    }
   }
 
   const short = (s) => (s && s.length > 15 ? s.slice(0, 14) + '…' : s ?? '');
   const fmt = (n) => (n === null || n === undefined ? '' : Number(n).toLocaleString());
-  const relColor = (rel) => REL[rel] ?? '#cbd5e1';
+  const relColor = (rel) => REL[rel] ?? '#C8CBDC';
 
   // Hex -> rgba for ~12% alpha chip backgrounds.
   function alpha(hex, a) {
@@ -118,16 +127,24 @@
   }
 
   async function reloadGraph(limit) {
-    if (!d3ref) return;
     nodeLimit = limit;
     loadingGraph = true;
+    graphError = null;
     try {
+      // Also the Retry path from the failure panel, so it must be able to
+      // recover from d3 never having loaded — a bare `if (!d3ref) return`
+      // here made Retry a button that silently did nothing.
+      if (!d3ref) d3ref = await whenD3Ready();
       const data = await getJSON(`/admin/graph/overview?limit=${limit}`);
       if (!data?.nodes?.length) { graphEmpty = true; return; }
       graphEmpty = false;
       buildGraph(d3ref, data);
     } catch (e) {
-      graphError = e.message || 'Could not load the graph.';
+      // A d3 timeout is not an HTTP failure; give it status 0 and its own words.
+      graphError =
+        e instanceof ApiError
+          ? e
+          : new ApiError(0, e?.message || 'The graph could not be drawn.');
     } finally {
       loadingGraph = false;
     }
@@ -139,7 +156,7 @@
     if (!centerId) {
       node.attr('opacity', 1);
       label.attr('opacity', (d) => (d.type === 'drug' ? 0.8 : 1));
-      link.attr('stroke', '#cbd5e1').attr('stroke-opacity', 0.4);
+      link.attr('stroke', '#C8CBDC').attr('stroke-opacity', 0.4);
       return;
     }
     const neighbors = new Set([centerId]);
@@ -154,7 +171,7 @@
     link.attr('stroke', (l) => {
       const s = typeof l.source === 'object' ? l.source.id : l.source;
       const t = typeof l.target === 'object' ? l.target.id : l.target;
-      return s === centerId || t === centerId ? relColor(l.rel) : '#cbd5e1';
+      return s === centerId || t === centerId ? relColor(l.rel) : '#C8CBDC';
     }).attr('stroke-opacity', (l) => {
       const s = typeof l.source === 'object' ? l.source.id : l.source;
       const t = typeof l.target === 'object' ? l.target.id : l.target;
@@ -164,12 +181,18 @@
 
   async function openNode(code) {
     panelLoading = true;
+    panelError = null;
     currentCode = code;
     highlight(code);
     try {
       panel = await getJSON(`/admin/graph/node?code=${encodeURIComponent(code)}`);
     } catch (e) {
-      panel = { brand_name: 'Unavailable', _error: e.message, contains: [], treats: [], same_generic: [] };
+      // The old fallback built a fake node — empty `contains`/`treats`/
+      // `same_generic` arrays, which the footer then totalled as "0 graph
+      // links". A medicine with no connections and a medicine we could not
+      // load look identical that way. Carry the failure instead.
+      panel = null;
+      panelError = e;
     } finally {
       panelLoading = false;
     }
@@ -177,6 +200,7 @@
 
   function closePanel() {
     panel = null;
+    panelError = null;
     currentCode = null;
     highlight(null);
   }
@@ -223,7 +247,7 @@
 
     const link = root
       .append('g')
-      .attr('stroke', '#cbd5e1')
+      .attr('stroke', '#C8CBDC')
       .attr('stroke-opacity', 0.4)
       .selectAll('line')
       .data(data.links)
@@ -327,7 +351,9 @@
       try {
         d3 = await whenD3Ready();
       } catch {
-        graphError = 'Graph engine unavailable.';
+        // Not a backend failure at all — the drawing library never loaded.
+        // Status 0 with its own message keeps it out of the HTTP wording.
+        graphError = new ApiError(0, 'The graph drawing library (d3) did not load in this page.');
         return;
       }
       try {
@@ -341,7 +367,7 @@
           if (simulation) simulation.stop();
         };
       } catch (e) {
-        graphError = e.message || 'Could not load the graph.';
+        graphError = e;
       }
     })();
     return () => cleanup();
@@ -355,42 +381,62 @@
   {#snippet meta()}
     {#if counts}
       {#each EDGE_META as e}
-        <span class="inline-flex items-center gap-1.5 rounded-full bg-surface-2 px-2.5 py-1 text-[12px] text-ink-2">
+        <span class="inline-flex items-center gap-1.5 rounded-full bg-surface-2 px-2.5 py-1 text-meta text-ink-2">
           <span class="h-2 w-2 rounded-full" style="background:{e.color}"></span>
           {e.label}
           <span class="tnum">{fmt(counts[e.key])}</span>
         </span>
       {/each}
-    {:else}
-      <span class="text-[12px] text-ink-3">edge counts unavailable</span>
+    {:else if countsError}
+      <!-- Say WHY they are missing. "Unavailable" alone reads as "the graph has
+           no edges" to anyone who has not seen this page working. -->
+      <span class="text-meta text-ink-3">
+        edge counts unavailable{countsError.status === 401
+          ? ' — session expired'
+          : countsError.status === 403
+            ? ' — not permitted'
+            : countsError.status
+              ? ` — backend answered ${countsError.status}`
+              : ' — no response from the backend'}
+      </span>
     {/if}
   {/snippet}
 </PageHeader>
 
 <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
-  <p class="text-[12px] text-ink-3">scroll to zoom · drag to pan · click a medicine</p>
+  <p class="text-meta text-ink-3">scroll to zoom · drag to pan · click a medicine</p>
   <div class="flex items-center gap-1.5">
-    <span class="text-[12px] text-ink-3">nodes</span>
+    <span class="text-meta text-ink-3">nodes</span>
     {#each [80, 200, 500, 1000] as lim}
       <button
         onclick={() => reloadGraph(lim)}
         disabled={loadingGraph}
-        class="cursor-pointer rounded-md px-2 py-1 text-[12px] transition-colors disabled:opacity-50 {nodeLimit === lim ? 'bg-accent text-on-accent' : 'bg-surface-2 text-ink-2 hover:bg-surface'}"
+        class="cursor-pointer rounded-control px-2 py-1 text-meta transition-colors disabled:opacity-50 {nodeLimit === lim ? 'bg-accent text-on-accent' : 'bg-surface-2 text-ink-2 hover:bg-surface'}"
       >{lim}</button>
     {/each}
-    {#if loadingGraph}<span class="text-[12px] text-ink-3">loading…</span>{/if}
+    {#if loadingGraph}<span class="text-meta text-ink-3">loading…</span>{/if}
   </div>
 </div>
 
 <div
-  class="flex overflow-hidden rounded-xl border-[0.5px] border-line bg-surface"
+  class="flex overflow-hidden rounded-card border border-line bg-surface"
   class:graph-fs={fullscreen}
 >
   <!-- LEFT: force graph -->
   <div class="relative flex-1">
-    {#if graphError || graphEmpty}
-      <div class="flex items-center justify-center px-6 text-center text-[14px] text-ink-2" style="height:{fullscreen ? '100vh' : '70vh'}">
-        {graphError ?? 'No graph data is available yet.'}
+    {#if graphError}
+      <div class="flex items-center justify-center px-6" style="height:{fullscreen ? '100vh' : '70vh'}">
+        <div class="w-full max-w-[520px]">
+          <ErrorState
+            error={graphError}
+            retry={() => reloadGraph(nodeLimit)}
+            what="the knowledge graph"
+          />
+        </div>
+      </div>
+    {:else if graphEmpty}
+      <div class="flex items-center justify-center px-6 text-center text-body-sm text-ink-2" style="height:{fullscreen ? '100vh' : '70vh'}">
+        No graph data is available yet.
       </div>
     {/if}
     <svg
@@ -404,26 +450,26 @@
 
     <!-- zoom / fit controls -->
     {#if !graphError && !graphEmpty}
-      <div class="absolute right-3 top-3 flex flex-col gap-1 rounded-xl border-[0.5px] border-line bg-surface/90 p-1 shadow-sm backdrop-blur">
+      <div class="absolute right-3 top-3 flex flex-col gap-1 rounded-card border border-line bg-surface/90 p-1 shadow-sm backdrop-blur">
         <button onclick={() => zoomBy(1.4)} aria-label="Zoom in" title="Zoom in"
-          class="flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg text-[18px] leading-none text-ink-2 hover:bg-surface-2 hover:text-ink">+</button>
+          class="flex h-8 w-8 cursor-pointer items-center justify-center rounded-panel text-title leading-none text-ink-2 hover:bg-surface-2 hover:text-ink">+</button>
         <button onclick={() => zoomBy(1 / 1.4)} aria-label="Zoom out" title="Zoom out"
-          class="flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg text-[18px] leading-none text-ink-2 hover:bg-surface-2 hover:text-ink">−</button>
+          class="flex h-8 w-8 cursor-pointer items-center justify-center rounded-panel text-title leading-none text-ink-2 hover:bg-surface-2 hover:text-ink">−</button>
         <button onclick={fitView} aria-label="Fit to view" title="Fit to view"
-          class="flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg text-ink-2 hover:bg-surface-2 hover:text-ink">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
+          class="flex h-8 w-8 cursor-pointer items-center justify-center rounded-panel text-ink-2 hover:bg-surface-2 hover:text-ink">
+          <svg aria-hidden="true" focusable="false" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
         </button>
         <button onclick={resetZoom} aria-label="Reset zoom" title="Reset zoom"
-          class="flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg text-ink-2 hover:bg-surface-2 hover:text-ink">
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+          class="flex h-8 w-8 cursor-pointer items-center justify-center rounded-panel text-ink-2 hover:bg-surface-2 hover:text-ink">
+          <svg aria-hidden="true" focusable="false" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
         </button>
         <div class="mx-1 my-0.5 border-t border-line"></div>
         <button onclick={toggleFullscreen} aria-label="Toggle fullscreen" title={fullscreen ? 'Exit fullscreen' : 'Fullscreen'}
-          class="flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg text-ink-2 hover:bg-surface-2 hover:text-ink">
+          class="flex h-8 w-8 cursor-pointer items-center justify-center rounded-panel text-ink-2 hover:bg-surface-2 hover:text-ink">
           {#if fullscreen}
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/></svg>
+            <svg aria-hidden="true" focusable="false" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/></svg>
           {:else}
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
+            <svg aria-hidden="true" focusable="false" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
           {/if}
         </button>
       </div>
@@ -433,10 +479,28 @@
   <!-- RIGHT: slide-in detail panel -->
   <div
     class="shrink-0 overflow-hidden border-l border-line bg-surface-2 transition-[width] duration-200"
-    style="width:{panel ? 320 : 0}px"
+    style="width:{panel || panelError ? 320 : 0}px"
   >
     <div class="w-[300px] overflow-y-auto p-4" style="height:{fullscreen ? '100vh' : '70vh'}">
-      {#if panel}
+      {#if panelError}
+        <div class="flex items-start gap-2">
+          <div class="min-w-0">
+            <h2 class="truncate text-body font-semibold text-ink">{currentCode}</h2>
+          </div>
+          <button
+            onclick={closePanel}
+            class="ml-auto shrink-0 cursor-pointer rounded-control px-1.5 py-0.5 text-meta text-ink-3 hover:bg-surface hover:text-ink"
+            aria-label="Close details"
+          >× close</button>
+        </div>
+        <div class="mt-3">
+          <ErrorState
+            error={panelError}
+            retry={() => openNode(currentCode)}
+            what="this medicine's connections"
+          />
+        </div>
+      {:else if panel}
         {@const sg = panel.same_generic ?? []}
         {@const cc = panel.contains ?? []}
         {@const tt = panel.treats ?? []}
@@ -444,21 +508,21 @@
         <div class="flex items-start gap-2">
           <span class="mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full" style="background:{TYPE_COL.drug}"></span>
           <div class="min-w-0">
-            <h2 class="truncate text-[15px] font-semibold text-ink">{panel.brand_name ?? currentCode}</h2>
-            <p class="text-[12px] text-ink-3">{TYPE_LABEL.drug}{panel.generic_name ? ` · ${panel.generic_name}` : ''}</p>
+            <h2 class="truncate text-body font-semibold text-ink">{panel.brand_name ?? currentCode}</h2>
+            <p class="text-meta text-ink-3">{TYPE_LABEL.drug}{panel.generic_name ? ` · ${panel.generic_name}` : ''}</p>
           </div>
           <button
             onclick={closePanel}
-            class="ml-auto shrink-0 cursor-pointer rounded-md px-1.5 py-0.5 text-[12px] text-ink-3 hover:bg-surface hover:text-ink"
+            class="ml-auto shrink-0 cursor-pointer rounded-control px-1.5 py-0.5 text-meta text-ink-3 hover:bg-surface hover:text-ink"
             aria-label="Close details"
           >× close</button>
         </div>
 
         {#if panelLoading}
-          <p class="mt-4 text-[13px] text-ink-3">Loading…</p>
+          <p class="mt-4 text-body-sm text-ink-3">Loading…</p>
         {:else}
           {#if panel.total_stock !== null && panel.total_stock !== undefined}
-            <p class="mt-3 text-[12.5px] text-ink-2">
+            <p class="mt-3 text-meta text-ink-2">
               In stock: <span class="tnum font-medium text-ink">{fmt(panel.total_stock)}</span> units ·
               <span class="tnum font-medium text-ink">{fmt(panel.site_count)}</span> sites
             </p>
@@ -466,10 +530,10 @@
 
           {#if cc.length}
             <div class="mt-4">
-              <h3 class="text-[11px] font-medium uppercase tracking-wide text-ink-3">Contains</h3>
+              <h3 class="text-label font-medium uppercase tracking-wide text-ink-3">Contains</h3>
               <div class="mt-1.5 flex flex-wrap gap-1.5">
                 {#each cc as ing}
-                  <span class="rounded-full px-2 py-0.5 text-[12px]" style="background:{alpha(REL.contains, 0.12)};color:{REL.contains}">{ing}</span>
+                  <span class="rounded-full px-2 py-0.5 text-meta" style="background:{alpha(REL.contains, 0.12)};color:{REL.contains}">{ing}</span>
                 {/each}
               </div>
             </div>
@@ -477,10 +541,10 @@
 
           {#if tt.length}
             <div class="mt-4">
-              <h3 class="text-[11px] font-medium uppercase tracking-wide text-ink-3">Treats</h3>
+              <h3 class="text-label font-medium uppercase tracking-wide text-ink-3">Treats</h3>
               <div class="mt-1.5 flex flex-wrap gap-1.5">
                 {#each tt as cond}
-                  <span class="rounded-full px-2 py-0.5 text-[12px]" style="background:{alpha(REL.treats, 0.12)};color:{REL.treats}">{cond}</span>
+                  <span class="rounded-full px-2 py-0.5 text-meta" style="background:{alpha(REL.treats, 0.12)};color:{REL.treats}">{cond}</span>
                 {/each}
               </div>
             </div>
@@ -488,12 +552,12 @@
 
           {#if sg.length}
             <div class="mt-4">
-              <h3 class="text-[11px] font-medium uppercase tracking-wide text-ink-3">Same generic</h3>
+              <h3 class="text-label font-medium uppercase tracking-wide text-ink-3">Same generic</h3>
               <div class="mt-1.5 flex flex-wrap gap-1.5">
                 {#each sg as g}
                   <button
                     onclick={() => openNode(g.article_code)}
-                    class="cursor-pointer rounded-full px-2 py-0.5 text-[12px] transition-opacity hover:opacity-80"
+                    class="cursor-pointer rounded-full px-2 py-0.5 text-meta transition-opacity hover:opacity-80"
                     style="background:{alpha(REL.generic, 0.12)};color:{REL.generic}"
                   >{g.brand_name ?? g.article_code}</button>
                 {/each}
@@ -501,11 +565,7 @@
             </div>
           {/if}
 
-          {#if panel._error}
-            <p class="mt-4 text-[12px] text-ink-3">{panel._error}</p>
-          {/if}
-
-          <div class="mt-5 flex items-center justify-between border-t border-line pt-3 text-[12px] text-ink-3">
+          <div class="mt-5 flex items-center justify-between border-t border-line pt-3 text-meta text-ink-3">
             <span><span class="tnum text-ink-2">{total}</span> graph links</span>
             <button onclick={closePanel} class="cursor-pointer hover:text-ink">× close</button>
           </div>

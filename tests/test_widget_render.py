@@ -214,8 +214,13 @@ def test_a_product_name_cannot_inject_through_the_data_table():
             "data: [DONE]",
         ]
     )
+    # Stronger than it used to be. This asserted the name was ESCAPED into the
+    # data table; the table is gone, so hostile row content never reaches the
+    # DOM at all. Row values from a partner's product file are now outside the
+    # rendered surface entirely — the citation names sources, never row text.
     assert "<img" not in t["data"].lower()
-    assert "&lt;img" in t["data"]
+    assert "onerror" not in t["data"].lower()
+    assert "alert(1)" not in t["data"]
 
 
 def test_a_step_argument_cannot_inject_through_the_trace():
@@ -245,7 +250,15 @@ def test_step_frames_render_as_trace_lines():
     assert "Checking stock of OMEZ" in t["trace"]
 
 
-def test_result_rows_become_a_view_data_table():
+def test_the_citation_names_the_source_not_the_rows():
+    """A citation says where an answer came from, not what is in the database.
+
+    This used to render every row the tools returned as an expandable table —
+    105 rows behind "Show what I checked (105)". That is a data export: it
+    answers "what is in your database", which nobody asked, instead of "where
+    did this answer come from", which is the only thing a citation is for.
+    """
+
     rows = [
         {"brand_name": "ROYAL-D 25G", "site_code": "20052-CCTLKK", "stock_qty": 4154},
         {"brand_name": "ROYAL-D 25G", "site_code": "20024-CC73", "stock_qty": 2298},
@@ -258,37 +271,56 @@ def test_result_rows_become_a_view_data_table():
             "data: [DONE]",
         ]
     )
-    assert "View data (2 rows)" in t["data"]
-    assert "<th>site code</th>" in t["data"]
-    assert "20052-CCTLKK" in t["data"] and "4,154" in t["data"]
-    # the trace showed the work, then cleared when the answer landed
+
+    assert "stock levels" in t["data"]
+    assert "2 branches" in t["data"]
+    # the raw dump and its database vocabulary are gone
+    assert "View data" not in t["data"]
+    assert "Show what I checked" not in t["data"]
+    assert "<table" not in t["data"]
+    # the trace still showed the work while it ran
     assert "Checking stock of ROYAL-D" in t["trace"]
-    assert "2 rows" in t["trace"]
     assert "Two branches have it." in t["md"]
-    assert t["steps"] == ""
 
 
-def test_a_null_quantity_is_unknown_never_zero():
-    """NULL means UNKNOWN. Printing 0 would invent stock nobody has."""
+def test_the_citation_names_every_distinct_source_once():
+    """Two catalogue tools are one source, not two lines of jargon."""
 
     t = turn(
         [
-            "event: result\ndata: "
-            + json.dumps(
-                {"tool": "get_stock", "rows": [{"brand_name": "X", "stock_qty": None, "price": 0}]}
-            ),
+            "event: result\ndata: " + json.dumps({"tool": "search_by_name", "rows": [{"a": 1}]}),
+            "event: result\ndata: " + json.dumps({"tool": "get_article_info", "rows": [{"a": 1}]}),
+            "event: result\ndata: " + json.dumps({"tool": "get_stock", "rows": [{"b": 2}]}),
             "data: " + json.dumps({"delta": "ok"}),
             "data: [DONE]",
         ]
     )
-    assert "unknown" in t["data"]
-    # 0 is a real value and must still be shown as 0
-    assert ">0<" in t["data"]
+
+    assert t["data"].count("product catalogue") == 1
+    assert "stock levels" in t["data"]
+    # never the internal tool names
+    for tool in ("search_by_name", "get_article_info", "get_stock"):
+        assert tool not in t["data"]
 
 
-def test_a_turn_with_no_rows_has_no_view_data_button():
+def test_a_turn_with_no_rows_has_no_citation():
+    """Nothing was consulted, so claiming a source would be a lie."""
+
     t = turn(["data: " + json.dumps({"delta": "No results."}), "data: [DONE]"])
-    assert "View data" not in t["data"]
+    assert "cca-cite" not in t["data"]
+    assert "Checked against" not in t["data"]
+
+
+def test_a_single_branch_is_not_pluralised():
+    rows = [{"brand_name": "ROYAL-D 25G", "site_code": "20052-CCTLKK", "stock_qty": 4154}]
+    t = turn(
+        [
+            "event: result\ndata: " + json.dumps({"tool": "get_stock", "rows": rows}),
+            "data: " + json.dumps({"delta": "One branch."}),
+            "data: [DONE]",
+        ]
+    )
+    assert "1 branch" in t["data"] and "1 branches" not in t["data"]
 
 
 # --------------------------------------------------------------------------

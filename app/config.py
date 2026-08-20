@@ -16,6 +16,11 @@ from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# The placeholder ``secret_key`` ships with. Named so the boot guard in
+# ``app.auth.boot_security_checks`` can recognise it without repeating the
+# literal — a second copy of this string is how a guard quietly stops matching.
+DEFAULT_SECRET_KEY = "dev-secret-change-me"
+
 
 class Settings(BaseSettings):
     """Strongly-typed application settings.
@@ -29,14 +34,37 @@ class Settings(BaseSettings):
     embedding_model: str = "google/gemini-embedding-2"  # OpenRouter embeddings (3072-dim)
     postgres_url: str
     redis_url: str
-    secret_key: str = "dev-secret-change-me"  # HMAC + session-token signing
+    secret_key: str = DEFAULT_SECRET_KEY  # HMAC + session-token signing
     admin_token: str = ""   # legacy /admin gate; superseded by user auth
     session_ttl_seconds: int = 900
+
+    # Deployment posture. "production" (or "prod") turns the weak-secret warning
+    # into a startup FAILURE — see app.auth.boot_security_checks. secret_key
+    # signs admin JWTs, embed session tokens, the widget HMAC, SSO state and
+    # preview links, so shipping the placeholder is a total auth compromise, not
+    # a lint. Anything else ("dev", "staging", …) only warns.
+    app_env: str = "dev"
 
     # ---- user auth: seed super admin (no signup; admins create users) ----
     admin_email: str = "admin@citcare.local"
     admin_password: str = "changeme"   # CHANGE in prod; seeds the first super_admin
     auth_token_ttl_hours: int = 12
+
+    # ---- login throttling / lockout (app.auth.auth_events) ------------------
+    # /auth/login used to have no throttle at all: unlimited online bcrypt
+    # guessing, and — once LDAP is enabled — every guess is proxied into the
+    # directory, so a guessing run also locks the real AD account out.
+    #
+    # Two independent counters, because one is not enough:
+    #   * per EMAIL, low threshold — stops guessing one account's password.
+    #   * per IP, much higher threshold — stops password SPRAYING (one guess
+    #     each against a thousand accounts), which the per-email counter never
+    #     sees. It must stay well above what a whole office behind one NAT can
+    #     legitimately fat-finger in the window, or a single typo-prone morning
+    #     takes the branch offline. 50 fails / 15 min is ~3/min shared.
+    login_max_fail: int = 5
+    login_lock_minutes: int = 15
+    login_ip_max_fail: int = 50
 
     # ---- LDAP (optional; merge-by-email) ----
     ldap_enabled: bool = False
@@ -64,6 +92,7 @@ class Settings(BaseSettings):
     oidc_scopes: str = "openid email profile"
     oidc_discovery_ttl_seconds: int = 300   # cache the well-known doc; 0 disables caching
     oidc_state_ttl_seconds: int = 600       # how long a login may sit at the Keycloak form
+    oidc_jwks_ttl_seconds: int = 600        # cache the realm signing keys; 0 disables caching
 
     # Set true once the app is behind TLS: marks the SSO state cookie Secure.
     # Left false by default because the dev stack is plain http on :8088/:8091.

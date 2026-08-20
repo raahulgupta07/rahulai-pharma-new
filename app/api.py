@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import jwt
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -238,6 +238,14 @@ async def lifespan(_app: FastAPI):
     TestClient's portal loop) ensures every request shares one loop-bound pool.
     """
 
+    # First, before anything is served: refuse to run a production deploy whose
+    # signing secret is the shipped placeholder, and warn about the other
+    # postures that are merely wrong. Deliberately NOT inside a try/except —
+    # this one is meant to stop the process (app_env=production only).
+    from app.auth import boot_security_checks
+
+    await boot_security_checks()
+
     await get_pool()
     # Seed the database on first boot so the stack comes up with data. In
     # production this is where real Excel would be loaded instead.
@@ -259,6 +267,34 @@ async def lifespan(_app: FastAPI):
         await ensure_feedback()
     except Exception as exc:  # noqa: BLE001
         logger.warning("chat_logs init skipped: %s", exc)
+    # Observability capture. `ensure_turn_metrics` adds the chat_logs cost
+    # columns (migration 0006) and `ensure_app_events` creates the activity
+    # trail (0007). Kept OUT of admin.ensure_chat_logs on purpose so this half
+    # deploys independently of the log_chat signature change: the columns may
+    # exist before anything writes them, and a writer that names them on a
+    # database missing them still degrades to the old column set inside
+    # log_chat.
+    try:
+        from app import activity
+
+        await activity.ensure_turn_metrics()
+        await activity.ensure_app_events()
+        # 0008 / 0009: per-call detail (tool_calls, llm_calls) and the turn's
+        # actor + give-up verdict. AFTER ensure_chat_logs above, not before —
+        # both new tables carry a foreign key to chat_logs(id), so the parent
+        # table has to exist or CREATE TABLE fails and takes the two ensure_*
+        # calls above down with it on a fresh database.
+        await activity.ensure_turn_calls()
+        await activity.ensure_chat_logs_actor()
+        # 0010: chat_feedback.turn_id. ⚠️ MUST stay after `ensure_feedback()`
+        # above, which creates the same column ON DELETE CASCADE — and
+        # `prune_chat_logs()` (further down this lifespan) then deletes every
+        # rating attached to a turn older than the log retention, corrections
+        # included. This re-points the delete rule at SET NULL, and whichever
+        # runs LAST wins. See the warning on ensure_chat_feedback_turn.
+        await activity.ensure_chat_feedback_turn()
+    except Exception as exc:  # noqa: BLE001 — audit schema is never worth a failed boot
+        logger.warning("activity/metrics schema init skipped: %s", exc)
     try:
         from app import ingest_events
 
@@ -269,10 +305,13 @@ async def lifespan(_app: FastAPI):
     except Exception as exc:  # noqa: BLE001 — history is not worth a failed boot
         logger.warning("ingest_events init skipped: %s", exc)
     try:
-        from app.auth import ensure_users_table, seed_super_admin
+        from app.auth import ensure_auth_events, ensure_users_table, seed_super_admin
 
         await ensure_users_table()
         await seed_super_admin()
+        # The login lockout counts rows in this table; a fresh boot must create
+        # it the same way migrations/0004_auth_events.sql would.
+        await ensure_auth_events()
     except Exception as exc:  # noqa: BLE001
         logger.warning("user auth init skipped: %s", exc)
     # After ensure_users_table: adds users.store_id (branch-scoped admins) and
@@ -284,6 +323,16 @@ async def lifespan(_app: FastAPI):
         await ensure_admin_schema()
     except Exception as exc:  # noqa: BLE001
         logger.warning("admin schema init skipped: %s", exc)
+    # White-label branding. Same statements as migrations/0005_branding.sql, so
+    # a fresh container and a hand-migrated database converge — and so the login
+    # screen's GET /brand hits a table that exists on first boot rather than
+    # falling back to defaults until someone runs psql.
+    try:
+        from app.brand import ensure_brand_tables
+
+        await ensure_brand_tables()
+    except Exception as exc:  # noqa: BLE001 — branding is never worth a failed boot
+        logger.warning("branding schema init skipped: %s", exc)
     # The embed credential check is fail-closed, so an empty store rejects every
     # embed. Seed the documented dev credential — flag-gated, and only into an
     # empty store. Never silently: it logs a warning when it fires.
@@ -525,19 +574,227 @@ async def auth_config() -> Dict[str, Any]:
     return await authmod.auth_config_public()
 
 
-@app.post("/auth/login")
-async def login(req: LoginRequest) -> Dict[str, Any]:
-    """Local login; falls back to LDAP (email as username) if enabled."""
+def client_ip(request: Request) -> str:
+    """The caller's address, honouring the first hop of X-Forwarded-For.
+
+    The app sits behind a proxy, so ``request.client.host`` is the proxy for
+    every caller on earth — throttling on it would throttle everyone at once.
+    XFF is appended left-to-right, so the ORIGINAL client is the first entry;
+    later entries are proxies. It is client-controlled and therefore only ever
+    used for rate limiting and the audit trail, never for authorisation.
+    """
+
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        first = xff.split(",")[0].strip()
+        if first:
+            return first[:64]
+    return (request.client.host if request.client else "")[:64]
+
+
+# ---- the activity trail ------------------------------------------------------
+#
+# One row in `app_events` per MUTATING /admin/* request: who, what, when, from
+# where, and what it answered. See migrations/0007_app_events.sql for why this
+# exists and app/activity.py for the allowlist that decides what of a body may
+# be kept.
+#
+# ⚠️ **Reading the body here is the dangerous part, and it is bounded three
+# ways.** Only `application/json`, only under 64 KB, and only when the route is
+# in the allowlist at all — so a multipart logo upload or a 40 MB inventory
+# xlsx is never pulled into memory by the audit layer. Starlette's
+# BaseHTTPMiddleware caches a body read in dispatch and replays it downstream
+# (`_CachedRequest.wrapped_receive`), so the handler still sees its body; that
+# is a property of starlette >= 0.28 and the reason this is safe at all. Without
+# it, reading here would hang every POST.
+
+_AUDIT_BODY_LIMIT = 64 * 1024
+
+
+async def _audit_body(request) -> Any:
+    """The parsed JSON body, or None. Never raises, never blocks on a big upload."""
+
+    ctype = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+    if ctype != "application/json":
+        return None
+    try:
+        length = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        return None
+    if length <= 0 or length > _AUDIT_BODY_LIMIT:
+        return None
+    try:
+        raw = await request.body()
+        return json.loads(raw) if raw else None
+    except Exception:  # noqa: BLE001 — an unparseable body is simply not summarised
+        return None
+
+
+def _audit_actor(request) -> tuple:
+    """``(email, role)`` from the bearer token, best-effort.
+
+    Decoded, not verified against the database: this is a record of who the
+    request CLAIMED to be, and `require_admin` has already decided whether that
+    claim was honoured — the `status` column says which. A token that will be
+    rejected still names the account someone tried to act as, which is exactly
+    the row a review wants to see.
+    """
 
     try:
-        return await authmod.login_local(req.email, req.password)
+        header = request.headers.get("authorization") or ""
+        if not header.lower().startswith("bearer "):
+            return None, None
+        claims = authmod.decode_token(header.split(" ", 1)[1])
+        return claims.get("email"), claims.get("role")
+    except Exception:  # noqa: BLE001 — an invalid/expired token is an anonymous actor
+        return None, None
+
+
+@app.middleware("http")
+async def activity_audit(request, call_next):
+    """Record every mutating admin request in `app_events`. Never breaks one.
+
+    A failed request is recorded too, with its status: a rejected attempt to
+    promote an account is more interesting than a successful one, and an audit
+    trail that only shows the system working is the failure mode this exists to
+    avoid.
+    """
+
+    from app import activity
+
+    method = request.method.upper()
+    path = request.url.path
+    if not activity.should_record(method, path):
+        return await call_next(request)
+
+    import time as _t
+
+    target, spec = activity.match_route(method, path)
+    body = await _audit_body(request) if spec else None
+    actor_email, actor_role = _audit_actor(request)
+    ip = client_ip(request)
+    t0 = _t.time()
+    status = 500
+    try:
+        response = await call_next(request)
+        status = response.status_code
+        return response
+    except Exception:
+        # An unhandled error is still a change attempt, and the one most worth
+        # having a row for. Recorded as 500, then re-raised unchanged.
+        raise
+    finally:
+        try:
+            await activity.record_event(
+                activity.action_for(method, path, target),
+                actor_email=actor_email,
+                actor_role=actor_role,
+                target=target,
+                method=method,
+                path=path,
+                status=status,
+                detail=activity.summarize_body(method, path, body),
+                ip=ip,
+                duration_ms=int((_t.time() - t0) * 1000),
+            )
+        except Exception:  # noqa: BLE001 — record_event already swallows; this is the net
+            logger.warning("activity audit failed for %s %s", method, path, exc_info=True)
+
+
+@app.post("/auth/login")
+async def login(req: LoginRequest, request: Request) -> Dict[str, Any]:
+    """Local login; falls back to LDAP (email as username) if enabled.
+
+    Rate limited two ways (see app.auth and config.login_*): per email, which
+    stops guessing at one account, and per IP at a much higher threshold, which
+    stops spraying one guess across many accounts. Without the second, the
+    per-email counter never fires and the endpoint stays an open oracle — and
+    with LDAP on, every guess is also proxied into the directory, so an attacker
+    could drive real AD accounts into THEIR lockout from here.
+    """
+
+    s = get_settings()
+    email = (req.email or "").strip().lower()
+    ip = client_ip(request)
+
+    fails = await authmod.failed_logins_for_email(email, s.login_lock_minutes)
+    if fails >= s.login_max_fail:
+        await authmod.record_auth_event(
+            authmod.EV_LOGIN_LOCKED, email=email, ip=ip,
+            detail=f"{fails} failed attempts in {s.login_lock_minutes}m (email)",
+        )
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"too many failed sign-in attempts for this account. "
+                f"Try again in {s.login_lock_minutes} minutes, or ask an "
+                f"administrator to reset the password."
+            ),
+        )
+
+    ip_fails = await authmod.failed_logins_for_ip(ip, s.login_lock_minutes)
+    if ip_fails >= s.login_ip_max_fail:
+        await authmod.record_auth_event(
+            authmod.EV_LOGIN_LOCKED, email=email, ip=ip,
+            detail=f"{ip_fails} failed attempts in {s.login_lock_minutes}m (ip)",
+        )
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"too many failed sign-in attempts from this network. "
+                f"Try again in {s.login_lock_minutes} minutes."
+            ),
+        )
+
+    async def _ok(result: Dict[str, Any], how: str) -> Dict[str, Any]:
+        # The login_ok row is also what RESETS the per-email fail counter — the
+        # counter reads "fails since the last success", so there is no separate
+        # reset write that could be skipped on one of the two success paths.
+        await authmod.record_auth_event(
+            authmod.EV_LOGIN_OK, email=email, ip=ip, detail=how)
+        return result
+
+    async def _fail(reason: str):
+        await authmod.record_auth_event(
+            authmod.EV_LOGIN_FAIL, email=email, ip=ip, detail=reason)
+
+    async def _blocked(exc: Exception):
+        # The password WAS correct — this is policy, so it is logged as its own
+        # event and must not feed the lockout counter (see EV_LOGIN_BLOCKED).
+        await authmod.record_auth_event(
+            authmod.EV_LOGIN_BLOCKED, email=email, ip=ip, detail=str(exc))
+        raise HTTPException(status_code=403, detail=str(exc))
+
+    try:
+        result = await authmod.login_local(req.email, req.password)
     except authmod.AuthError:
-        if get_settings().ldap_enabled:
+        # ⚠️ The EFFECTIVE layer, not get_settings(). ldap_enabled can be turned
+        # on at runtime from /admin/auth (a Redis override), and both
+        # /auth/config and login_ldap already read it that way. Reading env here
+        # made "enable LDAP" show the banner on the login screen while this
+        # fallthrough silently stayed off.
+        cfg = await authmod.effective_auth()
+        if cfg.ldap_enabled:
             try:
-                return await authmod.login_ldap(req.email, req.password)
+                ldap_result = await authmod.login_ldap(req.email, req.password)
             except authmod.AuthError as exc:
+                await _fail(str(exc))
                 raise HTTPException(status_code=401, detail=str(exc))
+            try:
+                ldap_result = await authmod.enforce_signin_mode(ldap_result, cfg)
+            except authmod.SigninModeError as exc:
+                await _blocked(exc)
+            return await _ok(ldap_result, "ldap")
+        await _fail("invalid credentials")
         raise HTTPException(status_code=401, detail="invalid credentials")
+
+    # Authenticated. `signin_mode` is applied only now, so the super_admin
+    # carve-out can be decided from the row we just proved the caller owns.
+    try:
+        result = await authmod.enforce_signin_mode(result)
+    except authmod.SigninModeError as exc:
+        await _blocked(exc)
+    return await _ok(result, "local")
 
 
 @app.get("/auth/me")
@@ -554,6 +811,16 @@ async def me(authorization: str = Header(default="")) -> Dict[str, Any]:
 @app.get("/auth/sso/login")
 async def sso_login():
     from fastapi.responses import RedirectResponse
+
+    # `signin_mode=local` means this deployment does not do SSO at all. Answer
+    # with a clear 403 rather than a redirect into a realm nobody maintains —
+    # and rather than the 400 "oidc disabled" that hides the real reason.
+    cfg = await authmod.effective_auth()
+    if authmod.signin_mode(cfg) == "local":
+        raise HTTPException(
+            status_code=403,
+            detail="single sign-on is disabled (sign-in mode is local)",
+        )
 
     try:
         state, nonce = authmod.make_state()
@@ -576,12 +843,23 @@ async def sso_login():
 async def sso_callback(request: Request, code: str = "", state: str = ""):
     from fastapi.responses import RedirectResponse
 
+    nonce = request.cookies.get(authmod.SSO_NONCE_COOKIE, "")
+    ip = client_ip(request)
     try:
         # Proves this callback belongs to a login *this browser* started.
-        authmod.verify_state(state, request.cookies.get(authmod.SSO_NONCE_COOKIE, ""))
-        result = await authmod.oidc_callback(code)
+        authmod.verify_state(state, nonce)
+        # The same nonce is enforced a second time against the id_token's own
+        # `nonce` claim, which is what ties the *token* to this login rather
+        # than only tying the redirect to this browser.
+        result = await authmod.oidc_callback(code, expected_nonce=nonce)
     except authmod.AuthError as exc:
+        await authmod.record_auth_event(
+            authmod.EV_SSO_FAIL, ip=ip, detail=str(exc))
         raise HTTPException(status_code=401, detail=str(exc))
+
+    await authmod.record_auth_event(
+        authmod.EV_SSO_OK, email=result.get("user", {}).get("email"), ip=ip,
+        detail="oidc")
 
     # Hand the token to the SPA in the URL *fragment*. A fragment is never sent
     # to a server, so it stays out of access logs and out of the Referer header
@@ -595,6 +873,75 @@ async def sso_callback(request: Request, code: str = "", state: str = ""):
 from app.admin import router as admin_router  # noqa: E402
 
 app.include_router(admin_router, dependencies=[Depends(require_admin)])
+
+
+# ---- shareable embed preview (public by signed token, NOT by Bearer) ---------
+#
+# This route is on `app`, not on `admin_router`, and that placement is the whole
+# feature. The include_router above puts `require_admin` on EVERY /admin/* path,
+# and require_admin reads an Authorization header — which a browser navigating
+# to a URL, or an <iframe src=>, never sends. A preview page registered there
+# would be unopenable by exactly the people it exists for.
+#
+# So the only credential here is the token in the query string, minted by
+# `POST /admin/embed/preview-link` (super_admin) and verified by
+# `_decode_preview_token`, which insists on `purpose == "embed_preview"` — the
+# widget's own chat session tokens are HS256 over the SAME secret and would
+# otherwise decode cleanly.
+_PREVIEW_GONE_HTML = (
+    "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+    "<title>Not found</title></head><body style=\"font:16px/1.6 system-ui,sans-serif;"
+    "max-width:640px;margin:15vh auto;padding:0 20px;color:#111\">"
+    "<h1>Preview link not available</h1>"
+    "<p>This preview link is not valid. Ask your CityAgent administrator for a new one.</p>"
+    "</body></html>\n"
+)
+
+
+@app.get("/embed/preview")
+async def embed_preview(request: Request, t: str = ""):
+    """Render the outlet demo page for a signed, short-lived preview token.
+
+    Missing, malformed, forged, expired and wrong-purpose tokens all answer the
+    SAME 404 with the same body. Distinguishing them would turn this route into
+    an oracle: "expired" confirms a link once existed for that store, and a
+    forger could tell a bad signature from a bad payload while grinding.
+    """
+
+    from fastapi.responses import HTMLResponse
+
+    from app.admin import (
+        OutletSnippetRequest,
+        _decode_preview_token,
+        _demo_page,
+        _outlet_user,
+        _snippet_html,
+    )
+    from app.security import sign_user
+
+    headers = {"Cache-Control": "no-store", "X-Robots-Tag": "noindex"}
+
+    claims = _decode_preview_token(t)
+    if claims is None:
+        return HTMLResponse(_PREVIEW_GONE_HTML, status_code=404, headers=headers)
+
+    # base_url comes from the request, not the token: the page is being served
+    # by the very host the widget must call, so it can state its own origin. A
+    # base_url claim would be a self-asserted URL we would then have to trust.
+    req = OutletSnippetRequest(
+        store_id=claims["store_id"],
+        embed_id=claims.get("embed_id", ""),
+        public_key=claims.get("public_key", ""),
+        base_url=str(request.base_url).rstrip("/"),
+        title=claims.get("title"),
+        accent=claims.get("accent") or "#2F3293",
+        stream=bool(claims.get("stream", True)),
+    )
+    # The same server-side signature the downloadable snippet carries — the
+    # store is HMAC-locked, so the preview can answer for that branch and no
+    # other, exactly like the real embed.
+    snippet = _snippet_html(req, sign_user(_outlet_user(req.store_id)))
+    return HTMLResponse(_demo_page(req, snippet), headers=headers)
 
 
 # ---- the admin SPA -----------------------------------------------------------
@@ -612,6 +959,21 @@ app.include_router(admin_router, dependencies=[Depends(require_admin)])
 # `Accept: */*` and `Sec-Fetch-Dest: empty`. Negotiating on that is the only rule
 # here that cannot mislabel a legitimate deep link.
 _ADMIN_INDEX = None  # set by _mount_admin() when a build is present
+
+# The SPA shell must never be served from the browser cache without asking us
+# first. Vite fingerprints everything under _app/immutable/, so the shell is the
+# ONLY file whose contents change while its URL stays the same — and it is the
+# file that names which fingerprinted bundle to load. StaticFiles sends an ETag
+# and a Last-Modified but no Cache-Control, which leaves a browser free to apply
+# heuristic freshness (a fraction of the document's age) and reuse the old shell
+# for hours without revalidating. That is how a deploy lands on the server and
+# the user still sees the previous console. `no-cache` does not mean "do not
+# store" — it means "revalidate every time", so the usual answer is a cheap 304.
+_SHELL_CACHE_HEADERS = {"Cache-Control": "no-cache"}
+
+# The fingerprinted assets are the exact opposite: their URL changes whenever
+# their contents do, so they can be cached hard and forever.
+_IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable"
 
 
 def _is_document_navigation(headers) -> bool:
@@ -664,7 +1026,7 @@ async def spa_deep_link(request, call_next):
     ):
         from fastapi.responses import FileResponse
 
-        return FileResponse(_ADMIN_INDEX)
+        return FileResponse(_ADMIN_INDEX, headers=_SHELL_CACHE_HEADERS)
     return await call_next(request)
 
 
@@ -688,7 +1050,22 @@ def _mount_admin() -> None:
         the browser's own navigation headers can trigger, so everything that
         reaches this mount and misses is a data request for something that does
         not exist. It gets the JSON 404 it asked for.
+
+        It also sets Cache-Control, which StaticFiles does not: the shell must
+        revalidate on every load, the fingerprinted bundles never need to. See
+        _SHELL_CACHE_HEADERS above for why the shell is the one that matters.
         """
+
+        def file_response(self, full_path, stat_result, scope, status_code=200):
+            resp = super().file_response(full_path, stat_result, scope, status_code)
+            path = scope.get("path", "")
+            if "/_app/immutable/" in path:
+                resp.headers["Cache-Control"] = _IMMUTABLE_CACHE_CONTROL
+            elif path.endswith(".html") or path.endswith("/") or "." not in path.rsplit("/", 1)[-1]:
+                # html=True serves index.html for a directory request, so the
+                # extensionless/trailing-slash cases are the shell too.
+                resp.headers["Cache-Control"] = "no-cache"
+            return resp
 
     for cand in (Path(__file__).parent.parent / "admin" / "build",
                  Path("/app/admin_build")):
@@ -852,6 +1229,82 @@ async def _is_follow_up(client_session: Optional[str]) -> bool:
         return False
 
 
+from app.activity import METRIC_FIELDS as _METRIC_FIELDS  # noqa: E402
+from app.activity import NO_METRICS as _NO_METRICS  # noqa: E402
+from app.activity import extract_metrics as _extract_metrics  # noqa: E402
+
+
+# ---- chat_logs writes, with or without the metric columns --------------------
+#
+# `log_chat` lives in app/admin.py, which is owned elsewhere. This wrapper lets
+# the two halves of the token/cost change deploy in either order:
+#
+#   * against a `log_chat` that takes the metric kwargs, they are passed through
+#     and land in the 0006 columns;
+#   * against the current one, they are dropped here and the turn is logged
+#     exactly as before.
+#
+# The decision is made by INSPECTING the signature once, not by catching a
+# TypeError from the call. `log_chat` swallows its own exceptions, so a TypeError
+# raised inside it would be indistinguishable from a signature mismatch, and
+# retrying a call that had already written a row would double every turn.
+
+_LOG_CHAT_TAKES_METRICS: Optional[bool] = None
+
+
+def _log_chat_takes_metrics() -> bool:
+    global _LOG_CHAT_TAKES_METRICS
+    if _LOG_CHAT_TAKES_METRICS is None:
+        import inspect
+
+        from app.admin import log_chat
+
+        try:
+            params = inspect.signature(log_chat).parameters
+            _LOG_CHAT_TAKES_METRICS = "total_tokens" in params or any(
+                p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+            )
+        except Exception:  # noqa: BLE001
+            _LOG_CHAT_TAKES_METRICS = False
+        if not _LOG_CHAT_TAKES_METRICS:
+            logger.info(
+                "admin.log_chat does not accept token/cost kwargs yet; per-turn "
+                "metrics are captured but not persisted"
+            )
+    return _LOG_CHAT_TAKES_METRICS
+
+
+async def _log_turn(*args, metrics: Optional[Dict[str, Any]] = None, **kwargs) -> None:
+    """`admin.log_chat`, plus the six metric columns when it will take them.
+
+    Then the turn's per-call detail. ``tool_calls`` and ``llm_calls`` both carry
+    a foreign key to ``chat_logs(id)``, so nothing captured DURING the turn has
+    a row to point at until this one is written — which is why capture buffers
+    in memory (``activity.begin_turn``) and is flushed from here, once, with the
+    real id that ``log_chat`` now returns.
+
+    ⚠️ **This is the only place the buffer is flushed, and `begin_turn` is the
+    only place it is opened.** Miss either and the capture layer is dead code
+    that fails silently: `record_tool_call` returns immediately on an empty
+    contextvar, so `tool_calls` simply stays empty and the Diagnostics tab
+    renders a clean, permanently blank page with no error anywhere.
+
+    ⚠️ Everything after ``log_chat`` is analytics and must never cost an answer.
+    ``flush_turn`` is fire-and-forget and swallows its own errors.
+    """
+
+    from app import activity
+    from app.admin import log_chat
+
+    if metrics and _log_chat_takes_metrics():
+        kwargs.update({k: v for k, v in metrics.items() if k in _METRIC_FIELDS})
+    turn_id = await log_chat(*args, **kwargs)
+    # args are (question, answer, store_id, cached, latency_ms) — log_chat's
+    # positional contract. The answer is what the USER SAW, which is the only
+    # thing that can tell us whether the turn gave up.
+    activity.flush_turn(turn_id, answer=args[1] if len(args) > 1 else None)
+
+
 async def _answer(
     message: str,
     store_id: Optional[str],
@@ -862,9 +1315,16 @@ async def _answer(
 ):
     """Run the agent for one message, force-scoped to ``store_id``.
 
-    Returns ``(content, was_cached)``. Checks the Redis query cache first; on a
-    miss runs the agent and caches the answer. ``user_id``/``session_id`` (when
-    given) drive Agno self-learning memory. ``model`` selects the chat model.
+    Returns ``(content, was_cached, run_metrics)``. Checks the Redis query cache
+    first; on a miss runs the agent and caches the answer. ``user_id``/
+    ``session_id`` (when given) drive Agno self-learning memory. ``model``
+    selects the chat model.
+
+    ``run_metrics`` is the six-key dict from ``activity.extract_metrics`` for
+    whichever model call actually happened. **On a cache hit every value is
+    None** — no model ran, and `path='cache'` already records why. Filling those
+    columns with 0 there would make a month of free cache hits read as a month
+    of zero-cost model calls.
 
     ``client_session`` is the session id the CLIENT sent, if any — distinct from
     ``session_id``, which ``_learn_ids`` may have defaulted to a shared value.
@@ -872,7 +1332,17 @@ async def _answer(
     may use the shared answer cache.
     """
 
-    from app import metrics
+    from app import activity, metrics
+
+    # Open the capture buffer, but ONLY if nothing upstream already did.
+    # `begin_turn` RESETS rather than appends — deliberately, so a turn can
+    # never be credited with a previous turn's calls. The consequence is that
+    # calling it unconditionally here would DISCARD whatever the streaming path
+    # captured after it opened the turn in `chat_stream.gen`. This is the entry
+    # point for the non-streaming route only; for the streaming route it is a
+    # continuation, so it checks rather than resets.
+    if activity.current_turn() is None:
+        activity.begin_turn()
 
     follow_up = await _is_follow_up(client_session)
 
@@ -891,7 +1361,8 @@ async def _answer(
             # A cache hit runs no agent, so nothing would record this turn and
             # the NEXT turn would not know it happened.
             await _remember(client_session, model, session_id, user_id, message, cached)
-            return cached, True
+            # No model ran: every metric column stays NULL. See the docstring.
+            return cached, True, dict(_NO_METRICS)
     metrics.incr("cache_misses")
 
     # Pin the data version we are about to answer against. If an ingest lands
@@ -917,6 +1388,10 @@ async def _answer(
             metrics.incr("llm_calls")
             metrics.record_llm()
             out = await fastpath.get_phrasing_agent(model).arun(phrase_prompt)
+            # Tokens + cost of the ONE phrasing call this path makes. Extraction
+            # is defensive by construction (activity.extract_metrics never
+            # raises), so a renamed agno attribute costs a metric, not an answer.
+            run_metrics = _extract_metrics(out)
             # The fast path answers only HOT_HAVE / HOT_WHERE — stock and
             # price — so the safety line never belongs on it.
             raw = getattr(out, "content", str(out))
@@ -927,7 +1402,7 @@ async def _answer(
             if not contains_reasoning(raw):
                 await set_cached_answer(message, store_id, content, model=model, version=version)
             await _remember(client_session, model, session_id, user_id, message, content)
-            return content, False
+            return content, False, run_metrics
 
     prompt = _scoped_message(message, store_id)
     token = set_store_scope(store_id)
@@ -940,6 +1415,10 @@ async def _answer(
         metrics.incr("llm_calls")
         metrics.record_llm()
         out = await get_agent(model, with_history=bool(client_session), style=style).arun(prompt, **run_kw)
+        # The full agent may make several provider calls in its tool loop;
+        # RunMetrics is the aggregate over the whole run, which is the number
+        # this turn actually cost.
+        run_metrics = _extract_metrics(out)
         raw_answer = getattr(out, "content", str(out))
         content = apply_disclaimer(filter_answer(raw_answer))
     finally:
@@ -947,7 +1426,7 @@ async def _answer(
 
     if not follow_up and not contains_reasoning(raw_answer):
         await set_cached_answer(message, store_id, content, model=model, version=version)
-    return content, False
+    return content, False, run_metrics
 
 
 # ---- routes ----------------------------------------------------------------
@@ -1001,6 +1480,75 @@ async def version() -> Dict[str, Any]:
     return {**version_info(), "latest_release": release_notes.latest()}
 
 
+# ---- white-label branding (public) ------------------------------------------
+#
+# PUBLIC, like `/auth/config`, and for the same reason: the login screen renders
+# BEFORE any token exists, and it renders from this. Requiring auth would mean
+# the product could only be named once you were already signed in to it.
+#
+# Nothing here is sensitive — it is the text and the logos every visitor to the
+# sign-in page already sees.
+
+
+@app.get("/brand")
+async def brand_document() -> Dict[str, Any]:
+    """Branding for the login screen and the console chrome.
+
+    ``version`` is one hash over the text config AND every asset's content hash,
+    so the SPA cache-busts its whole brand surface with a single value — a
+    replaced logo moves it just as a renamed product does.
+
+    **This endpoint must never 500.** It is on the hot path of every sign-in
+    render, so a Postgres blip here would blank the login page of a deployment
+    whose database is otherwise fine, and nobody could sign in to fix it. Any
+    failure degrades to the shipped defaults (``version: "default"``), which is
+    exactly how the product looked before branding existed. The
+    defaults-on-error path lives in ``app.brand.public_document``.
+    """
+
+    from app import brand
+
+    return await brand.public_document()
+
+
+@app.get("/brand/asset/{key}")
+async def brand_asset(key: str):
+    """Serve one stored logo. Public, immutable, and never sniffed.
+
+    Three headers are load-bearing:
+
+    * ``Cache-Control: immutable`` for a year is safe ONLY because the URL the
+      document hands out carries the content hash (``?v=<sha256>``). Replacing a
+      logo produces a different URL; nothing ever has to expire.
+    * ``Content-Type`` comes from the STORED mime, which was decided from the
+      file's magic bytes at upload — not from the filename and not from what the
+      uploader's browser claimed.
+    * ``X-Content-Type-Options: nosniff`` stops a browser from second-guessing
+      that and executing the bytes as something else. Belt and braces with the
+      PNG/JPEG-only rule in ``app.brand.validate_image``: this is served
+      same-origin with the admin console, so a file that renders as script here
+      reaches a super_admin's ``localStorage`` token.
+    """
+
+    from fastapi.responses import Response
+
+    from app import brand
+
+    row = await brand.get_asset(key)
+    if not row:
+        raise HTTPException(status_code=404, detail="asset not set")
+    ext = brand.extension_for(row["mime"])
+    return Response(
+        content=bytes(row["bytes"]),
+        media_type=row["mime"],
+        headers={
+            "Cache-Control": "public, max-age=31536000, immutable",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": f'inline; filename="{key}.{ext}"',
+        },
+    )
+
+
 @app.get("/api/embed/models")
 async def list_models() -> Dict[str, Any]:
     """Selectable chat models for the in-app picker (id, name, price)."""
@@ -1039,11 +1587,16 @@ async def ready() -> Dict[str, Any]:
 
 @app.post("/api/embed/reload")
 async def reload_data() -> Dict[str, Any]:
-    """Reload data from the data dir (article merge + inventory replace) and bust cache.
+    """Reload data from the data dir and bust cache. BOTH kinds replace.
 
     Loads whatever article/balance xlsx are present in the configured data dir,
-    then bumps the data version so all cached answers miss. Missing files are
-    skipped safely (existing data is preserved).
+    then bumps the data version so all cached answers miss. Catalog is
+    ``full_sync`` — rows the file omits are deleted, not kept; the "article
+    merge" this docstring used to claim has not been the behaviour since
+    2026-08-02. Inventory is truncate-and-reload.
+
+    A missing file is skipped and an empty one is refused by ``ingest_inventory``
+    / ``ingest_catalog``, so neither can empty a table through this endpoint.
     """
 
     result = await reload_from_data_dir()
@@ -1105,8 +1658,6 @@ async def chat(req: ChatRequest) -> ChatResponse:
 
     import time as _t
 
-    from app.admin import log_chat
-
     claims = _claims(req.session_token)
     rl_id = claims.get("uid") or claims.get("store_id") or claims.get("embed_id") or "anon"
     if not await check_rate_limit(str(rl_id)):
@@ -1114,11 +1665,24 @@ async def chat(req: ChatRequest) -> ChatResponse:
     store_id = claims.get("store_id")
     user_id, session_id = _learn_ids(claims, req.session_id)
     t0 = _t.time()
-    content, was_cached = await _answer(
+    content, was_cached, run_metrics = await _answer(
         req.message, store_id, user_id, session_id, req.model,
         client_session=req.session_id,
     )
-    await log_chat(req.message, content, store_id, was_cached, int((_t.time() - t0) * 1000))
+    # Audit attribution: this endpoint knows who asked (the embed credential on
+    # the session token), in which conversation, and with which model. It does
+    # NOT know whether _answer() went through the fast path or the full agent —
+    # that would mean changing what _answer returns — so `path` is recorded only
+    # for the one route it can prove, the cache hit. A guess would be worse than
+    # a NULL: NULL reads as "unattributed", "agent" reads as a fact.
+    await _log_turn(
+        req.message, content, store_id, was_cached, int((_t.time() - t0) * 1000),
+        embed_id=claims.get("embed_id"),
+        session_id=req.session_id or None,
+        model=req.model or None,
+        path="cache" if was_cached else None,
+        metrics=run_metrics,
+    )
     return ChatResponse(content=content)
 
 
@@ -1136,8 +1700,13 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
     async def gen():
         import time as _t
 
-        from app.admin import log_chat
-        from app import metrics
+        from app import activity, metrics
+
+        # Open this turn's capture buffer BEFORE anything can call a tool or a
+        # model. `record_tool_call` no-ops on an empty contextvar, so opening
+        # late does not error — it silently drops the calls made before this
+        # line, and the loss is invisible in every log.
+        activity.begin_turn()
 
         t0 = _t.time()
         # A follow-up needs its conversation; the cache key has none. See _answer().
@@ -1147,7 +1716,17 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             if cached is not None:
                 metrics.incr("cache_hits")
                 yield f"data: {json.dumps({'delta': cached})}\n\n"
-                await log_chat(req.message, cached, store_id, True, int((_t.time() - t0) * 1000))
+                # No agent, no model call, no tools — so `tools`/`model` stay
+                # NULL rather than echoing the model that was merely REQUESTED,
+                # and every metric column stays NULL for the same reason. A 0
+                # here would read as "this turn cost nothing to generate", which
+                # is a claim about a model call that never happened.
+                await _log_turn(
+                    req.message, cached, store_id, True, int((_t.time() - t0) * 1000),
+                    embed_id=claims.get("embed_id"),
+                    session_id=req.session_id or None,
+                    path="cache",
+                )
                 # No agent ran; record the turn or the next one cannot see it.
                 await _remember(
                     req.session_id, req.model, session_id, user_id, req.message, cached
@@ -1203,10 +1782,17 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 # The phrasing agent has no tools, so it has least reason to
                 # narrate — but Feedback 5 leaked from exactly this route.
                 leak = LeakFilter()
+                # A streamed run returns no RunOutput, so usage arrives on an
+                # event instead — RunCompletedEvent carries `.metrics`. Taking
+                # the last event that has any means we do not have to name the
+                # event class here and break on an agno rename.
+                run_metrics = dict(_NO_METRICS)
                 try:
                     async for event in fastpath.get_phrasing_agent(req.model).arun(
                         phrase_prompt, stream=True, stream_events=True,
                     ):
+                        if getattr(event, "metrics", None) is not None:
+                            run_metrics = _extract_metrics(event)
                         if type(event).__name__ == "RunContentEvent":
                             delta = getattr(event, "content", None)
                             if isinstance(delta, str) and delta:
@@ -1228,8 +1814,21 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                             yield f"data: {json.dumps({'delta': full})}\n\n"
                 except Exception as exc:  # noqa: BLE001
                     yield f"event: error\ndata: {json.dumps({'detail': str(exc)})}\n\n"
+                # Logged unconditionally, OUTSIDE `if full` — a turn that
+                # produced nothing is the most interesting row in an audit log
+                # and used to write no row at all, so the silences were
+                # invisible. Caching and remembering stay guarded: an empty
+                # answer must never be served again or replayed as history.
+                await _log_turn(
+                    req.message, full, store_id, False, int((_t.time() - t0) * 1000),
+                    embed_id=claims.get("embed_id"),
+                    session_id=req.session_id or None,
+                    model=req.model or None,
+                    tools=[facts["tool"]] if facts.get("tool") else [],
+                    path="fast_path",
+                    metrics=run_metrics,
+                )
                 if full:
-                    await log_chat(req.message, full, store_id, False, int((_t.time() - t0) * 1000))
                     await set_cached_answer(
                         req.message, store_id, full, model=req.model, version=version
                     )
@@ -1248,6 +1847,16 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
         # find_at_other_stores return branch rows only, so a turn that ends on
         # one of them would otherwise name no subject at all.
         subject: Optional[Dict[str, str]] = None
+        # Which tools this turn actually called, in call order. They were already
+        # being computed for `event: step` and thrown away the moment the frame
+        # was yielded, so the audit log could say a turn happened but never which
+        # retrieval mode answered it. Collected here, written to chat_logs.tools;
+        # the SSE frames below are untouched (the wire contract is frozen).
+        tools_used: List[str] = []
+        # Usage for the whole run, off the terminal stream event. Initialised to
+        # all-NULL so a turn that errors before any event still logs honestly
+        # ("unknown") rather than logging a zero-cost turn.
+        run_metrics = dict(_NO_METRICS)
         metrics.incr("llm_calls")
         metrics.record_llm()
         try:
@@ -1261,9 +1870,13 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 session_id=session_id,
             ):
                 name = type(event).__name__
+                if getattr(event, "metrics", None) is not None:
+                    run_metrics = _extract_metrics(event)
                 if name == "ToolCallStartedEvent":
                     tobj = getattr(event, "tool", None)
                     tool = getattr(tobj, "tool_name", "") or ""
+                    if tool:
+                        tools_used.append(tool)
                     detail = _step_detail(getattr(tobj, "tool_args", None))
                     frame = json.dumps({
                         "label": tool or "Searching", "icon": "search",
@@ -1317,12 +1930,23 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             yield f"event: error\ndata: {json.dumps({'detail': str(exc)})}\n\n"
         finally:
             reset_store_scope(scope)
-            if full:
-                await log_chat(req.message, full, store_id, False, int((_t.time() - t0) * 1000))
-                if not follow_up:
-                    await set_cached_answer(
-                        req.message, store_id, full, model=req.model, version=version
-                    )
+            # Unconditional, and before the cache write: an errored or empty turn
+            # is exactly the row an audit log must not be missing. `if full:`
+            # meant every failed answer left NO trace at all, so the log could
+            # only ever show the system working. Caching stays guarded by `full`.
+            await _log_turn(
+                req.message, full, store_id, False, int((_t.time() - t0) * 1000),
+                embed_id=claims.get("embed_id"),
+                session_id=req.session_id or None,
+                model=req.model or None,
+                tools=tools_used,
+                path="agent",
+                metrics=run_metrics,
+            )
+            if full and not follow_up:
+                await set_cached_answer(
+                    req.message, store_id, full, model=req.model, version=version
+                )
             yield "data: [DONE]\n\n"
 
     return StreamingResponse(gen(), media_type="text/event-stream")

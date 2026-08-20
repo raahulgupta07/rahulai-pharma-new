@@ -19,6 +19,8 @@ import uuid
 
 import pytest
 
+from tests.pgconn import pg
+
 from app import auth as authmod
 
 # Import at collection time, not inside a test. app.api pulls in agno, which
@@ -44,10 +46,56 @@ def run(coro):
     return asyncio.run(_wrapped())
 
 
+# Every account this module creates, registered the instant it exists.
+#
+# Cleanup used to be the LAST statement of each test coroutine — so any test
+# that raised before reaching it left its account behind for good. It did:
+# `appr-188413e477@corp.mm` (id 6) and `appr-150e95de29@corp.mm` (id 9) were
+# still sitting in the production `users` table months later, and every request
+# they had made was still in `app_events`, out-ranking the real admin in the
+# Activity feed. The teardown below runs whether the test passed, failed, or
+# blew up in the middle, which is the only version of this that holds.
+_CREATED: set = set()
+_CREATED_EMAILS: set = set()
+
+
+def _pg(query: str, *args):
+    """Run one statement on a private connection. Never touches app.db's pool.
+
+    Teardown cannot use `app.db.execute`: `run()` above closes the pool at the
+    end of every test, and the loop it was bound to is closed with it.
+
+    One connection per PROCESS, not per statement — see tests/pgconn.py for
+    why the previous arrangement was the suite's whole wall clock.
+    """
+
+    pg(query, *args)
+
+
+@pytest.fixture(autouse=True)
+def _drop_created_users():
+    """Remove every account this module made, however the test ended."""
+
+    _CREATED.clear()
+    _CREATED_EMAILS.clear()
+    yield
+    ids, emails = sorted(_CREATED), sorted(_CREATED_EMAILS)
+    _CREATED.clear()
+    _CREATED_EMAILS.clear()
+    if ids:
+        _pg("DELETE FROM users WHERE id = ANY($1::int[])", ids)
+    if emails:
+        # `test_migration_approves_preexisting_rows` inserts by email and never
+        # learns an id — and it DROPs the `approved` column halfway through, so
+        # it is the likeliest test here to die mid-body.
+        _pg("DELETE FROM users WHERE email = ANY($1::text[])", emails)
+
+
 async def _fresh_user(approved=False, role="admin"):
     await authmod.ensure_users_table()
     email = f"appr-{uuid.uuid4().hex[:10]}@corp.mm"
     u = await authmod.create_user(email, "Test", "pw12345", role, approved=approved)
+    _CREATED.add(u["id"])
     return email, u
 
 
@@ -84,6 +132,7 @@ def test_migration_approves_preexisting_rows():
         from app.db import execute, q
         await authmod.ensure_users_table()
         email = f"legacy-{uuid.uuid4().hex[:8]}@corp.mm"
+        _CREATED_EMAILS.add(email)
         # insert, then force it to pending as if it predated approval
         await execute(
             "INSERT INTO users (email, name, role, approved) VALUES ($1,$2,'admin',TRUE)",

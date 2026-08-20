@@ -11,6 +11,6 @@
   };
 </script>
 
-<span class="inline-flex items-center rounded-lg px-2 py-0.5 text-[11px] font-medium {map[tone] ?? map.neutral}">
+<span class="inline-flex items-center rounded-full px-2 py-0.5 text-label font-medium {map[tone] ?? map.neutral}">
   {@render children?.()}
 </span>

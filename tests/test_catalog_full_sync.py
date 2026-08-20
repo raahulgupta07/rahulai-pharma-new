@@ -33,6 +33,8 @@ import redis as _redis_sync
 import app.ingest as ingest_mod
 from app import auth as authmod
 from app.config import get_settings
+
+from tests.pgconn import pg
 from app.ingest import ingest_catalog
 
 # Import app.api at collection time, while pytest-asyncio still has a current
@@ -189,17 +191,13 @@ def test_full_sync_empty_file_deletes_nothing(tmp_path):
 
 
 def _pg(query: str, *args, fetch: bool = False):
-    async def go():
-        conn = await asyncpg.connect(get_settings().postgres_url)
-        try:
-            if fetch:
-                return [dict(r) for r in await conn.fetch(query, *args)]
-            await conn.execute(query, *args)
-            return None
-        finally:
-            await conn.close()
+    """Run one statement on a private connection. Never touches app.db's pool.
 
-    return asyncio.run(go())
+    One connection per PROCESS, not per statement — see tests/pgconn.py for
+    why the previous arrangement was the suite's whole wall clock.
+    """
+
+    return pg(query, *args, fetch=fetch)
 
 
 class _Admin:

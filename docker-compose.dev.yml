@@ -1,0 +1,75 @@
+# Dev overlay: edit-and-see, with no image build.
+#
+# Without this, EVERY Python change needs a full `docker compose build` — two to
+# four minutes — before it can be looked at, because the Dockerfile COPYs
+# `app/` into the image and nothing mounts the source. That cost is paid per
+# change, not per release, and it is what makes a five-line fix take five
+# minutes to see.
+#
+# This overlay bind-mounts the source over the copy that is baked in and runs
+# uvicorn with `--reload`, so a save is live in about two seconds. Nothing about
+# the image, the Dockerfile or the shipping path changes: this is a THIRD file
+# you opt into, and a release is still built and tagged exactly as before.
+#
+#   dev     docker compose -p pharmacy-opt \
+#             -f docker-compose.yml -f docker-compose.optimized.yml \
+#             -f docker-compose.dev.yml up -d api ingest-worker
+#
+#   ship    docker compose -p pharmacy-opt \
+#             -f docker-compose.yml -f docker-compose.optimized.yml \
+#             build api            # then tag, then `up -d` WITHOUT this file
+#
+# Leaving the dev overlay out of the `up` is what puts the baked code back. A
+# container started with it is running the working tree, which is the point —
+# and the reason `/version` must never be read off a dev container as evidence
+# that a build contains something.
+#
+# Mounts are READ-ONLY. The container has no business writing into the working
+# tree, and a read-only mount is what stops a stray `__pycache__` or a migration
+# scratch file appearing in git as if a human wrote it. Byte-code goes to
+# PYTHONPYCACHEPREFIX instead, outside the mount, or Python silently falls back
+# to not caching at all and every reload re-parses the whole package.
+
+services:
+  api:
+    # `--reload-dir` is deliberate: uvicorn's default watches the whole CWD,
+    # which here is /app — including `admin_build`, whose every rebuilt asset
+    # would restart the API for a change that is served as a static file. Watch
+    # the Python only.
+    command:
+      - uvicorn
+      - app.api:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+      - --reload-dir
+      - /app/app
+    environment:
+      # Byte-code cache OUTSIDE the read-only mount. Without it Python cannot
+      # write .pyc next to the source and re-parses every module on each reload.
+      PYTHONPYCACHEPREFIX: /tmp/pycache
+    # No build-channel variable is set here: nothing reads one. The signal
+    # already exists and is honest — a container started without the build args
+    # reports `git_sha: "dev"` and `is_release_build: false` on /version, and
+    # the console renders that as a DEV chip.
+    volumes:
+      - ./app:/app/app:ro
+      # The release notes are read at runtime and rendered in the console, so an
+      # edit to them should show up like any other change.
+      - ./CHANGELOG.md:/app/CHANGELOG.md:ro
+      # The built console, served straight from the working tree — this is what
+      # removes the `docker cp` step after `npm run build`. The vite dev server
+      # (admin/README) is faster still; this is the fallback that always works
+      # and is what a production-shaped check should use.
+      - ./admin/build:/app/admin_build:ro
+
+  # The worker imports the same package. It has no reload of its own — restart
+  # it after a change (`docker compose ... restart ingest-worker`, ~1s) — but
+  # mounting the source means that restart picks the change up without a build.
+  ingest-worker:
+    environment:
+      PYTHONPYCACHEPREFIX: /tmp/pycache
+    volumes:
+      - ./app:/app/app:ro

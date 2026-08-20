@@ -1,11 +1,10 @@
 <script>
-  import { API_BASE } from '$lib/apiBase.js';
   import { onMount } from 'svelte';
   import { Search, RefreshCw } from '@lucide/svelte';
   import PageHeader from '$lib/PageHeader.svelte';
   import StatCard from '$lib/StatCard.svelte';
-
-  const base = API_BASE;
+  import { getJSON } from '$lib/api.js';
+  import ErrorState from '$lib/ErrorState.svelte';
 
   let loading = $state(true);
   let error = $state(null);
@@ -16,12 +15,13 @@
     loading = true;
     error = null;
     try {
-      const res = await fetch(base + '/admin/stores');
-      if (!res.ok) throw new Error(`request failed (${res.status})`);
-      const data = await res.json();
+      const data = await getJSON('/admin/stores');
       stores = Array.isArray(data) ? data : [];
     } catch (e) {
-      error = e.message || 'backend offline';
+      // Keep the error OBJECT: its status is the difference between "sign in
+      // again" and "the server is down". Never collapse it to a message.
+      error = e;
+      stores = [];
     } finally {
       loading = false;
     }
@@ -68,19 +68,29 @@
   const valueLabel = (v) => `${Math.round((v ?? 0) / 1e6)}M`;
 </script>
 
-<PageHeader title="Stores">
+<!-- The rail row says "Branches". A row is a promise about where it goes,
+     and this page announced itself as "Stores" — the word the database uses,
+     not the word the person clicked. -->
+<PageHeader
+  title="Branches"
+  subtitle="Every site that sends us stock: what it holds, how many units, and what that is worth."
+>
   {#snippet meta()}
-    <span
-      class="inline-flex items-center rounded-lg bg-surface-2 px-2 py-0.5 text-[12px] text-ink-2"
-    >
-      {totalSites} {totalSites === 1 ? 'site' : 'sites'}
-    </span>
+    <!-- Only a count we actually loaded. Before that, `stores` is [] and this
+         chip would announce "0 sites" over a failure — a number nobody sent. -->
+    {#if !loading && !error}
+      <span
+        class="inline-flex items-center rounded-panel bg-surface-2 px-2 py-0.5 text-meta text-ink-2"
+      >
+        {totalSites} {totalSites === 1 ? 'site' : 'sites'}
+      </span>
+    {/if}
   {/snippet}
   {#snippet actions()}
     <button
       onclick={load}
       disabled={loading}
-      class="inline-flex cursor-pointer items-center gap-2 rounded-lg border-[0.5px] border-line px-3.5 py-2 text-[13px] font-medium text-ink transition-colors hover:bg-surface-2 disabled:cursor-default disabled:opacity-60"
+      class="inline-flex cursor-pointer items-center gap-2 rounded-panel border border-line px-3.5 py-2 text-body-sm font-medium text-ink transition-colors hover:bg-surface-2 disabled:cursor-default disabled:opacity-60"
     >
       <RefreshCw size={15} class={loading ? 'animate-spin' : ''} />
       Refresh
@@ -89,25 +99,13 @@
 </PageHeader>
 
 {#if loading}
-  <div class="rounded-xl border-[0.5px] border-line bg-surface-2 px-5 py-6 text-[14px] text-ink-2">
+  <div class="rounded-card border border-line bg-surface-2 px-5 py-6 text-body-sm text-ink-2">
     Loading stores…
   </div>
 {:else if error}
-  <div class="rounded-xl border-[0.5px] border-line bg-surface-2 px-5 py-6 text-[14px] text-ink-2">
-    <p class="font-medium text-ink">Backend offline</p>
-    <p class="mt-1">
-      Could not reach the agent at <span class="text-ink">{API_BASE}</span>.
-      Start the backend and reload.
-    </p>
-    <button
-      onclick={load}
-      class="mt-4 cursor-pointer rounded-lg border-[0.5px] border-line px-3 py-1.5 text-[13px] font-medium text-ink transition-colors hover:bg-surface"
-    >
-      Retry
-    </button>
-  </div>
+  <ErrorState {error} retry={load} what="stores" />
 {:else if stores.length === 0}
-  <div class="rounded-xl border-[0.5px] border-line bg-surface-2 px-5 py-6 text-[14px] text-ink-2">
+  <div class="rounded-card border border-line bg-surface-2 px-5 py-6 text-body-sm text-ink-2">
     <p class="font-medium text-ink">No stores</p>
     <p class="mt-1">No inventory was returned for any site.</p>
   </div>
@@ -130,12 +128,12 @@
       bind:value={query}
       aria-label="Filter by site code"
       placeholder="Filter site code…"
-      class="w-full rounded-[10px] border-[0.5px] border-line bg-surface py-2 pl-9 pr-3 text-[14px] text-ink placeholder:text-ink-3 focus:border-accent focus:outline-none focus:ring-[3px] focus:ring-accent-soft"
+      class="w-full rounded-card border border-line bg-surface py-2 pl-9 pr-3 text-body-sm text-ink placeholder:text-ink-3 focus:border-accent focus:outline-none focus:ring-[3px] focus:ring-accent-soft"
     />
   </div>
 
   <!-- Table -->
-  <section class="mt-4 overflow-hidden rounded-xl border-[0.5px] border-line bg-surface">
+  <section class="mt-4 overflow-hidden rounded-card border border-line bg-surface">
     <div class="max-h-[440px] overflow-y-auto">
     <table class="tbl">
       <thead>
@@ -155,15 +153,15 @@
             <td>
               <div class="flex items-center gap-2.5">
                 <div
-                  class="h-1.5 flex-1 overflow-hidden rounded-[4px]"
+                  class="h-1.5 flex-1 overflow-hidden rounded-xs"
                   style="background-color: var(--color-accent-soft);"
                 >
                   <span
-                    class="block h-full rounded-[4px]"
+                    class="block h-full rounded-xs"
                     style="width: {barPct(row.value)}%; background-color: var(--color-accent); opacity: .55;"
                   ></span>
                 </div>
-                <span class="tnum whitespace-nowrap text-[12px] text-ink-2">
+                <span class="tnum whitespace-nowrap text-meta text-ink-2">
                   {valueLabel(row.value)}
                 </span>
               </div>
@@ -172,7 +170,7 @@
         {/each}
         {#if filtered.length === 0}
           <tr>
-            <td colspan="4" class="text-center text-[14px] text-ink-2" style="padding:24px 16px;">
+            <td colspan="4" class="text-center text-body-sm text-ink-2" style="padding:24px 16px;">
               No sites match “{query}”.
             </td>
           </tr>

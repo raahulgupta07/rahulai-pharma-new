@@ -111,13 +111,33 @@ WWHAM (Who is it for / What are the symptoms / How long / what Action already \
 taken / other Medication). Five questions is an interrogation in a chat window, \
 so ask the two that change the answer most, in one sentence: WHO it is for and \
 HOW LONG. Example: "Is it for you, and how long has it been going on?"
-- REFER, do not recommend, when any of these appear — say plainly that a \
-pharmacist or doctor should see this, and stop:
+- ASK, THEN STOP. Do not ask the question and list products in the same reply. \
+A question you have already answered is not a question, it is decoration — and \
+the whole point is that the answer DEPENDS on who it is for and how long. Wait \
+for the reply, then recommend. The only exception is a red flag below, where you \
+refer immediately and ask nothing.
+- REFER FIRST when any of these appear — say plainly that a pharmacist or doctor \
+should see this, and lead with that:
   * symptoms lasting more than about a week, or getting worse
   * a baby, a young child, someone pregnant or breastfeeding
   * they already take regular or prescription medicine (interaction risk)
   * anything severe or frightening — chest pain, breathing trouble, a bad head \
 injury, blood, fainting, a stiff neck with fever, a rash that does not fade
+- AFTER referring, still say WHAT WE STOCK for that need, with price and \
+availability. A parent asking about a feverish child also needs to know whether \
+this shop has children's paracetamol before making the trip, and a counter \
+assistant would tell them. Refusing to name the shelf is not caution, it is \
+unhelpfulness — look the products up in the catalog and stock exactly as you \
+would for any other question, and name the ones intended for that age group \
+(suspensions and drops for a child, not adult tablets).
+- The one thing you must NOT give in these cases is a DOSE. Dosing for a small \
+child is worked out from weight, and for someone pregnant or on other medicines \
+it depends on what else they take — that is the pharmacist's job, in person. Say \
+what we have and what it costs; let the pharmacist say how much to give.
+- EMERGENCY IS THE EXCEPTION. For chest pain, breathing trouble, a serious head \
+injury, fainting or heavy bleeding, send them for help and stop. Do not list \
+products — nothing on a pharmacy shelf is the answer, and offering one wastes \
+the seconds that matter.
 - When you do suggest products, offer 2-3 CHOICES rather than silently picking \
 one, and give each a short plain reason ("paracetamol, gentle on the stomach" / \
 "ibuprofen, better if there is swelling"). Never present one product as "the" \
@@ -135,6 +155,13 @@ that on every reply is throat-clearing. (Warmer wording made this drift back; it
 is pinned by voice_no_provenance_preamble in the field-feedback eval.)
 
 SEARCH STRATEGY (be persistent, then verify)
+- CATALOG FIRST, then stock. Identify the PRODUCT before you fetch a quantity: \
+get_article_info / search_by_name tell you what it is, what it treats and what it \
+contains; get_stock only tells you how many boxes sit somewhere. Going to stock \
+first is why answers read like a warehouse system, and it is also why a stub row \
+(an article code with no product record — 400 of them exist) can answer as a bare \
+number with no name. If the catalog has no record for a code, say the product \
+details are missing rather than reporting a quantity for something you cannot name.
 - If a name search returns nothing, do NOT give up — try search_by_meaning with \
 the user's need (symptom, generic, or category) before concluding the item is \
 not stocked. A miss on one tool is not a "not available" answer.
@@ -146,11 +173,35 @@ confirming the specific product you found over guessing silently.
 product, code, quantity and price must appear in a tool result. If something does \
 not, drop it rather than infer it.
 
+ANSWER THE PRODUCT FIRST, THE WAREHOUSE SECOND
+- A question about a medicine is a question about the MEDICINE. Look the product \
+up in the catalog and lead with what it IS before you talk about quantities: \
+what it contains and what it is normally used for. The catalog carries an \
+indication for 4,877 of 5,292 products, a dosage for 4,170 and a composition for \
+3,997 — answering "395 units at site 20043-CCSJ" while all of that sits unused \
+is a warehouse report, not a pharmacy answer.
+- The shape of a good answer, in this order:
+  1. the product, in plain words — "BIOGESIC 500MG — paracetamol, for fever and \
+mild pain"
+  2. price, and whether it is available
+  3. where, only as much as the person needs
+  4. the article code LAST, at the end of the line — never leading
+- Codes are for staff picking a box off a shelf, and a member of the public \
+reading a 13-digit number learns nothing. Include the article code (the shop \
+floor filed complaints when it was missing) but put it at the END. Never open an \
+answer with it, and never make a site code the subject of a sentence.
+- Do not dump every branch at a customer. "In stock at most branches" is a \
+better answer than a 53-row table; give the branch with the most stock, or the \
+one they asked about, and let them ask for the rest.
+- Say the price. A "do you have it" question is nearly always also a "how much" \
+question, and answering only one of the two forces a second round trip.
+
 STOCK ANSWERS — WHAT MUST BE IN THEM
 - When you report stock for a product, give ALL of: brand name, article code, \
 site code, quantity and price. A pharmacist reads this to pick the box off a \
 shelf; a bare article code with no brand name is unusable, and that exact \
-complaint was filed from the shop floor.
+complaint was filed from the shop floor. Order them as above — name first, code \
+last.
 - If a product has no stock at the scoped store, say so plainly ("out of stock" \
 / "no balance") and offer the closest alternatives you can find. Do not answer \
 a stock question with silence or a vague "not available".
@@ -378,6 +429,96 @@ MEMORY SAFETY (critical — this is a medical tool):
 """
 
 
+# ---------------------------------------------------------------------------
+# Per-model-call instrumentation
+# ---------------------------------------------------------------------------
+
+
+class InstrumentedOpenRouter(OpenRouter):
+    """``OpenRouter``, plus one ``llm_calls`` row per provider request.
+
+    One turn is not one model call. The agent's tool loop makes a request, runs
+    a tool, and makes another — three or four for a substitute question — and
+    ``RunMetrics`` only ever reports the SUM. That sum cannot say which call was
+    slow, which one blew the token budget, or which model in a router/answer
+    split actually cost the money. This class records each one.
+
+    **Both hooks are pure pass-throughs.** They read; they change no argument, no
+    return value, no control flow. Everything they call swallows its own errors
+    (:func:`app.activity.open_llm_call`), so the worst case is a missing metric.
+
+    ⚠️ They are agno-PRIVATE methods, the same bet ``app.history.record_turn``
+    already takes. The failure mode of an agno rename is chosen deliberately: an
+    override of a method that no longer exists is simply never called, so token
+    capture goes quiet and answers are untouched. :func:`_check_hooks` logs once
+    at import if that has happened, because silent-forever is the one outcome
+    worth a warning.
+
+    Why these two hooks and not ``ModelRequestCompletedEvent``: that event exists
+    only on the streaming path, and this stack answers on both. These two run per
+    provider request in all four (sync/async × stream/non-stream) paths.
+    """
+
+    def _ensure_message_metrics_initialized(self, assistant_message) -> None:  # type: ignore[override]
+        # Called immediately before each provider request, with the message that
+        # request will write into. That message's `.metrics` is filled in by agno
+        # as the call proceeds, so the record keeps a REFERENCE to the message
+        # and reads the timings at flush time rather than copying zeros now.
+        super()._ensure_message_metrics_initialized(assistant_message)
+        try:
+            from app import activity
+
+            capture = activity.current_turn()
+            if capture is None:
+                return
+            # The guard inside agno's version implies it can be called twice for
+            # one message; one provider request must still be one row.
+            if capture.llms and capture.llms[-1]._message is assistant_message:
+                return
+            activity.open_llm_call(self.id, assistant_message)
+        except Exception:  # noqa: BLE001 — a metric is never worth an answer
+            logger.warning("could not open llm_calls record", exc_info=True)
+
+    def _get_metrics(self, response_usage):  # type: ignore[override]
+        # Called once per provider response, with the RAW usage object — the only
+        # place the cache split survives before agno coerces every absent counter
+        # to 0. See app.activity._finalize_llm for why that distinction matters
+        # and cannot be recovered afterwards.
+        metrics = super()._get_metrics(response_usage)
+        try:
+            from app import activity
+
+            capture = activity.current_turn()
+            if capture is not None:
+                for call in reversed(capture.llms):
+                    if call._usage is None:
+                        call._usage = response_usage
+                        break
+        except Exception:  # noqa: BLE001
+            logger.warning("could not attach provider usage to llm_calls", exc_info=True)
+        return metrics
+
+
+def _check_hooks() -> None:
+    """Warn once, at import, if agno has renamed a method we hang capture off.
+
+    Without this the symptom is an empty ``llm_calls`` table and a dashboard of
+    dashes that looks like "nobody asked anything" rather than "the capture
+    broke". Re-verify after any agno upgrade.
+    """
+
+    for hook in ("_ensure_message_metrics_initialized", "_get_metrics"):
+        if not hasattr(OpenRouter, hook):
+            logger.warning(
+                "agno has no %s — per-call llm_calls capture is OFF until this is "
+                "re-pointed; answers are unaffected",
+                hook,
+            )
+
+
+_check_hooks()
+
+
 def _async_dsn(postgres_url: str) -> str:
     """Return ``postgres_url`` using the asyncpg driver.
 
@@ -436,7 +577,7 @@ def build_agent(model_id: str | None = None, style: str = "standard") -> Agent:
 
     settings = get_settings()
     answer_id = model_id or settings.openrouter_model
-    model = OpenRouter(
+    model = InstrumentedOpenRouter(
         id=answer_id,
         api_key=settings.openrouter_api_key,
         max_tokens=ANSWER_MAX_TOKENS,
@@ -450,13 +591,16 @@ def build_agent(model_id: str | None = None, style: str = "standard") -> Agent:
     # (agno/agent/_run.py stream path; the system_message — BILINGUAL_SYSTEM_PROMPT
     # — is preserved for output_model because output_model_prompt is left unset).
     if getattr(settings, "router_split_enabled", False) and settings.router_model:
-        model = OpenRouter(
+        model = InstrumentedOpenRouter(
             id=settings.router_model,
             api_key=settings.openrouter_api_key,
             max_tokens=ANSWER_MAX_TOKENS,
             reasoning_effort=ANSWER_REASONING_EFFORT,
         )
-        extra["output_model"] = OpenRouter(
+        # Instrumented too, and separately: the whole point of the router split
+        # is that two different models bill for one turn, and a single summed
+        # figure cannot say which of them the money went to.
+        extra["output_model"] = InstrumentedOpenRouter(
             id=answer_id,
             api_key=settings.openrouter_api_key,
             max_tokens=ANSWER_MAX_TOKENS,
@@ -494,7 +638,7 @@ def build_learning_agent(model_id: str | None = None, style: str = "standard") -
     try:
         from agno.learn.machine import LearningMachine
 
-        model = OpenRouter(
+        model = InstrumentedOpenRouter(
             id=model_id or settings.openrouter_model,
             api_key=settings.openrouter_api_key,
             max_tokens=ANSWER_MAX_TOKENS,
@@ -502,7 +646,11 @@ def build_learning_agent(model_id: str | None = None, style: str = "standard") -
         )
         lm = LearningMachine(
             db=db,
-            model=OpenRouter(
+            # Instrumented as well. The extraction model is the second model call
+            # `learning_enabled` adds to every turn, and it is the single biggest
+            # driver of the baseline p50 — a cost that has never had a row of its
+            # own to be seen in.
+            model=InstrumentedOpenRouter(
                 id=settings.learning_model,
                 api_key=settings.openrouter_api_key,
                 max_tokens=1500,   # cheap extraction model
@@ -553,7 +701,7 @@ def build_history_agent(model_id: str | None = None, style: str = "standard") ->
 
     settings = get_settings()
     try:
-        model = OpenRouter(
+        model = InstrumentedOpenRouter(
             id=model_id or settings.openrouter_model,
             api_key=settings.openrouter_api_key,
             max_tokens=ANSWER_MAX_TOKENS,

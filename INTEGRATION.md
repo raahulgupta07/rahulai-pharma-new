@@ -55,16 +55,18 @@ identifier, not an authenticator; the thing that actually protects store data is
   data-public-key="pk_live_…"
   data-title="CityCare Agent"
   data-greeting="Ask about stock, prices, substitutes, or indications."
-  data-accent="#006869"
+  data-accent="#2F3293"
   data-stream="true" async></script>
 ```
 
 A floating chat bubble appears bottom-right. It calls `/api/embed/session/create`
 then streams answers from `/api/embed/chat/stream`.
 
-`data-accent` defaults to `#006869` (teal) if omitted — that is the current product
-accent. (It used to be `#c96342`; if you have that hardcoded in a live page, it still
-works, it's just off-brand.)
+`data-accent` defaults to `#2F3293` (CityCare indigo) if omitted — that is the current
+product accent. Only the DEFAULT has ever changed (`#c96342` → `#006869` → `#2F3293`);
+an explicit `data-accent` always wins. If you have an older hex hardcoded in a live
+page it still works exactly as before, it is just off-brand — drop the attribute (or
+paste the snippet again) to pick up the current accent.
 
 ---
 
@@ -107,7 +109,7 @@ $signature = hash_hmac('sha256', $canonical, config('services.cityagent.secret_k
   data-user-sig="{{ $signature }}"
   data-title="CityCare Agent"
   data-greeting="Ask about your branch's stock."
-  data-accent="#006869"
+  data-accent="#2F3293"
   data-stream="true" async></script>
 ```
 

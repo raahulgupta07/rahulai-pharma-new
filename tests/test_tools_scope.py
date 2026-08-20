@@ -33,6 +33,8 @@ import pytest
 
 from app import tools
 from app.config import get_settings
+
+from tests.pgconn import pg
 from app.db import close_pool
 
 MINE = "20005-CCYK"
@@ -45,16 +47,13 @@ DECOY_STOCK = 9_999_999
 
 
 def _pg(query: str, *args):
-    async def go():
-        import asyncpg
+    """Run one statement on a private connection. Never touches app.db's pool.
 
-        conn = await asyncpg.connect(get_settings().postgres_url)
-        try:
-            await conn.execute(query, *args)
-        finally:
-            await conn.close()
+    One connection per PROCESS, not per statement — see tests/pgconn.py for
+    why the previous arrangement was the suite's whole wall clock.
+    """
 
-    return asyncio.run(go())
+    pg(query, *args)
 
 
 @pytest.fixture

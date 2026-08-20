@@ -1,45 +1,103 @@
 <script>
+  import { dialog } from '$lib/aurora/dialog.js';
   import { API_BASE } from '$lib/apiBase.js';
   import { onMount, tick } from 'svelte';
   import {
     Plus,
-    Search,
-    MessageSquare,
-    Star,
-    Pill,
     Copy,
     RefreshCw,
     ThumbsUp,
     ThumbsDown,
     ArrowUp,
-    ArrowLeft,
     Store,
     Table2,
     Languages,
-    PanelLeft,
     PackageSearch,
     Replace,
     TrendingUp,
     Trash2,
     Loader2,
     Check,
-    Wrench,
-    Clock,
-    Zap,
     X,
     FileText,
     ExternalLink,
-    DollarSign,
-    ChevronDown,
     Sparkles,
-    CornerDownRight,
-    Pencil
+    Pencil,
+    Search,
+    Database,
+    ShieldCheck,
+    Wrench
   } from '@lucide/svelte';
   import { base as appBase } from '$app/paths';
   import { renderMarkdown } from '$lib/aurora/markdown.js';
   import { toast } from '$lib/aurora/toast.js';
+  import { ApiError, getJSON } from '$lib/api.js';
+  import ErrorState from '$lib/ErrorState.svelte';
 
   const base = API_BASE;
+
+  /**
+   * One status-aware sentence for a failed request on this page.
+   *
+   * The chat streams, so most of it cannot use `getJSON` — but the rule is the
+   * same everywhere: a response that HAS a status was answered by a running
+   * backend, and must never be reported as the backend being offline (or, as
+   * this page did for every non-200, as the session having expired).
+   */
+  function reason(e, verb) {
+    const s = Number(e?.status ?? 0);
+    if (s === 401) return `Your sign-in has timed out. Sign in again, then ${verb}.`;
+    if (s === 403) return `Your account is not permitted to ${verb}.`;
+    if (s === 404) return `The backend has no endpoint for this — could not ${verb}.`;
+    if (s >= 500) return `The backend is running but failed (${s}) while trying to ${verb}.`;
+    if (s > 0) return `The backend answered ${s} while trying to ${verb}.`;
+    return `No response from the backend — could not ${verb}.`;
+  }
+
+  // ---- brand mark (public GET /brand, unauthenticated) ---------------------
+  // The assistant avatar shows the uploaded brand icon when there is one. It
+  // starts EMPTY on purpose: first paint — and any install where /brand 404s,
+  // fails or is slow — renders exactly the built-in mark that shipped before,
+  // and the icon swaps in only once the fetch succeeds. There is no spinner and
+  // no placeholder; an avatar that flickers blank is worse than one that
+  // corrects itself.
+  let brandIcon = $state('');
+
+  // What the answer is signed with. The design calls the assistant by the
+  // product's own name, so it follows branding rather than being hardcoded —
+  // an unbranded install still reads "City Pharma Assistant", which is what
+  // shipped before, not a placeholder.
+  let brandName = $state('City Pharma Assistant');
+
+  // Same rule the layout uses: an asset URL is same-origin by construction. A
+  // relative path is joined to the API base; an absolute URL is accepted ONLY
+  // if it points at that same origin, so operator-written branding data cannot
+  // turn this <img> into a beacon to a third-party host.
+  function brandAsset(u) {
+    if (typeof u !== 'string' || !u) return '';
+    if (/^https?:\/\//i.test(u)) {
+      try {
+        return new URL(u).origin === new URL(base).origin ? u : '';
+      } catch {
+        return '';
+      }
+    }
+    return base + (u.startsWith('/') ? '' : '/') + u;
+  }
+
+  async function loadBrand() {
+    try {
+      const r = await fetch(base + '/brand');
+      if (!r.ok) return;
+      const d = await r.json();
+      brandIcon = brandAsset(d?.assets?.icon);
+      const n = String(d?.config?.product_name ?? d?.product_name ?? '').trim();
+      if (n) brandName = n + ' Assistant';
+    } catch {
+      /* offline or an older backend with no /brand — the built-in mark stands */
+    }
+  }
+
   const LS = 'citcare_chat_threads';
   const LS_MODEL = 'citcare_chat_model';
   const LS_STORE = 'citcare_chat_store';
@@ -51,7 +109,6 @@
   // ---- model picker (A/B test Gemini variants) ----
   let models = $state([]); // [{id,name,price_in,price_out,note}]
   let selectedModel = $state('');
-  let modelOpen = $state(false);
   let curModel = $derived(models.find((m) => m.id === selectedModel) ?? null);
 
   async function loadModels() {
@@ -65,13 +122,6 @@
       models = [];
     }
   }
-  function pickModel(id) {
-    selectedModel = id;
-    modelOpen = false;
-    localStorage.setItem(LS_MODEL, id);
-    toast('Model: ' + (models.find((m) => m.id === id)?.name ?? id));
-  }
-
   // ---- drawer: 'source' (one article) or 'data' (the rows a turn's tools saw)
   // The trace no longer expands inline — the thread stays the answer, and the
   // evidence behind it lives one click away in this panel.
@@ -79,6 +129,7 @@
   let drawerMode = $state('source');
   let drawerCode = $state('');
   let drawerData = $state(null);
+  let drawerError = $state(null);
   let drawerLoading = $state(false);
   let drawerResults = $state([]);
   let drawerSteps = $state([]);
@@ -100,12 +151,16 @@
     drawerCode = code;
     drawerOpen = true;
     drawerData = null;
+    drawerError = null;
     drawerLoading = true;
     try {
-      const r = await fetch(`${base}/admin/catalog/${encodeURIComponent(code)}`);
-      drawerData = r.ok ? await r.json() : null;
-    } catch {
+      drawerData = await getJSON(`/admin/catalog/${encodeURIComponent(code)}`);
+    } catch (e) {
+      // A failed lookup used to land in the same branch as a genuine miss and
+      // print "No catalog record found" — the console asserting a product does
+      // not exist because it could not ask.
       drawerData = null;
+      drawerError = e;
     } finally {
       drawerLoading = false;
     }
@@ -190,6 +245,33 @@
     return qs.map((text) => ({ text, run: () => send(text) }));
   }
 
+  /** The language the answer actually came back in — read off the answer, not
+   *  off the picker, because `auto` is the default and the agent decides. */
+  function answerLang(msg) {
+    return MY_RE.test(msg?.text ?? '') ? 'answered in \u1019\u103c\u1014\u103a\u1019\u102c' : 'answered in English';
+  }
+
+  /** Icon for one tool row in the "This answer used" panel. */
+  const TOOL_ICONS = {
+    get_stock: Database,
+    top_by_stock: TrendingUp,
+    filter_by_price: TrendingUp,
+    find_at_other_stores: Store,
+    get_substitutes: Replace,
+    search_by_name: Search,
+    search_by_meaning: Search,
+    get_article_info: FileText,
+    summarize_article: FileText
+  };
+  function toolIcon(name) {
+    return TOOL_ICONS[name] ?? Wrench;
+  }
+
+  /** The most recent answered bot message — what the right panel describes. */
+  let lastAnswer = $derived(
+    [...(active?.messages ?? [])].reverse().find((m) => m.role === 'bot' && m.text) ?? null
+  );
+
   function copyMsg(text) {
     navigator.clipboard?.writeText(text);
     toast('Copied');
@@ -251,13 +333,12 @@
     };
 
     try {
-      const r = await fetch(base + '/admin/feedback', {
+      await getJSON('/admin/feedback', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
       });
-      if (!r.ok) throw new Error('feedback ' + r.status);
-    } catch {
+    } catch (e) {
       // soft failure: roll back the optimistic flags and tell the user quietly
       const cur = active?.messages ?? [];
       const j = cur.indexOf(next);
@@ -265,7 +346,7 @@
         cur[j] = { ...next, feedback: null, correctionSaved: false, feedbackError: true };
         threads = threads;
       }
-      toast('Could not save feedback');
+      toast(reason(e, 'save this feedback'));
     }
   }
 
@@ -293,11 +374,11 @@
 
   let token = $state(null);
   let status = $state('connecting…');
+  let sessionError = $state(null);
   let input = $state('');
   let busy = $state(false);
   let scroller;
   let ta;
-  let sideOpen = $state(true);
 
   // ---- threads (persisted) ----
   let threads = $state([]); // [{id, title, ts, messages:[{role,text}]}]
@@ -305,10 +386,12 @@
   let active = $derived(threads.find((t) => t.id === activeId) ?? null);
   let messages = $derived(active?.messages ?? []);
 
+  // Three, not four: examples are examples. The fourth named a specific branch
+  // code (`20024-CC73`) that only exists in THIS dataset — on any other install
+  // the console's own first suggestion asks about a branch that isn't there.
   const suggestions = [
     { icon: PackageSearch, title: 'Check stock', q: 'Do we have ROYAL-D 25G?' },
     { icon: Replace, title: 'Find substitutes', q: 'What can I use instead of ALAXAN?' },
-    { icon: TrendingUp, title: 'Top by stock', q: 'Top 5 items by stock at 20024-CC73' },
     { icon: Languages, title: 'Burmese query', q: 'ဖျားနာ အတွက် ဘာဆေး ရှိလဲ' }
   ];
 
@@ -319,12 +402,65 @@
   // branch into the question. It grants no access the admin does not have, and
   // it must never be mistaken for the enforced scope.
   let stores = $state([]); // [{site_code, skus, units, value}]
+  let storesError = $state(null);
   let storeCode = $state(''); // '' = all branches
   let storeOpen = $state(false);
   let storeFilter = $state('');
 
   let lang = $state('auto'); // auto | en | my
   let langOpen = $state(false);
+
+  // The two trigger buttons. Held so a menu closed from the keyboard can put
+  // focus back on the control that opened it — without this, dismissing a menu
+  // drops focus to <body> and the next Tab restarts at the top of the page.
+  let storeBtn;
+  let langBtn;
+
+  /**
+   * Escape, for the branch and language popovers.
+   *
+   * There was no handler at all: the layout's global one only knows about its
+   * own search and bell popovers, and a DOM listener cannot see a key pressed
+   * outside its own subtree. So the only way out of an open menu was to find
+   * and click the invisible scrim.
+   *
+   * On `window` for the same reason `dialog.js` puts it there — the key may be
+   * pressed while focus is on the trigger, inside the menu, or nowhere.
+   * `drawerOpen` is checked first because the source drawer is a real modal and
+   * owns Escape while it is up (`use:dialog`); the menus cannot be open under it.
+   */
+  function onWindowKeydown(e) {
+    if (e.key !== 'Escape' || drawerOpen) return;
+    if (storeOpen) {
+      storeOpen = false;
+      storeFilter = '';
+      storeBtn?.focus();
+    } else if (langOpen) {
+      langOpen = false;
+      langBtn?.focus();
+    } else {
+      return;
+    }
+    e.preventDefault();
+  }
+
+  /**
+   * Focus into a just-opened popover. NOT `use:dialog`.
+   *
+   * These are menus, not modals: trapping Tab inside a branch filter would mean
+   * the only way out is Escape, and nothing behind them is disabled or dimmed.
+   * They need two of the four things a modal does — focus goes in, focus comes
+   * back (`onWindowKeydown` / `pickStore` / `pickLang`) — and neither of the
+   * other two. Tab leaves the menu and continues through the composer, which is
+   * the correct behaviour for a popover that is not modal.
+   */
+  function menuFocus(node) {
+    const raf = requestAnimationFrame(() => {
+      const el = node.querySelector('input:not([disabled]), button:not([disabled])');
+      (el ?? node).focus?.();
+    });
+    return { destroy: () => cancelAnimationFrame(raf) };
+  }
 
   const LANGS = [
     { id: 'auto', label: 'Auto', hint: 'match the question' },
@@ -340,12 +476,16 @@
   );
 
   async function loadStores() {
+    storesError = null;
     try {
       // '/admin/' URLs get the Bearer header from the app-wide fetch wrapper.
-      const r = await fetch(base + '/admin/stores');
-      stores = r.ok ? await r.json() : [];
-    } catch {
+      const d = await getJSON('/admin/stores');
+      stores = Array.isArray(d) ? d : [];
+    } catch (e) {
       stores = [];
+      // "No branches loaded" reads as "this pharmacy has no branches". Hold the
+      // error so the picker can say why the list is missing.
+      storesError = e;
     }
     const saved = localStorage.getItem(LS_STORE);
     if (saved && stores.some((s) => s.site_code === saved)) storeCode = saved;
@@ -355,6 +495,9 @@
     storeCode = code;
     storeOpen = false;
     storeFilter = '';
+    // The row that was just activated is being unmounted. Focus follows a
+    // removed node to <body>, so hand it back to the trigger explicitly.
+    storeBtn?.focus();
     localStorage.setItem(LS_STORE, code);
     toast(code ? 'Branch: ' + code : 'All branches');
   }
@@ -362,6 +505,7 @@
   function pickLang(id) {
     lang = id;
     langOpen = false;
+    langBtn?.focus();
     localStorage.setItem(LS_LANG, id);
     toast('Language: ' + (LANGS.find((l) => l.id === id)?.label ?? id));
   }
@@ -409,6 +553,33 @@
     save();
   }
 
+  /** Short relative age for a thread row ("2m", "3h", "5d"). Swapped for the
+   *  delete affordance on hover, so the row shows one thing at a time. */
+  function relTime(ts) {
+    const s = Math.max(0, Math.floor((Date.now() - (ts ?? 0)) / 1000));
+    if (s < 60) return 'now';
+    if (s < 3600) return Math.floor(s / 60) + 'm';
+    if (s < 86400) return Math.floor(s / 3600) + 'h';
+    if (s < 7 * 86400) return Math.floor(s / 86400) + 'd';
+    return Math.floor(s / (7 * 86400)) + 'w';
+  }
+
+  /** How many tool calls this whole conversation made — the sidebar's second
+   *  line. Counted off the recorded steps, so a thread that answered from the
+   *  model alone shows no count rather than a zero. */
+  function threadTools(t) {
+    return (t?.messages ?? []).reduce((n, m) => n + (m.steps?.length ?? 0), 0);
+  }
+
+  /** The conversation row's second line: age, and the tool count when there is
+   *  one. `relTime` already says "now" for a fresh thread, so appending "ago"
+   *  unconditionally printed "now ago". */
+  function threadMeta(t) {
+    const age = relTime(t.ts);
+    const n = threadTools(t);
+    return (age === 'now' ? 'just now' : age + ' ago') + (n ? ` · ${n} tool${n === 1 ? '' : 's'}` : '');
+  }
+
   // group threads by day for the Claude-style sidebar
   let groups = $derived(
     (() => {
@@ -427,16 +598,25 @@
   );
 
   async function makeSession() {
+    sessionError = null;
     try {
-      const r = await fetch(base + '/api/embed/session/create', {
+      // This used to skip `res.ok` entirely: a 401/403 parsed to `undefined`,
+      // `token` stayed unset, the composer silently refused to send — and the
+      // sidebar still said "online". A rejected session is not an online one.
+      const j = await getJSON('/api/embed/session/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ embed_id: 'admin-chat', public_key: 'admin' })
       });
-      token = (await r.json()).session_token;
+      if (!j?.session_token) throw new ApiError(0, 'the backend returned no session token');
+      token = j.session_token;
       status = 'online';
-    } catch {
-      status = 'offline';
+    } catch (e) {
+      token = '';
+      sessionError = e;
+      // Only a request that never reached a server is "offline". Anything the
+      // backend answered gets named by its status.
+      status = Number(e?.status ?? 0) > 0 ? `sign-in needed (${e.status})` : 'offline';
     }
   }
 
@@ -541,7 +721,10 @@
         await makeSession(); // re-mint; updates `token`
         r = await doFetch(); // retry once with the refreshed token
       }
-      if (!r.ok) throw new Error('session expired (' + r.status + ') — please try again');
+      // Every non-200 used to be reported as "session expired", including a
+      // 500 from the agent and a 404 from an older backend. Carry the status
+      // and let one place decide the wording.
+      if (!r.ok) throw new ApiError(r.status, `HTTP ${r.status}`);
       const reader = r.body.getReader();
       const dec = new TextDecoder();
       let buf = '';
@@ -612,7 +795,7 @@
       thread.messages[idx] = {
         ...thread.messages[idx],
         role: 'bot',
-        text: 'Error: ' + (e.message || 'request failed')
+        text: reason(e, 'answer this question')
       };
     } finally {
       const ms = Date.now() - t0;
@@ -638,6 +821,7 @@
   onMount(() => {
     load();
     makeSession();
+    loadBrand();
     loadModels();
     loadStores();
     const savedLang = localStorage.getItem(LS_LANG);
@@ -645,252 +829,151 @@
   });
 </script>
 
-<div class="flex h-full overflow-hidden">
-  <!-- HISTORY SIDEBAR -->
-  {#if sideOpen}
-    <aside class="flex w-[268px] flex-shrink-0 flex-col border-r border-line bg-surface-2">
-      <div class="p-3">
-        <button
-          onclick={newChat}
-          class="flex w-full items-center gap-2.5 rounded-[11px] border border-line-2 bg-surface px-3 py-2.5 text-[14px] font-semibold text-ink transition-colors hover:bg-surface-2"
-        >
-          <Plus size={17} /> New chat
-        </button>
-        <div
-          class="mt-2 flex items-center gap-2 rounded-[11px] border border-line bg-surface px-3 py-2.5 text-[13.5px] text-ink-3"
-        >
-          <Search size={15} /> Search chats…
-        </div>
-      </div>
+<svelte:head><title>Chat · CityCare console</title></svelte:head>
 
-      <div class="flex-1 overflow-y-auto px-2 pb-3">
-        {#if threads.length === 0}
-          <p class="px-3 py-6 text-center text-[13px] text-ink-3">No conversations yet.</p>
-        {:else}
-          {#each groups as [label, items]}
-            <div class="px-2.5 pb-1.5 pt-3.5 text-[11px] font-bold uppercase tracking-[0.04em] text-ink-3">
-              {label}
-            </div>
-            {#each items as t (t.id)}
-              <div
-                role="button"
-                tabindex="0"
-                onclick={() => openChat(t.id)}
-                onkeydown={(e) => e.key === 'Enter' && openChat(t.id)}
-                class="group flex cursor-pointer items-center gap-2.5 rounded-[9px] px-2.5 py-2 text-[13.5px] transition-colors
-                  {t.id === activeId ? 'bg-accent-soft text-ink' : 'text-ink-2 hover:bg-surface hover:text-ink'}"
-              >
-                <MessageSquare size={15} class="flex-shrink-0 opacity-60" />
-                <span class="flex-1 truncate">{t.title}</span>
-                <button
-                  onclick={(e) => deleteChat(t.id, e)}
-                  aria-label="Delete chat"
-                  class="flex-shrink-0 text-ink-3 opacity-0 hover:text-danger group-hover:opacity-100"
-                >
-                  <Trash2 size={14} />
-                </button>
-              </div>
-            {/each}
-          {/each}
-        {/if}
-      </div>
+<svelte:window onkeydown={onWindowKeydown} />
 
-      <div class="flex items-center gap-2.5 border-t border-line px-3 py-2.5">
-        <span
-          class="flex h-8 w-8 items-center justify-center rounded-full bg-accent-2 text-[12px] font-bold text-on-accent"
-          >AD</span
-        >
-        <div class="flex-1 leading-tight">
-          <div class="text-[13.5px] font-semibold text-ink">admin</div>
-          <div class="flex items-center gap-1.5 text-[11px] text-ink-3">
-            <span class="h-1.5 w-1.5 rounded-full {status === 'online' ? 'bg-success' : 'bg-ink-3'}"
-            ></span>
-            {status}
-          </div>
-        </div>
-      </div>
-    </aside>
-  {/if}
+<!-- The console header shows "Chat" as a breadcrumb, not a heading, so the page
+     still owes the document one h1. It is not drawn: the design gives this
+     screen no title bar, and inventing one to satisfy a rule would be the rule
+     changing the design. -->
+<h1 class="sr-only">Chat</h1>
 
-  <!-- CONVERSATION -->
-  <div class="flex min-w-0 flex-1 flex-col">
-    <!-- chat top bar -->
-    <div class="flex items-center gap-2 px-4 py-2.5">
-      <!-- Chat's own sidebar replaces the console nav, so this is the ONLY way
-           back to the rest of the admin. -->
-      <a
-        href="{appBase}/"
-        aria-label="Back to console"
-        title="Back to console"
-        class="flex h-9 items-center gap-1.5 rounded-lg px-2 text-[13px] text-ink-3 hover:bg-surface-2 hover:text-ink"
-      >
-        <ArrowLeft size={18} />
-        <span class="hidden sm:inline">Console</span>
-      </a>
-      <button
-        onclick={() => (sideOpen = !sideOpen)}
-        aria-label="Toggle history"
-        class="flex h-9 w-9 items-center justify-center rounded-lg text-ink-3 hover:bg-surface-2 hover:text-ink"
-      >
-        <PanelLeft size={18} />
-      </button>
-      <span class="text-[14px] font-semibold text-ink">City Pharma Agent</span>
-
-      <!-- model picker (A/B test Gemini variants) -->
-      <div class="relative">
-        <button
-          onclick={() => (modelOpen = !modelOpen)}
-          class="flex items-center gap-1.5 rounded-lg border border-line bg-surface px-2.5 py-1.5 text-[12.5px] font-medium text-ink hover:bg-surface-2"
-        >
-          <Sparkles size={13} class="text-accent-2" />
-          {curModel?.name ?? 'Model'}
-          <ChevronDown size={13} class="text-ink-3" />
-        </button>
-        {#if modelOpen}
-          <button class="fixed inset-0 z-30 cursor-default" aria-label="Close menu" onclick={() => (modelOpen = false)}></button>
-          <div class="absolute left-0 top-full z-40 mt-1.5 w-[280px] overflow-hidden rounded-xl border border-line bg-surface shadow-[var(--shadow-pop)]">
-            <div class="border-b border-line px-3 py-2 text-[10.5px] font-bold uppercase tracking-[0.05em] text-ink-3">
-              Chat model · A/B test
-            </div>
-            {#each models as m}
-              <button
-                onclick={() => pickModel(m.id)}
-                class="flex w-full items-start gap-2.5 px-3 py-2.5 text-left transition-colors hover:bg-surface-2
-                  {m.id === selectedModel ? 'bg-accent-soft/50' : ''}"
-              >
-                <Check size={15} class={m.id === selectedModel ? 'mt-0.5 text-accent' : 'mt-0.5 text-transparent'} />
-                <div class="min-w-0 flex-1">
-                  <div class="flex items-center gap-2">
-                    <span class="text-[13px] font-semibold text-ink">{m.name}</span>
-                    <span class="text-[10.5px] text-ink-3">{m.note}</span>
-                  </div>
-                  <div class="mt-0.5 font-mono text-[11px] text-ink-3">{m.id}</div>
-                  <div class="mt-1 flex items-center gap-2 text-[11px]">
-                    <span class="rounded bg-surface-2 px-1.5 py-0.5 text-ink-2">in ${m.price_in}/M</span>
-                    <span class="rounded bg-surface-2 px-1.5 py-0.5 text-ink-2">out ${m.price_out}/M</span>
-                  </div>
-                </div>
-              </button>
-            {/each}
-          </div>
-        {/if}
-      </div>
-    </div>
-
-    <!-- messages / greeting -->
-    <div bind:this={scroller} class="flex-1 overflow-y-auto">
-      {#if messages.length === 0}
-        <div class="flex h-full flex-col items-center justify-center px-6 text-center">
-          <h1 class="page-title text-[30px] text-ink">How can I help with the pharmacy?</h1>
-          <p class="mt-2.5 text-[15px] text-ink-2">
-            Ask about stock, prices, substitutes or indications — English or မြန်မာ.
+<div class="flex h-full min-h-0 overflow-hidden bg-page">
+  <!-- ============================ THREAD ============================ -->
+  <div class="flex min-w-0 flex-1 flex-col bg-page">
+    {#if messages.length === 0}
+      <!-- EMPTY STATE. Deliberately has no hero: nothing on this screen is set
+           above body size, so a 32px greeting was the one thing shouting on a
+           page whose own design never raises its voice. -->
+      <!-- Sits at the FOOT of the scroll area, not its middle, so the prompt
+           and the box you type into read as one block instead of two things
+           separated by a screen of nothing. -->
+      <div class="flex min-h-0 flex-1 flex-col justify-end overflow-y-auto px-6 pb-4 pt-8">
+        <div class="mx-auto w-full max-w-[748px]">
+          <p class="text-body text-ink-2">
+            Ask about stock, price, substitutes or a branch — English or မြန်မာ.
           </p>
-          <div class="mt-7 grid w-full max-w-[560px] grid-cols-1 gap-3 sm:grid-cols-2">
-            {#each suggestions as s}
+          <!-- Examples, so they are drawn as examples: quiet text, one click.
+               Filled pills read as the page's primary action, which they are
+               not — the primary action is the box below. -->
+          <div class="mt-3 flex flex-wrap gap-1">
+            {#each suggestions as sg}
               <button
-                onclick={() => send(s.q)}
-                class="elev rounded-[13px] border-[0.5px] border-line bg-surface p-4 text-left transition-transform hover:-translate-y-0.5 hover:border-accent"
+                onclick={() => send(sg.q)}
+                class="bilingual rounded-control px-1.5 py-1 text-meta text-ink-2 transition-colors hover:bg-surface-2 hover:text-ink"
               >
-                <div class="flex items-center gap-2">
-                  <s.icon size={16} class="text-accent" />
-                  <span class="text-[14px] font-semibold text-ink">{s.title}</span>
-                </div>
-                <div class="mt-1.5 text-[12.5px] text-ink-3">{s.q}</div>
+                {sg.q}
               </button>
             {/each}
           </div>
         </div>
-      {:else}
-        <div class="mx-auto max-w-[740px] px-6 pb-10 pt-2">
+      </div>
+    {:else}
+      <div bind:this={scroller} class="min-h-0 flex-1 overflow-y-auto pb-2 pt-[22px]">
+        <div class="mx-auto max-w-[748px] px-6">
           {#each messages as m, i}
             {#if m.role === 'user'}
-              <div class="my-6 flex justify-end">
+              <div class="flex justify-end {i === 0 ? '' : 'mt-[26px]'}">
                 <div
-                  class="max-w-[78%] whitespace-pre-wrap rounded-2xl rounded-br-md border border-line bg-surface-2 px-4 py-3 text-[15px] leading-relaxed text-ink"
+                  class="max-w-[80%] whitespace-pre-wrap rounded-panel rounded-br-control bg-ink px-4 py-3 text-body leading-[1.55] text-page"
                 >
                   {m.text}
                 </div>
               </div>
             {:else}
-              <div class="group my-6 flex gap-3.5">
-                <div
-                  class="mt-0.5 flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg bg-accent text-on-accent"
-                >
-                  <Pill size={15} />
-                </div>
+              <div class="group mt-[26px] flex gap-3.5">
+                <!-- Assistant avatar: the uploaded brand icon when there is one,
+                     otherwise the built-in accent mark. Never a spinner. -->
+                {#if brandIcon}
+                  <div class="flex h-[30px] w-[30px] flex-none items-center justify-center overflow-hidden rounded-card border border-line bg-surface">
+                    <img src={brandIcon} alt="" class="h-full w-full object-cover" />
+                  </div>
+                {:else}
+                  <div class="flex h-[30px] w-[30px] flex-none items-center justify-center rounded-card bg-accent text-on-accent">
+                    <Sparkles size={16} />
+                  </div>
+                {/if}
+
                 <div class="min-w-0 flex-1">
-                  <div class="mb-1.5 text-[13px] font-semibold text-ink-2">City Pharma Agent</div>
+                  <div class="flex flex-wrap items-center gap-2">
+                    <span class="text-body-sm font-semibold text-ink">{brandName}</span>
+                    {#if m.text}
+                      <span class="rounded-full bg-surface-2 px-2 py-0.5 text-micro font-semibold uppercase tracking-[0.06em] text-ink-2">
+                        {answerLang(m)}
+                      </span>
+                    {/if}
+                    <span class="rounded-full bg-accent-soft px-2 py-0.5 text-micro font-semibold uppercase tracking-[0.06em] text-accent-hover">
+                      {storeCode || 'all branches'}
+                    </span>
+                  </div>
 
                   {#if m.plan && m.text === ''}
-                    <!-- the plan up front: "here's what I'll do" -->
-                    <div class="mb-2 flex items-start gap-1.5 text-[13px] italic text-ink-2">
-                      <Sparkles size={13} class="mt-0.5 shrink-0 text-accent-2" />
+                    <div class="mt-3 flex items-start gap-1.5 text-body-sm italic text-ink-2">
+                      <Sparkles size={13} class="mt-0.5 shrink-0 text-accent" />
                       <span>{m.plan}</span>
                     </div>
                   {/if}
 
                   {#if m.steps?.length && m.text === ''}
-                      <!-- Live status only. The steps say WHAT it is doing; they
-                           are transient by design and leave no dropdown behind
-                           once the answer lands. The rows the agent saw stay
-                           reachable from the footer's "View data". -->
-                      <div class="mb-2 flex flex-col gap-1">
-                        {#each m.steps as s, i}
-                          <div class="flex items-center gap-2 text-[13px] text-ink-2">
-                            {#if i === m.steps.length - 1}
-                              <Loader2 size={14} class="shrink-0 animate-spin text-accent" />
-                            {:else}
-                              <Check size={14} class="shrink-0 text-success" />
-                            {/if}
-                            <span class="flex-1">{stepText(s)}{i === m.steps.length - 1 ? '…' : ''}</span>
-                            {#if s.rows != null}
-                              <span class="text-[11px] tabular-nums text-ink-3">{s.rows} row{s.rows === 1 ? '' : 's'}</span>
-                            {/if}
-                          </div>
-                        {/each}
-                      </div>
+                    <!-- Live status only. The steps say WHAT it is doing; the
+                         rows they read stay reachable from the footer chip and
+                         from the panel on the right. -->
+                    <div class="mt-3 flex flex-col gap-1">
+                      {#each m.steps as st, si}
+                        <div class="flex items-center gap-2 text-body-sm text-ink-2">
+                          {#if si === m.steps.length - 1}
+                            <Loader2 size={14} class="shrink-0 animate-spin text-accent" />
+                          {:else}
+                            <Check size={14} class="shrink-0 text-success" />
+                          {/if}
+                          <span class="flex-1">{stepText(st)}{si === m.steps.length - 1 ? '…' : ''}</span>
+                          {#if st.rows != null}
+                            <span class="tnum text-label text-ink-3">{st.rows} row{st.rows === 1 ? '' : 's'}</span>
+                          {/if}
+                        </div>
+                      {/each}
+                    </div>
                   {/if}
 
                   {#if m.text === '' && !m.steps?.length}
-                    <div class="flex gap-1 py-1.5">
+                    <div class="mt-3 flex gap-1 py-1.5">
                       <span class="h-1.5 w-1.5 animate-bounce rounded-full bg-ink-3" style="animation-delay:0ms"></span>
                       <span class="h-1.5 w-1.5 animate-bounce rounded-full bg-ink-3" style="animation-delay:150ms"></span>
                       <span class="h-1.5 w-1.5 animate-bounce rounded-full bg-ink-3" style="animation-delay:300ms"></span>
                     </div>
                   {:else if m.text !== ''}
-                    <div class="md" use:codeChips>{@html renderMarkdown(m.text)}</div>
+                    <div class="md mt-3" use:codeChips>{@html renderMarkdown(m.text)}</div>
 
-                    <!-- toolbar: meta + actions -->
-                    <div class="mt-3 flex items-center gap-3">
-                      <div class="flex items-center gap-3 text-[11.5px] text-ink-3">
-                        {#if m.latencyMs}
-                          <span class="flex items-center gap-1"><Clock size={12} />{(m.latencyMs / 1000).toFixed(1)}s</span>
-                        {/if}
-                        {#if m.toolCount}
-                          <span class="flex items-center gap-1"><Wrench size={12} />{m.toolCount} tool{m.toolCount > 1 ? 's' : ''}</span>
-                        {/if}
-                        {#if m.modelName}
-                          <span class="flex items-center gap-1"><Sparkles size={12} class="text-accent-2" />{m.modelName}</span>
-                        {/if}
-                        {#if m.results?.length}
-                          {@const n = rowCount(m)}
-                          <button
-                            onclick={() => openData(m)}
-                            class="flex cursor-pointer items-center gap-1 rounded text-ink-3 transition-colors hover:text-accent focus-visible:ring-2 focus-visible:ring-accent"
-                          >
-                            <Table2 size={12} />View data ({n} row{n === 1 ? '' : 's'})
-                          </button>
-                        {/if}
-                      </div>
-                      <div class="ml-auto flex gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
-                        <button onclick={() => copyMsg(m.text)} aria-label="Copy" class="flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg text-ink-3 transition-colors duration-200 hover:bg-surface-2 hover:text-ink focus-visible:ring-2 focus-visible:ring-accent"><Copy size={15} /></button>
-                        <button onclick={retryLast} aria-label="Retry" class="flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg text-ink-3 transition-colors duration-200 hover:bg-surface-2 hover:text-ink focus-visible:ring-2 focus-visible:ring-accent"><RefreshCw size={15} /></button>
+                    <!-- What the answer cost and what it read. Every number here
+                         is recorded, never estimated. -->
+                    <div class="mt-3.5 flex flex-wrap items-center gap-2">
+                      {#if m.results?.length}
+                        {@const n = rowCount(m)}
+                        <button
+                          onclick={() => openData(m)}
+                          class="flex items-center gap-1.5 rounded-full border border-line bg-surface px-2.5 py-1 text-label font-medium text-ink-2 transition-colors hover:border-accent hover:text-accent"
+                        >
+                          <Table2 size={12} />
+                          {n} row{n === 1 ? '' : 's'} the agent read
+                        </button>
+                      {/if}
+                      {#if m.toolCount || m.latencyMs}
+                        <span class="flex items-center gap-1.5 rounded-full border border-line bg-surface px-2.5 py-1 text-label font-medium text-ink-2">
+                          <Check size={12} class="text-accent" />
+                          {#if m.toolCount}{m.toolCount} tool{m.toolCount === 1 ? '' : 's'}{/if}{#if m.toolCount && m.latencyMs}&nbsp;·&nbsp;{/if}{#if m.latencyMs}{(m.latencyMs / 1000).toFixed(1)}s{/if}
+                        </span>
+                      {/if}
+
+                      <div class="ml-auto flex gap-0.5">
+                        <button onclick={() => copyMsg(m.text)} aria-label="Copy answer" class="flex h-[30px] w-[30px] items-center justify-center rounded-card text-ink-3 transition-colors hover:bg-surface-2 hover:text-ink focus-visible:ring-2 focus-visible:ring-accent"><Copy size={15} /></button>
+                        <button onclick={retryLast} aria-label="Ask again" class="flex h-[30px] w-[30px] items-center justify-center rounded-card text-ink-3 transition-colors hover:bg-surface-2 hover:text-ink focus-visible:ring-2 focus-visible:ring-accent"><RefreshCw size={15} /></button>
                         <button
                           onclick={() => sendFeedback(m, 'up')}
                           disabled={m.feedback != null}
                           aria-label="Good answer"
                           aria-pressed={m.feedback === 'up'}
-                          class="flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg transition-colors duration-200 focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-default
+                          class="flex h-[30px] w-[30px] items-center justify-center rounded-card transition-colors focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-default
                             {m.feedback === 'up' ? 'bg-accent-soft text-accent' : 'text-ink-3 hover:bg-surface-2 hover:text-ink disabled:opacity-40'}"
                         ><ThumbsUp size={15} /></button>
                         <button
@@ -898,24 +981,23 @@
                           disabled={m.feedback != null}
                           aria-label="Bad answer"
                           aria-pressed={m.feedback === 'down'}
-                          class="flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg transition-colors duration-200 focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-default
+                          class="flex h-[30px] w-[30px] items-center justify-center rounded-card transition-colors focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-default
                             {m.feedback === 'down' ? 'bg-accent-soft text-accent' : 'text-ink-3 hover:bg-surface-2 hover:text-ink disabled:opacity-40'}"
                         ><ThumbsDown size={15} /></button>
                         <button
                           onclick={() => startCorrection(m)}
                           aria-label="Suggest a correction"
                           aria-pressed={!!m.correcting}
-                          class="flex h-8 w-8 cursor-pointer items-center justify-center rounded-lg transition-colors duration-200 focus-visible:ring-2 focus-visible:ring-accent
+                          class="flex h-[30px] w-[30px] items-center justify-center rounded-card transition-colors focus-visible:ring-2 focus-visible:ring-accent
                             {m.correcting ? 'bg-accent-soft text-accent' : 'text-ink-3 hover:bg-surface-2 hover:text-ink'}"
                         ><Pencil size={15} /></button>
                       </div>
                     </div>
 
-                    <!-- inline correction editor -->
                     {#if m.correcting}
-                      <div class="mt-2.5 rounded-xl border-[0.5px] border-line bg-surface-2 p-2.5">
-                        <label class="mb-1.5 block px-0.5 text-[11px] font-bold uppercase tracking-[0.05em] text-ink-3" for="corr-{i}">
-                          What's the correct answer?
+                      <div class="mt-2.5 rounded-card border border-line bg-surface p-2.5">
+                        <label class="mb-1.5 block px-0.5 text-micro font-semibold uppercase tracking-[0.06em] text-ink-3" for="corr-{i}">
+                          What’s the correct answer?
                         </label>
                         <div class="flex items-end gap-2">
                           <textarea
@@ -924,13 +1006,13 @@
                             oninput={(e) => setCorrectionText(m, e.currentTarget.value)}
                             rows="2"
                             placeholder="Describe the correct answer…"
-                            class="max-h-[140px] min-h-[40px] w-full resize-none rounded-lg border border-line bg-surface px-2.5 py-2 text-[12px] leading-relaxed text-ink outline-none transition-colors duration-200 placeholder:text-ink-3 focus:border-accent/50"
+                            class="max-h-[140px] min-h-[40px] w-full resize-none rounded-control border border-line bg-page px-2.5 py-2 text-meta leading-relaxed text-ink outline-none placeholder:text-ink-3 focus:border-accent"
                           ></textarea>
                           <button
                             onclick={() => submitCorrection(m)}
                             disabled={!(m.correctionText ?? '').trim()}
                             aria-label="Save correction"
-                            class="flex h-9 w-9 flex-shrink-0 cursor-pointer items-center justify-center rounded-[10px] bg-accent text-on-accent transition-colors duration-200 hover:bg-accent-hover focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-default disabled:bg-line-2"
+                            class="flex h-9 w-9 flex-none items-center justify-center rounded-card bg-accent text-on-accent transition-colors hover:bg-accent-hover disabled:cursor-default disabled:bg-line-2"
                           >
                             <Check size={16} />
                           </button>
@@ -938,34 +1020,28 @@
                       </div>
                     {/if}
 
-                    <!-- feedback status line -->
                     {#if m.correctionSaved}
-                      <div class="mt-1.5 flex items-center gap-1.5 text-[12px] text-ink-3"><Check size={12} class="text-success" />Correction saved</div>
+                      <div class="mt-1.5 flex items-center gap-1.5 text-label text-ink-3"><Check size={12} class="text-success" />Correction saved</div>
                     {:else if m.feedback}
-                      <div class="mt-1.5 flex items-center gap-1.5 text-[12px] text-ink-3"><Check size={12} class="text-success" />Thanks — noted</div>
+                      <div class="mt-1.5 flex items-center gap-1.5 text-label text-ink-3"><Check size={12} class="text-success" />Thanks — noted</div>
                     {:else if m.feedbackError}
-                      <div class="mt-1.5 text-[12px] text-danger">Couldn't save feedback — try again.</div>
+                      <div class="mt-1.5 text-label text-danger">Couldn’t save feedback — try again.</div>
                     {/if}
 
-                    <!-- suggested follow-up questions on the latest answer -->
+                    <!-- Follow-ups: whole questions, not action labels. The chip
+                         text IS what gets sent. -->
                     {#if !busy && m === messages[messages.length - 1]}
                       {@const chips = followupsFor(m)}
                       {#if chips.length}
-                        <div class="mt-3.5 border-t border-line pt-3">
-                          <div class="mb-1.5 flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-ink-3">
-                            <Sparkles size={12} /> Suggested
-                          </div>
-                          <div class="flex flex-col items-start gap-1.5">
-                            {#each chips as f}
-                              <button
-                                onclick={f.run}
-                                class="flex items-center gap-1.5 rounded-[9px] border border-line bg-surface px-3 py-1.5 text-left text-[13px] text-ink-2 transition-colors hover:border-accent hover:bg-accent-soft hover:text-accent"
-                              >
-                                <CornerDownRight size={13} class="shrink-0 text-ink-3" />
-                                {f.text}
-                              </button>
-                            {/each}
-                          </div>
+                        <div class="mt-3.5 flex flex-wrap gap-2">
+                          {#each chips as f}
+                            <button
+                              onclick={f.run}
+                              class="bilingual rounded-full border border-accent-2 bg-accent-soft px-3 py-1.5 text-meta font-medium text-accent-hover transition-colors hover:bg-accent hover:text-on-accent"
+                            >
+                              {f.text}
+                            </button>
+                          {/each}
                         </div>
                       {/if}
                     {/if}
@@ -975,13 +1051,18 @@
             {/if}
           {/each}
         </div>
-      {/if}
-    </div>
+      </div>
+    {/if}
 
-    <!-- composer -->
-    <div class="px-6 pb-5">
+    <!-- ============================ COMPOSER ============================ -->
+    <div class="flex-none px-6 pb-[22px] pt-2">
+      {#if sessionError}
+        <div class="mx-auto mb-2 max-w-[748px]">
+          <ErrorState error={sessionError} retry={makeSession} what="a chat session with the agent" />
+        </div>
+      {/if}
       <div
-        class="mx-auto max-w-[740px] rounded-[22px] border border-line-2 bg-surface p-2 shadow-[var(--shadow-pop)] focus-within:border-accent/50"
+        class="mx-auto max-w-[748px] rounded-hero border border-line bg-surface pb-2 pl-4 pr-2 pt-3.5 shadow-[var(--shadow-card)] transition-colors focus-within:border-accent"
       >
         <textarea
           bind:this={ta}
@@ -990,53 +1071,73 @@
           onkeydown={onKey}
           rows="1"
           aria-label="Message the pharmacy assistant"
-          placeholder="Ask about stock, prices, substitutes — English or မြန်မာ…"
-          class="max-h-[200px] w-full resize-none border-0 bg-transparent px-3 pb-1 pt-2.5 text-[15.5px] leading-relaxed text-ink outline-none placeholder:text-ink-3"
+          placeholder="Ask about stock, price, substitutes or a branch…"
+          class="max-h-[200px] w-full resize-none border-0 bg-transparent pr-2 text-body leading-relaxed text-ink outline-none placeholder:text-ink-3"
         ></textarea>
-        <div class="flex items-center gap-1.5 px-1 pb-0.5">
-          <!-- branch filter -->
+        <!-- ONE control row, and no boxes in it. The only edge in the composer
+             is the outer one, which is also the focus ring. -->
+        <div class="mt-2 flex items-center gap-0.5">
+          <!-- Branch filter. NOT a security scope: the enforced one is the
+               HMAC-signed store_id in the session token. This only phrases the
+               branch into the question. -->
           <div class="relative">
             <button
+              bind:this={storeBtn}
               onclick={() => (storeOpen = !storeOpen)}
               aria-expanded={storeOpen}
-              class="flex items-center gap-1.5 rounded-[10px] px-2.5 py-2 text-[13px] transition-colors
-                {storeCode ? 'bg-accent-soft text-accent' : 'text-ink-2 hover:bg-surface-2'}"
+              aria-controls="branch-menu"
+              class="flex items-center gap-1.5 rounded-control px-2 py-1.5 text-meta transition-colors hover:bg-surface-2
+                {storeCode ? 'font-semibold text-accent' : 'text-ink-2 hover:text-ink'}"
             >
-              <Store size={16} />
-              {storeCode || 'All branches'}
-              <ChevronDown size={13} class="opacity-60" />
+              <Store size={14} />
+              {storeCode || (stores.length ? `All ${stores.length} branches` : 'All branches')}
             </button>
             {#if storeOpen}
-              <button class="fixed inset-0 z-30 cursor-default" aria-label="Close menu" onclick={() => (storeOpen = false)}></button>
-              <div class="absolute bottom-full left-0 z-40 mb-1.5 w-[300px] overflow-hidden rounded-xl border border-line bg-surface shadow-[var(--shadow-pop)]">
+              <!-- Pointer affordance only, exactly like the drawer scrim below.
+                   It was a real full-viewport <button aria-label="Close menu">:
+                   1440px wide, fully transparent, so it took a tab stop and
+                   painted a focus ring around the window edge. Escape is the
+                   keyboard route out. -->
+              <div class="fixed inset-0 z-30" onclick={() => (storeOpen = false)} aria-hidden="true"></div>
+              <div
+                id="branch-menu"
+                use:menuFocus
+                class="absolute bottom-full left-0 z-40 mb-1.5 w-[300px] overflow-hidden rounded-card border border-line bg-surface shadow-[var(--shadow-pop)]"
+              >
                 <div class="border-b border-line px-3 py-2">
                   <input
                     bind:value={storeFilter}
                     placeholder="Filter branches…"
                     aria-label="Filter branches"
-                    class="w-full bg-transparent text-[13px] text-ink outline-none placeholder:text-ink-3"
+                    class="w-full bg-transparent text-body-sm text-ink outline-none placeholder:text-ink-3"
                   />
                 </div>
                 <div class="max-h-[280px] overflow-y-auto">
                   <button
                     onclick={() => pickStore('')}
-                    class="flex w-full items-center gap-2.5 px-3 py-2.5 text-left transition-colors hover:bg-surface-2 {storeCode === '' ? 'bg-accent-soft/50' : ''}"
+                    class="flex w-full items-center gap-2.5 px-3 py-2.5 text-left transition-colors hover:bg-surface-2 {storeCode === '' ? 'bg-accent-soft' : ''}"
                   >
                     <Check size={15} class={storeCode === '' ? 'text-accent' : 'text-transparent'} />
-                    <span class="text-[13px] font-semibold text-ink">All branches</span>
+                    <span class="text-body-sm font-semibold text-ink">All branches</span>
                   </button>
-                  {#each shownStores as s (s.site_code)}
+                  {#each shownStores as st (st.site_code)}
                     <button
-                      onclick={() => pickStore(s.site_code)}
-                      class="flex w-full items-center gap-2.5 px-3 py-2 text-left transition-colors hover:bg-surface-2 {storeCode === s.site_code ? 'bg-accent-soft/50' : ''}"
+                      onclick={() => pickStore(st.site_code)}
+                      class="flex w-full items-center gap-2.5 px-3 py-2 text-left transition-colors hover:bg-surface-2 {storeCode === st.site_code ? 'bg-accent-soft' : ''}"
                     >
-                      <Check size={15} class={storeCode === s.site_code ? 'text-accent' : 'text-transparent'} />
-                      <span class="flex-1 truncate font-mono text-[12.5px] text-ink">{s.site_code}</span>
-                      <span class="tnum text-[11px] text-ink-3">{s.skus.toLocaleString()} SKUs</span>
+                      <Check size={15} class={storeCode === st.site_code ? 'text-accent' : 'text-transparent'} />
+                      <span class="flex-1 truncate font-mono text-meta text-ink">{st.site_code}</span>
+                      <span class="tnum text-label text-ink-3">{st.skus.toLocaleString()} SKUs</span>
                     </button>
                   {:else}
-                    <p class="px-3 py-4 text-center text-[12.5px] text-ink-3">
-                      {stores.length ? 'No branch matches.' : 'No branches loaded.'}
+                    <p class="px-3 py-4 text-center text-meta text-ink-3">
+                      {#if stores.length}
+                        No branch matches.
+                      {:else if storesError}
+                        {reason(storesError, 'load the branch list')}
+                      {:else}
+                        No branches loaded.
+                      {/if}
                     </p>
                   {/each}
                 </div>
@@ -1044,30 +1145,35 @@
             {/if}
           </div>
 
-          <!-- answer language -->
+          <!-- Answer language -->
           <div class="relative">
             <button
+              bind:this={langBtn}
               onclick={() => (langOpen = !langOpen)}
               aria-expanded={langOpen}
-              class="flex items-center gap-1.5 rounded-[10px] px-2.5 py-2 text-[13px] transition-colors
-                {lang !== 'auto' ? 'bg-accent-soft text-accent' : 'text-ink-2 hover:bg-surface-2'}"
+              aria-controls="language-menu"
+              class="flex items-center gap-1.5 rounded-control px-2 py-1.5 text-meta text-ink-2 transition-colors hover:bg-surface-2 hover:text-ink"
             >
-              <Languages size={16} />
-              {curLang.label}
-              <ChevronDown size={13} class="opacity-60" />
+              <Languages size={14} />
+              {lang === 'auto' ? 'Language' : curLang.label}
             </button>
             {#if langOpen}
-              <button class="fixed inset-0 z-30 cursor-default" aria-label="Close menu" onclick={() => (langOpen = false)}></button>
-              <div class="absolute bottom-full left-0 z-40 mb-1.5 w-[240px] overflow-hidden rounded-xl border border-line bg-surface shadow-[var(--shadow-pop)]">
+              <!-- Pointer affordance only — see the branch scrim above. -->
+              <div class="fixed inset-0 z-30" onclick={() => (langOpen = false)} aria-hidden="true"></div>
+              <div
+                id="language-menu"
+                use:menuFocus
+                class="absolute bottom-full left-0 z-40 mb-1.5 w-[240px] overflow-hidden rounded-card border border-line bg-surface shadow-[var(--shadow-pop)]"
+              >
                 {#each LANGS as l}
                   <button
                     onclick={() => pickLang(l.id)}
-                    class="flex w-full items-center gap-2.5 px-3 py-2.5 text-left transition-colors hover:bg-surface-2 {l.id === lang ? 'bg-accent-soft/50' : ''}"
+                    class="flex w-full items-center gap-2.5 px-3 py-2.5 text-left transition-colors hover:bg-surface-2 {l.id === lang ? 'bg-accent-soft' : ''}"
                   >
                     <Check size={15} class={l.id === lang ? 'text-accent' : 'text-transparent'} />
                     <div class="min-w-0 flex-1">
-                      <div class="text-[13px] font-semibold text-ink">{l.label}</div>
-                      <div class="text-[11px] text-ink-3">{l.hint}</div>
+                      <div class="text-body-sm font-semibold text-ink">{l.label}</div>
+                      <div class="text-label text-ink-3">{l.hint}</div>
                     </div>
                   </button>
                 {/each}
@@ -1075,21 +1181,108 @@
             {/if}
           </div>
 
+          <!-- Not a control. The agent has no write tool; this states it. The
+               hairline is what says so: everything left of it is pressable,
+               everything right of it is a fact about the session. -->
+          <span class="mx-1 hidden h-4 w-px flex-none bg-line sm:block" aria-hidden="true"></span>
+          <span class="hidden items-center gap-1.5 px-1 text-label text-ink-3 sm:flex">
+            <ShieldCheck size={12} /> read-only
+          </span>
+
           <button
             onclick={() => send()}
             disabled={busy || !token || !input.trim()}
             aria-label="Send"
-            class="ml-auto flex h-9 w-9 items-center justify-center rounded-[11px] bg-accent text-on-accent transition-colors hover:bg-accent-hover disabled:cursor-default disabled:bg-line-2"
+            class="ml-auto flex h-8 w-8 flex-none items-center justify-center rounded-full bg-accent text-on-accent transition-colors hover:bg-accent-hover disabled:cursor-default disabled:bg-surface-2 disabled:text-ink-3"
           >
-            <ArrowUp size={18} />
+            <ArrowUp size={16} />
           </button>
         </div>
       </div>
-      <p class="mx-auto mt-2 max-w-[740px] text-center text-[11.5px] text-ink-3">
-        City Pharma can make mistakes. Verify stock &amp; dosage with a licensed pharmacist.
+      <p class="mx-auto mt-2 max-w-[748px] text-center text-label text-ink-3">
+        This is the console chat — it can see every branch. The branch assistant is locked to one.
       </p>
     </div>
   </div>
+
+  <!-- ============================ CONVERSATIONS ============================ -->
+  <aside class="hidden w-[296px] flex-none flex-col border-l border-line bg-page lg:flex">
+    <div class="flex flex-none items-center gap-2 px-4 pb-3 pt-4">
+      <h2 class="text-body-sm font-semibold text-ink">Conversations</h2>
+      <button
+        onclick={newChat}
+        class="ml-auto flex items-center gap-1.5 rounded-card bg-surface-2 px-2.5 py-1.5 text-label font-semibold text-ink transition-colors hover:bg-accent hover:text-on-accent"
+      >
+        <Plus size={13} /> New
+      </button>
+    </div>
+
+    <div class="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-3 pb-3">
+      {#if threads.length === 0}
+        <p class="px-3 py-6 text-center text-label text-ink-3">No conversations yet.</p>
+      {:else}
+        {#each groups as [label, items]}
+          <div class="px-1.5 pb-1 pt-2 text-micro font-semibold uppercase tracking-[0.1em] text-ink-3">
+            {label}
+          </div>
+          {#each items as t (t.id)}
+            <!--
+              Two real buttons side by side, not a `role="button"` div with a
+              button inside it. That shape was invalid (interactive inside
+              interactive) and it lied twice over: announced as a button, it
+              ignored Space — the primary activation key for a button — and
+              scrolled the page instead, and its own delete control was a
+              descendant of the thing it was nested in. The wrapper is now inert
+              layout; `group` still drives the hover/focus-within reveal, and
+              `focus-within` now has two children that can hold focus.
+            -->
+            <div
+              class="group flex items-start gap-2 rounded-card px-3 py-2.5 transition-colors
+                {t.id === activeId ? 'bg-surface ring-1 ring-inset ring-line' : 'hover:bg-surface-2'}"
+            >
+              <button
+                onclick={() => openChat(t.id)}
+                aria-current={t.id === activeId ? 'true' : undefined}
+                class="min-w-0 flex-1 cursor-pointer text-left"
+              >
+                <div class="truncate text-meta {t.id === activeId ? 'font-semibold text-ink' : 'text-ink-2'}">
+                  {t.title}
+                </div>
+                <div class="mt-0.5 text-label text-ink-3">{threadMeta(t)}</div>
+              </button>
+              <button
+                onclick={(e) => deleteChat(t.id, e)}
+                aria-label="Delete conversation"
+                class="hidden flex-none rounded-control p-0.5 text-ink-3 hover:text-danger group-hover:block group-focus-within:block"
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
+          {/each}
+        {/each}
+      {/if}
+    </div>
+
+    <!-- What the newest answer actually called. Straight off the trace — no
+         estimate, and absent entirely when there is no answer yet. -->
+    {#if lastAnswer?.results?.length}
+      <div class="flex-none border-t border-line px-4 py-3.5">
+        <div class="text-micro font-semibold uppercase tracking-[0.1em] text-ink-3">This answer used</div>
+        <div class="mt-2.5 flex flex-col gap-2">
+          {#each lastAnswer.results as res}
+            {@const Icon = toolIcon(res.tool)}
+            <div class="flex items-center gap-2 text-meta text-ink-2">
+              <Icon size={13} class="flex-none text-accent" />
+              <span class="truncate">{res.tool}</span>
+              <span class="ml-auto flex-none font-mono text-label text-ink-3">
+                {res.rows?.length ?? 0} row{(res.rows?.length ?? 0) === 1 ? '' : 's'}
+              </span>
+            </div>
+          {/each}
+        </div>
+      </div>
+    {/if}
+  </aside>
 
   <!-- SOURCE DRAWER (opens on clicking an article-code chip) -->
   {#if drawerOpen}
@@ -1099,27 +1292,46 @@
       aria-hidden="true"
     ></div>
   {/if}
-  <aside
-    class="fixed bottom-0 right-0 top-0 z-50 flex w-[360px] max-w-[90vw] flex-col border-l border-line bg-surface shadow-[var(--shadow-pop)] transition-transform duration-200
-      {drawerOpen ? 'translate-x-0' : 'translate-x-full'}"
+{#if drawerOpen}
+  <!--
+    Conditionally rendered, not merely slid off-screen. `translate-x-full` moves
+    a drawer out of sight and leaves every control inside it in the tab order:
+    a keyboard sweep of this page hit "Close" at x=1790, 350px past the viewport
+    edge, with the focus ring painted where nobody can see it and Enter firing
+    Close on a panel that is not open. A transform is a paint operation, not a
+    statement about focus.
+
+    `use:dialog` supplies the four behaviours this drawer had none of: focus in,
+    Tab trapped, Escape closes, focus returned to the row that opened it.
+  -->
+  <!-- <div>, not <aside>: role="dialog" supersedes the complementary landmark,
+       and an <aside> carrying an interactive role is invalid. -->
+  <div
+    use:dialog={{ onclose: () => (drawerOpen = false) }}
+    role="dialog"
+    aria-modal="true"
+    aria-label="Source detail"
+    tabindex="-1"
+    class="fixed bottom-0 right-0 top-0 z-50 flex w-[360px] max-w-[90vw] flex-col border-l border-line bg-surface shadow-[var(--shadow-pop)] outline-none
+"
   >
     <div class="flex items-center gap-2.5 border-b border-line px-[18px] py-4">
-      <span class="flex h-8 w-8 items-center justify-center rounded-lg bg-accent-soft text-accent">
+      <span class="flex h-8 w-8 items-center justify-center rounded-panel bg-accent-soft text-accent">
         {#if drawerMode === 'data'}<Table2 size={15} />{:else}<FileText size={15} />{/if}
       </span>
       <div class="min-w-0 flex-1">
         {#if drawerMode === 'data'}
-          <div class="truncate text-[14px] font-semibold text-ink">Data behind this answer</div>
-          <div class="text-[11.5px] text-ink-3">the rows the agent actually read</div>
+          <div class="truncate text-body-sm font-semibold text-ink">Data behind this answer</div>
+          <div class="text-label text-ink-3">the rows the agent actually read</div>
         {:else}
-          <div class="truncate text-[14px] font-semibold text-ink">Source · {drawerCode}</div>
-          <div class="text-[11.5px] text-ink-3">where this answer came from</div>
+          <div class="truncate text-body-sm font-semibold text-ink">Source · {drawerCode}</div>
+          <div class="text-label text-ink-3">where this answer came from</div>
         {/if}
       </div>
       <button
         onclick={() => (drawerOpen = false)}
         aria-label="Close"
-        class="flex h-8 w-8 items-center justify-center rounded-lg text-ink-3 hover:bg-surface-2"
+        class="flex h-8 w-8 items-center justify-center rounded-panel text-ink-3 hover:bg-surface-2"
       >
         <X size={18} />
       </button>
@@ -1128,13 +1340,13 @@
       {#if drawerMode === 'data'}
         <!-- steps recap: what it did, one line each -->
         {#if drawerSteps.length}
-          <div class="mb-3 rounded-lg border-[0.5px] border-line bg-surface-2 p-2.5">
+          <div class="mb-3 rounded-panel border border-line bg-surface-2 p-2.5">
             {#each drawerSteps as s}
-              <div class="flex items-center gap-2 py-0.5 text-[12.5px] text-ink-2">
+              <div class="flex items-center gap-2 py-0.5 text-meta text-ink-2">
                 <Check size={13} class="shrink-0 text-success" />
                 <span class="flex-1">{stepText(s)}</span>
                 {#if s.rows != null}
-                  <span class="text-[11px] tabular-nums text-ink-3">{s.rows}</span>
+                  <span class="text-label tabular-nums text-ink-3">{s.rows}</span>
                 {/if}
               </div>
             {/each}
@@ -1142,16 +1354,16 @@
         {/if}
         {#each drawerResults as res}
           {@const cols = Object.keys(res.rows?.[0] ?? {})}
-          <div class="mb-3 overflow-hidden rounded-lg border-[0.5px] border-line bg-surface">
-            <div class="border-b border-line px-2.5 py-1.5 text-[10.5px] font-bold uppercase tracking-[0.04em] text-ink-3">
+          <div class="mb-3 overflow-hidden rounded-panel border border-line bg-surface">
+            <div class="border-b border-line px-2.5 py-1.5 text-micro font-bold uppercase tracking-[0.04em] text-ink-3">
               {stepLabel(res.tool)} · {res.rows?.length ?? 0} row{(res.rows?.length ?? 0) === 1 ? '' : 's'}
             </div>
             <div class="overflow-x-auto">
-              <table class="w-full text-[12px]">
+              <table class="w-full text-meta">
                 <thead>
                   <tr class="border-b border-line">
                     {#each cols as k}
-                      <th class="whitespace-nowrap px-2.5 py-1.5 text-left text-[10.5px] font-bold uppercase tracking-[0.04em] text-ink-3">
+                      <th class="whitespace-nowrap px-2.5 py-1.5 text-left text-micro font-bold uppercase tracking-[0.04em] text-ink-3">
                         {k.replace(/_/g, ' ')}
                       </th>
                     {/each}
@@ -1167,7 +1379,8 @@
                             <button
                               type="button"
                               onclick={() => openSource(String(v))}
-                              class="rounded bg-accent-soft px-1.5 font-mono text-[11px] font-semibold text-accent hover:bg-accent hover:text-on-accent"
+                              aria-label={`Open source record ${v}`}
+                              class="rounded bg-accent-soft px-1.5 font-mono text-label font-semibold text-accent hover:bg-accent hover:text-on-accent"
                               >{v}</button
                             >
                           {:else if v === null || v === undefined}
@@ -1194,13 +1407,13 @@
       {:else if drawerData}
         {#each Object.entries(drawerData.article ?? {}) as [k, v]}
           {#if v !== null && v !== undefined && v !== ''}
-            <div class="flex justify-between gap-3 border-b border-line py-2 text-[13.5px]">
+            <div class="flex justify-between gap-3 border-b border-line py-2 text-body-sm">
               <span class="text-ink-2">{k.replace(/_/g, ' ')}</span>
               <span class="text-right font-semibold text-ink">{v}</span>
             </div>
           {/if}
         {/each}
-        <div class="flex justify-between gap-3 border-b border-line py-2 text-[13.5px]">
+        <div class="flex justify-between gap-3 border-b border-line py-2 text-body-sm">
           <span class="text-ink-2">total stock</span>
           <!-- NULL is UNKNOWN, never 0: a branch that reports no quantity has not
                reported zero, and "0" reads as "do not dispense". -->
@@ -1208,7 +1421,7 @@
             {drawerData.total_stock == null ? 'unknown' : drawerData.total_stock.toLocaleString()}
           </span>
         </div>
-        <div class="flex justify-between gap-3 border-b border-line py-2 text-[13.5px]">
+        <div class="flex justify-between gap-3 border-b border-line py-2 text-body-sm">
           <span class="text-ink-2">in stock at</span>
           <span class="text-right font-semibold text-ink tnum">
             {drawerData.site_count ?? 0} sites{#if drawerData.unknown_site_count}<span class="ml-1 font-normal text-ink-3">· {drawerData.unknown_site_count} unknown</span>{/if}
@@ -1216,11 +1429,11 @@
         </div>
 
         {#if drawerData.sites?.length}
-          <div class="mb-1.5 mt-4 text-[10.5px] font-bold uppercase tracking-[0.05em] text-ink-3">
+          <div class="mb-1.5 mt-4 text-micro font-bold uppercase tracking-[0.05em] text-ink-3">
             Top branches
           </div>
           {#each drawerData.sites.slice(0, 6) as s}
-            <div class="flex justify-between gap-3 border-b border-line py-1.5 text-[13px]">
+            <div class="flex justify-between gap-3 border-b border-line py-1.5 text-body-sm">
               <span class="font-mono text-ink-2">{s.site_code}</span>
               <span class="font-semibold tnum {s.stock_qty == null ? 'text-ink-3 italic' : 'text-ink'}">
                 {s.stock_qty == null ? 'unknown' : s.stock_qty.toLocaleString()}
@@ -1231,13 +1444,20 @@
 
         <a
           href="{appBase}/data"
-          class="mt-4 flex items-center justify-center gap-2 rounded-[11px] border border-line bg-surface px-4 py-2.5 text-[13px] font-semibold text-ink hover:bg-surface-2"
+          class="mt-4 flex items-center justify-center gap-2 rounded-card border border-line bg-surface px-4 py-2.5 text-body-sm font-semibold text-ink hover:bg-surface-2"
         >
           Open in Data <ExternalLink size={14} />
         </a>
+      {:else if drawerError}
+        <ErrorState
+          error={drawerError}
+          retry={() => openSource(drawerCode)}
+          what="this product's record"
+        />
       {:else}
-        <p class="text-[13.5px] text-ink-2">No catalog record found for {drawerCode}.</p>
+        <p class="text-body-sm text-ink-2">No catalog record found for {drawerCode}.</p>
       {/if}
     </div>
-  </aside>
+  </div>
+{/if}
 </div>

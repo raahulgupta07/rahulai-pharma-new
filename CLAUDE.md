@@ -79,13 +79,20 @@ boot, since fail-closed + a polluted credential store had knocked it offline
 chat page (`c8f1636`). ⚠️ **A code change that alters answers does NOT bump
 `data_version`** — a stale cached answer masked the cross-store fix on redeploy;
 `POST /api/embed/reload` (or bump `data_version`) after any answer-affecting
-deploy. ⚠️ **The pytest suite shares the live `:6381` Redis and rewrites
-`pharmacy:credentials`** — `tests/conftest.py:50` builds its client from
-`get_settings().redis_url`, the same one the running stack uses, and its autouse
-fixture sets `emb1` → `pk1`. **Demonstrated twice on 2026-08-03**: any live embed
-using `emb1` starts 401-ing the moment someone runs the suite, and stays broken
-until re-seeded. Still unfixed; the fix is one line — give tests their own Redis
-DB (`/15`). ⚠️ **AWS shows the
+deploy. ✅ **The pytest-hits-live-data hazard is FIXED (2026-08-17)** — it used to
+share the live `:6381` Redis and rewrite `pharmacy:credentials` (any embed using
+`emb1` 401'd the moment someone ran the suite, demonstrated twice on 2026-08-03),
+and it wrote into the live Postgres, where `tests/test_branding.py`'s autouse
+fixture `DELETE`d `brand_assets` and erased the deployed logos twice. The suite
+now runs against **its own database and Redis DB `/15`** via `tests/dbguard.py`,
+with **no fallback**: a missing test database aborts the run with the command
+that creates it, and `dbguard.install()` patches asyncpg so a module with a
+hardcoded DSN still cannot reach live. Template database + schema fingerprint +
+per-session clone took the suite from **727s for 11 tests to 0.44s**; the whole
+suite is ~1,050 tests in ~5½ min. The debris the old behaviour left in live
+`app_events`/`users`/`auth_events` is catalogued, with its SQL, in
+`docs/PYTEST_DEBRIS_PURGE.md` — **not executed; it is the owner's call**.
+⚠️ **AWS shows the
 OLD UI until the image is rebuilt THERE** — GitHub push ≠ deploy; `docker/Dockerfile`
 is multi-stage and builds the SPA itself (no manual `vite build`), so AWS update =
 `git pull` → `docker compose … build api` → `up -d api` → `/api/embed/reload`.
@@ -244,6 +251,8 @@ The agent is a **router**: per question it picks among three retrieval modes —
 | `app/config.py` | pydantic-settings (`extra="ignore"`) |
 | `admin/src/routes/` | SvelteKit pages (Overview `/`, chat, data, settings, graph, users, …) |
 | `admin/src/lib/aurora/` | shared UI: Ring, Toggle, StatusPill, AlertChip, HeroMetric, Modal, ToastHost, markdown.js |
+| `admin/DESIGN.md` | **the design system.** Token values and why each is that value; the component contract; the four rules that outlive it. Read before changing anything visual — the console is themed from ~20 `--c-*` tokens in `app.css`, so one value edits 23 pages |
+| `admin/src/lib/TabStrip.svelte` | the ONE underline tab strip. Seven pages had near-identical copies; do not write an eighth |
 
 ## Commands
 
@@ -276,6 +285,7 @@ benchmark's control:
 
 ```bash
 cd admin && ./node_modules/.bin/vite build && cd ..   # only if admin/src changed
+./venv/bin/python scripts/check_svelte_icons.py       # ALWAYS after editing admin/src
 docker compose -p pharmacy-opt -f docker-compose.yml -f docker-compose.optimized.yml \
   build api ingest-worker
 docker compose -p pharmacy-opt -f docker-compose.yml -f docker-compose.optimized.yml \
@@ -687,7 +697,11 @@ Check facts here before writing a test fixture or an example question.
 - Tables are **`catalog`** and **`inventory`** — there is no `articles` or `sites`
   table. Catalog columns: `article_code, brand_name, generic_name, composition,
   category, indication, dosage, side_effect, mm_reg, mm_label, status, embedding`.
-- Admin login: `admin@citcare.local` / `Admin123!` (the only user, `super_admin`).
+- Admin login: `admin@citcare.local` / `Admin123!` (`super_admin`). **NOT the only user** — the
+`users` table also holds two `admin`-role accounts left behind by
+`tests/test_approval.py` (`appr-188413e477@corp.mm`, `appr-150e95de29@corp.mm`,
+ids 6 and 9). They are `approved`, so if LDAP or SSO is ever enabled they are
+real accounts someone could authenticate as. See `docs/PYTEST_DEBRIS_PURGE.md`.
 - Real site codes: `20003-CCJ8`, `20005-CCYK`, `20024-CC73`, `20026-CC19`,
   `20052-CCTLKK`, `20059-CCGMPMTN`, …
 - Real quantities: `RELYTE ORAL REHYDRATION SALTS 20.5G` @ `20026-CC19` = **6533**;
@@ -749,15 +763,24 @@ the contract above outranks the design.
 - **Tailwind v4** with `@theme` tokens mapped to CSS vars (`--c-*`) for dark mode.
   Use semantic classes: `bg-surface`/`bg-surface-2`, `text-ink`/`text-ink-2`/
   `text-ink-3`, `border-line`, `bg-accent`, `*-soft`. `.elev` for card shadow.
-  Display headings via `.page-title` (**Space Grotesk**); body is **IBM Plex
-  Sans**; Burmese renders in Noto Sans Myanmar. **There are only two surface
+  Display headings via `.page-title` (**Nunito** — matched to the CityCare
+  wordmark; it is NOT Space Grotesk any more); body is **IBM Plex Sans**; Burmese
+  renders in Noto Sans Myanmar. **There are only two surface
   levels** (`surface`, `surface-2`) — there is no `--color-surface-3` token. Any
   `bg-surface-3` is a phantom that renders as no colour; repoint it to `bg-surface`
   or `bg-surface-2`. Every colour class MUST resolve to a `--color-*` token in
   `admin/src/app.css`.
 
-- **Design (teal rebrand).** The app was rebranded to a **teal** accent
-  (`--c-accent`) + Space Grotesk / IBM Plex Sans. **`text-on-accent` exists on
+- **Design (CityCare white-label, 2026-08-17).** The accent is **indigo
+  `#2F3293`** with a `#00ADEF` secondary, taken from the CityCare logo, and the
+  display face is **Nunito**. The earlier teal (`#006869`) and Space Grotesk are
+  GONE from the console — if you find either in a doc, the doc is stale. Logo,
+  product name and parent name are **admin-editable** and live in Postgres
+  (`brand_assets` / `brand_config`, served by `GET /brand` and
+  `/brand/asset/{key}`; keys are `icon`, `lockup`, `lockup_dark`, `parent`).
+  They are in the DATABASE, not the image, because a rebuild would otherwise
+  erase an uploaded logo. The widget default `data-accent` is a separate
+  contract — see the embed section. **`text-on-accent` exists on
   purpose:** in dark mode the accent lightens past ~70% L, where white text on it
   fails AA contrast, so `--c-on-accent` flips dark. **NEVER put `text-white` on an
   accent fill** — use `text-on-accent`. The design mock ships **light only**; the
@@ -777,3 +800,261 @@ the contract above outranks the design.
 - SFTP key-auth only in prod; tighten CORS (`ALLOWED_ORIGINS`) to the host domain.
 
 See `RUNBOOK.md` (ops), `INTEGRATION.md` (embed widget), `README.md` (overview).
+
+## ⚠️ Analytics instrumentation (2026-08-17) — read before touching the console
+
+The console now measures the agent per CALL, not per turn. Contract:
+`docs/ANALYTICS_CONTRACT.md` — normative, and written before the code so several
+agents could work disjointly. Source of the design:
+`~/Desktop/AI-AGENT-ANALYTICS-PLAYBOOK.md`.
+
+**Schema** (migrations 0008–0010, mirrored by `ensure_*` in `app/activity.py`,
+because this codebase applies schema at BOOT — a `.sql` file alone never reaches
+a running database):
+
+- `tool_calls` — one row per tool invocation, with a **three-state** outcome:
+  `succeeded` / `refused` / `failed`. **A refusal is not a failure.** Today the
+  only deliberate refusal is a store-scope decline (`_effective_site` answering
+  for the session's own store instead of the one asked for). Classify at the
+  return site where the reason is known, never by string-matching an error
+  later. Collapsing refusals into failures is exactly how a working tool
+  acquires a 56% "failure rate".
+- `llm_calls` — one row per model call: prompt / completion / reasoning /
+  **cache_read** / cache_creation tokens, ttft, cost, `cost_is_estimated`. Tokens
+  belong HERE, not on the turn: turn #20777 made 9 calls, of which seq 8 cost
+  $0.05 with 0 cached against ~$0.006 for its siblings which read ~3–5k from
+  cache. At turn grain that lever is invisible. **The cache split cannot be
+  backfilled** — capture it from day one.
+- `chat_logs.actor_email` / `actor_role` / `gave_up`, `chat_feedback.turn_id`.
+  `gave_up` is checked against the ANSWER TEXT (the two `answer_filter`
+  fallbacks), because a turn can record success while apologising on screen.
+
+**The capture layer is wired in exactly two places and fails silently if either
+is missed.** `activity.begin_turn()` opens the buffer (`chat_stream.gen`, and
+`_answer` only when `current_turn() is None` — `begin_turn` RESETS, so calling it
+unconditionally in `_answer` would discard everything the streaming path already
+captured); `_log_turn` flushes it with the id `log_chat` now returns. Miss either
+and `record_tool_call` no-ops on an empty contextvar, `tool_calls` stays empty
+forever, and nothing errors. This shipped broken once and all 804 tests passed.
+
+**Never resolve the turn id by matching question text.** An early version looked
+it up by `question + store + session, newest first`; two identical questions in
+flight put both turns' calls on one turn. `log_chat` returns the id from all
+three of its fallback INSERT tiers — use that.
+
+### ⚠️ Timezone: buckets are cut in the CALLER's zone
+
+Postgres runs `Etc/UTC`. `date_trunc('day', ts)` therefore cut every chart's
+"day" at 06:30 local for a GMT+6:30 reader — six and a half hours of each
+morning landed on the previous day, and nobody noticed because the chart still
+looked plausible. Every bucketing endpoint now takes `tz` (IANA, declared on
+`SharedFilters` so no handler can forget it) and buckets on
+`ts AT TIME ZONE $tz`. An unknown zone is a **400**, never a silent UTC fallback.
+
+**Every bucketing payload ECHOES the zone it used**, and the UI renders its
+header chip from the echo, never from what it sent. Without that, an endpoint
+that failed to declare `tz` would answer 200 with UTC buckets under a chip
+saying "GMT+6:30" — the same bug wearing a nicer hat.
+
+**`tzdata` is a REQUIRED dependency** (requirements.txt). `python:3.12-slim`
+ships an incomplete `/usr/share/zoneinfo`: `Asia/Yangon` resolves but
+`Asia/Rangoon` — what Chrome actually reports on this machine — does not, nor do
+`Asia/Calcutta` or the whole `US/*` family. Without it the validator rejected the
+zone the user's own browser sent and **every panel on both console pages
+rendered a 400**. `tests/test_console_v2.py` pins the aliases, so dropping the
+dependency fails loudly instead of blanking the console.
+
+### Two verification traps, both hit on the same day
+
+- **A 200 is not a working product.** Every curl check passed while both console
+  pages were entirely dead, because they all sent the canonical zone name. It was
+  found by screenshotting the page and looking at it.
+- **A missing scrollbar is not missing data.** Headless Chrome screenshots taken
+  with `--hide-scrollbars` hide the scroll affordance; a correctly scrolling
+  heatmap was reported as clipped. Probe `scrollWidth` vs `clientWidth` before
+  believing a layout defect in a screenshot.
+
+### Building the admin SPA: use the lock
+
+`scripts/build-admin.sh` (`--wait` to queue). Two processes running
+`npm run build` in `admin/` clobber `.svelte-kit/output` and the loser dies with
+`ENOENT … manifest-full.js`, which reads exactly like a real failure. Exit **75**
+means "someone else is building", not a defect.
+
+Two substitutes that do NOT work, both measured rather than assumed:
+`vite build --outDir …` is ignored by the SvelteKit plugin (it writes
+`.svelte-kit/output/**` anyway AND rewrites `build/`), and `svelte-check` cannot
+see a missing export — a named import of a non-exported symbol reports
+`0 errors`. `svelte-check` answers "does my syntax compile"; only a real build
+answers "does the bundle link".
+
+### Shared chart components
+
+`admin/src/lib/charts/` (Kpi, Section, LineChart, StackedBars, RankBars, Donut,
+Heatmap, Funnel, Table, TurnDrawer, TraceView, GapCard, WarnBar, DeltaChip,
+TzChip + `format.js`, `geom.js`). Every panel imports from there. **Do not fork
+one into a route folder** — a chart that renders an unknown as `0` in one place
+and `—` in another is what this directory exists to prevent. `FilterBar` stays
+in `routes/analytics/`; it knows analytics params.
+
+## The dev loop
+
+Three loops, all measured on this laptop. Use them; the slow paths below are
+what they replace.
+
+| change | slow path | fast path |
+|---|---|---|
+| Python | `docker compose build` + `up`, 2-4 min | dev overlay, **1.8s** |
+| Console | `npm run build` + `docker cp`, ~12s | `npm run dev`, **1.3s** |
+| Full suite | `pytest`, **449s** | `./scripts/test.sh`, **85s** |
+
+### Backend — `docker-compose.dev.yml`
+
+```
+docker compose -p pharmacy-opt \
+  -f docker-compose.yml -f docker-compose.optimized.yml -f docker-compose.dev.yml \
+  up -d api ingest-worker
+```
+
+Bind-mounts `./app` read-only over the copy baked into the image and runs
+uvicorn with `--reload`. Nothing about the image or the shipping path changes —
+it is a third file you opt into, and **leaving it out of the `up` puts the baked
+code back**, which is exactly what a release deploy must do.
+
+A container started this way is running the WORKING TREE. Never read `/version`
+off it as evidence that a build contains something; it reports `git_sha: "dev"`
+and `is_release_build: false` for that reason.
+
+### Console — the vite dev server
+
+```
+cd admin && npm run dev          # http://localhost:5173
+```
+
+The dev server mounts the app at the ROOT, not at `/admin`, and proxies the API
+to :8091. That is not cosmetic: 84 of the backend's routes are `/admin/...`, so
+a dev server mounted at `/admin` answers `/admin/analytics/summary` with the
+SPA's HTML fallback and the console looks like it is talking to a broken
+backend. `svelte.config.js` keys the base off `NODE_ENV`, so `vite build` — the
+shipped bundle — still gets `/admin`.
+
+`/version` is the one path both sides claim. `vite.config.js` splits them on the
+`Accept` header the browser sets itself: a navigation gets the Version page, the
+console's own fetch gets the JSON.
+
+For a production-shaped check, `./scripts/build-admin.sh --wait` still works and
+the dev overlay mounts `admin/build`, so no `docker cp` is needed any more.
+
+⚠️ **Rebuilding the console while the dev overlay is up needs a `docker restart
+pharmacy-opt-api-1`.** `build-admin.sh` REPLACES the `admin/build` directory
+rather than writing into it, so the container's bind mount is left pointing at
+the old, deleted inode. The host has `admin/build/index.html`; the container
+raises `FileNotFoundError: /app/admin_build/index.html` and every `/admin` route
+answers **500**. Nothing about the build is wrong and nothing in its output says
+so. Bring the overlay up AFTER a build, or restart the api container after one.
+
+### Where the console's pages are, and how the links between them resolve
+
+The rail is 15 rows in 6 groups; the sections of the old Analytics page are
+routes. `admin/src/lib/analytics/AnalyticsPage.svelte` is the one component that
+draws all fourteen analytics sections, and a page mounts it with the sections it
+wants:
+
+| route | sections |
+| --- | --- |
+| `/analytics` Health & usage | overview, performance, cache, health |
+| `/conversations` | questions, users |
+| `/quality?tab=answers` | quality, diagnostics |
+| `/cost` | cost |
+| `/embed?tab=analytics` | embeds |
+| `/activity` (off-rail) | feed, audit, trends, explore |
+| `/security-log` | audit, pinned to `source=auth` |
+
+⚠️ **A link between sections must name the SECTION, never a page or a tab.**
+`crossTo('cost')` / `drillTo('model', x, 'cost')` resolve through
+`$lib/analytics/routes.js`; a hand-written href does not, and will not follow
+the section when it moves.
+
+This rule exists because the alternative shipped. The sections began as ten TABS
+whose ids were section names (`?tab=cost`). When they were grouped into six, the
+tab ids became group names and **all 46 links that named a section were left
+naming it** — 26 `drillTo`, 8 `setTab`, 6 health tiles, 6 direct `p.set('tab',…)`.
+`tab` falls back to `overview` for an unrecognised value, so every one of them
+navigated, applied its filter, and drew the WRONG panel. Measured by clicking:
+14 of 14 clickable links on Overview landed back on Overview. **The numbers on
+screen changed each time, which is exactly why nobody reported it for a
+release.** `tests/test_console_routes.py` pins it.
+
+⚠️ **A section must appear in `SECTION_FEEDS`.** Splitting one page into six
+means six loads, so `loadAll` fetches only what the page's sections read.
+A section left out of that map is not an error — every panel renders `blank()`
+as an em-dash, so the page reads as a quiet day rather than as a page that asked
+for nothing. Pinned by the same test file.
+
+### Tests — `./scripts/test.sh`
+
+Parallel by default (8 workers), and it uses `./venv/bin/python`. Both matter:
+
+* Under the SYSTEM python the suite does not fail — it **skips the three LDAP
+  bind/TLS security guards** and reports green, with one line in the header as
+  the only sign.
+* `-n 8` needed no test changes because the suite was already built for process
+  isolation: a database per PID (`tests/dbguard.py`) and one of 15 Redis indexes
+  per PID (`tests/conftest.py::_claim_redis_db`). Eight rather than "auto"
+  leaves indexes spare for a second run.
+
+Paths or `-k` run serially — forking eight workers for twelve tests is slower
+than not forking. `--serial` for an order-dependent failure or for `pdb`, which
+has no terminal under xdist.
+
+⚠️ **Seeding goes through `tests/pgconn.py`. Never open your own connection.**
+
+Sixteen modules each carried a byte-identical `_pg` that opened a fresh asyncpg
+connection AND a fresh event loop for every single statement. The seeding
+fixtures make dozens of calls each, so the suite spent most of its wall clock on
+Postgres handshakes: `--durations` showed its slowest twenty-five entries were
+all fixture SETUP, none of them a test body. `test_console_v2.py` alone was
+about thirty connections per test across forty-nine tests. Routing them through
+one connection per PROCESS — still private, still never `app.db`'s pool — took
+`./scripts/test.sh` from **70s to 24s with every test still running**.
+
+This paragraph used to say the flat per-test SETUP was `api_client` running the
+app lifespan, and that parallelism was therefore the only lever. That was wrong,
+and it is the kind of wrong that stops anybody looking again: it named a cause
+that cannot be fixed. Measure before believing it.
+
+Two modules keep their own connection on purpose — `run_isolated` in
+`test_catalog_full_sync.py` and `test_ingest_replace.py` opens a transaction and
+rolls it back, which is what keeps a full-sync DELETE off the real catalog. They
+are listed in `_MAY_CONNECT` in `tests/test_postgres_isolation.py`, which pins
+the rule; the pattern is one copy-paste from returning and returns invisibly.
+
+### One console page for "what has this system been doing?"
+
+`/admin/activity` was folded into `/admin/analytics` — fourteen tabs across two
+pages became **six groups on one**, and `routes/activity/+page.js` is now a
+redirect that carries every filter across. The four old Activity tabs live in
+`$lib/activity/` (FeedTab, AuditTab, TrendsTab, ExploreTab, ActivityFilters,
+`shared.js`) and are rendered by the Analytics page.
+
+Three things about that page are load-bearing:
+
+* **`?tab=` names a GROUP, not a section.** An unknown value falls back to
+  Overview WITHOUT erroring, so a link that writes a section name there
+  navigates, renders, and lands somewhere else. Cross-links go through
+  `openSection()` in `$lib/activity/shared.js`.
+* **The section parameter is `sec`, never `sub`.** `sub` is already Explore's
+  stacking subgroup and its own links carry `sub=source`.
+* **The two halves have separate filter bars** and separate URL keys, and
+  crossing between them clears the other side's. `actor` and `q` are spelled the
+  same in both and mean different things — an actor typed against chat turns
+  would silently narrow the event feed. The eighteen analytics endpoints are
+  also not fetched while an activity group is on screen.
+
+### The honesty rules the whole console is built on
+
+`—` for absent, `0` only for measured zero. An unpriced cost is "not configured",
+never `$0.00` — a zero reads as free and nobody notices for months. Every rate
+ships with its denominator ("92% of 25 rated"). A block that cannot honour the
+active filters says so per card (`filters_applied: false`). No placeholder KPIs.
+Pre-instrumentation rows are `not recorded`, never folded into a bucket.

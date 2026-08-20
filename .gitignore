@@ -32,3 +32,20 @@ data/*.xlsx
 *.egg-info/
 dist/
 build/
+
+# ---- local-only, never shipped -------------------------------------------
+# Database dumps and SFTP archives taken before destructive operations. The
+# 20260818 dump alone is 211 MB — past GitHub's 100 MB per-file hard limit, so
+# committing this directory does not fail late, it fails the push outright.
+_backups/
+admin/_backups/
+
+# Generated knowledge graph. `graphify` rebuilds it from the tree; 123 files and
+# 6 MB of derived data that would churn on every run.
+graphify-out/
+
+# Local agent skills and configuration — this machine's tooling, not the product.
+.claude/
+
+# Scratch from auth debugging.
+authtest/

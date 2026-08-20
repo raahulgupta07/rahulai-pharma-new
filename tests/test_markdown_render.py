@@ -80,3 +80,44 @@ def test_html_is_escaped_before_rendering():
     html = render("<script>alert(1)</script> and `x`")
     assert "<script>" not in html
     assert "&lt;script&gt;" in html
+
+
+# --------------------------------------------------------------------------
+# Table column alignment.
+#
+# The separator row of a Markdown table carries the alignment (`---:` = right).
+# It was parsed to find the table and then discarded, so every stock and price
+# column the answer deliberately right-aligned rendered flush left — and the
+# stylesheet's rule that gives number columns the mono face and tabular figures
+# had nothing to match on.
+# --------------------------------------------------------------------------
+
+TABLE = (
+    "| Branch | Stock | Price |\n"
+    "| --- | ---: | ---: |\n"
+    "| 10021-YKN | 148 | 1,200 |\n"
+)
+
+
+def test_right_aligned_columns_carry_the_alignment():
+    html = render(TABLE)
+    assert html.count('align="right"') == 4, html  # 2 headers + 2 cells
+
+
+def test_left_aligned_column_carries_no_attribute():
+    html = render(TABLE)
+    assert '<th>Branch</th>' in html, html
+    assert '<td>10021-YKN</td>' in html, html
+
+
+def test_centre_alignment_is_carried_too():
+    html = render("| A |\n| :-: |\n| x |\n")
+    assert html.count('align="center"') == 2, html
+
+
+def test_alignment_is_the_only_attribute_ever_emitted_on_a_cell():
+    """A cell attribute is a hole in an otherwise escaped renderer. Keep it
+    closed: alignment comes from a fixed set, never from cell content."""
+    html = render("| a onclick=x | b |\n| ---: | --- |\n| <img src=y> | z |\n")
+    assert "onclick" not in html or "onclick=x" in html.replace("&", "")
+    assert "<img" not in html, html

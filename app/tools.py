@@ -27,10 +27,16 @@ The twelve tools:
 from __future__ import annotations
 
 import contextvars
+import functools
+import inspect
+import logging
+import time
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from app.db import q
+
+logger = logging.getLogger("pharmacy.tools")
 
 # Per-request store scope. When set (from a signed session token), site-aware
 # tools are forced to this store so the model cannot read another branch's data.
@@ -107,6 +113,133 @@ def _floatify_rows(rows: List[Dict], *fields: str) -> List[Dict]:
             if field in row:
                 row[field] = _to_float(row[field])
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Per-call instrumentation — the three-state outcome
+# ---------------------------------------------------------------------------
+#
+# Every tool below is wrapped so one row lands in `tool_calls` per invocation
+# (see `migrations/0008_turn_calls.sql`). The wrapper is a pure pass-through:
+# it changes no argument, no return value and no exception. What it adds is the
+# OUTCOME, and the outcome is decided HERE — at the return site, where the
+# reason is still known — never by matching an error string later.
+#
+#   failed    — the tool raised. A database blip, an embedding call that could
+#               not reach the provider, a malformed row. Nothing else is a
+#               failure.
+#
+#   refused   — a STORE-SCOPE DECLINE, and today that is the only deliberate
+#               decline these tools make. A scoped session asks for site X;
+#               `_effective_site` silently answers for the session's own store
+#               instead. The tool did not do what it was asked and did something
+#               else on purpose — which is precisely "declined and redirected".
+#               It is also the one number worth watching: how often the model
+#               tries to read a branch the session may not see.
+#               Same for `list_sites(query=...)` under scope, where the query is
+#               discarded and only the permitted store comes back.
+#
+#   succeeded — everything else, INCLUDING an empty result set. "No branch
+#               stocks this" and "that article code does not exist" are answers.
+#               `summarize_article` returning `{'found': False}` is a successful
+#               lookup with a negative result, and counting it as a failure is
+#               exactly how a working tool acquires a 56% failure rate.
+#
+# ⚠️ Nothing here ADDS a refusal. There is no new guard, no new early return and
+# no changed message: a tool that today runs a broad query still runs it. Adding
+# guards would change answers, and the instrumentation is not allowed to.
+#
+# ⚠️ The wrapper must keep the tool's signature intact. Agno builds the model's
+# tool schema from `inspect.signature` and `__doc__`, so a wrapper that dropped
+# either would silently change which arguments the model may send. `functools
+# .wraps` sets `__wrapped__`, which `inspect.signature` follows.
+
+# Tool name -> the parameter naming a site, for tools whose site argument
+# `_effective_site` may override. Tools absent from this table take no site
+# argument at all (they read the scope directly) and can never refuse.
+_SITE_ARG: Dict[str, str] = {
+    "get_stock": "site",
+    "top_by_stock": "site",
+    "filter_by_price": "site",
+    "search_by_meaning": "site",
+    "related_drugs": "in_stock_site",
+    "drugs_for_same_condition": "in_stock_site",
+}
+
+
+def _site_matches(requested: str, scope: str) -> bool:
+    """Python twin of :func:`_site_clause` — does ``requested`` name ``scope``?
+
+    Full code, numeric prefix, or alpha suffix, case-insensitive and anchored.
+    Kept deliberately identical to the SQL so a session asking for its OWN store
+    by prefix is not recorded as an out-of-scope attempt.
+    """
+
+    req, sc = (requested or "").strip().upper(), (scope or "").strip().upper()
+    if not req or not sc:
+        return False
+    parts = sc.split("-")
+    return req == sc or req == parts[0] or (len(parts) > 1 and req == parts[1])
+
+
+def _refused_reason(name: str, arguments: Dict[str, Any]) -> Optional[str]:
+    """Why this call was a deliberate decline, or None if it was not one."""
+
+    scope = get_store_scope()
+    if not scope:
+        return None
+    site_arg = _SITE_ARG.get(name)
+    if site_arg:
+        requested = str(arguments.get(site_arg) or "").strip()
+        if requested and not _site_matches(requested, scope):
+            return "store scope: answered for the session's own store instead"
+    if name == "list_sites" and str(arguments.get("query") or "").strip():
+        return "store scope: site search declined, only the session's store is visible"
+    return None
+
+
+def _instrument(fn: Callable) -> Callable:
+    """Wrap one tool so its call is recorded. Pure pass-through; never raises."""
+
+    from app import activity
+
+    signature = inspect.signature(fn)
+    name = fn.__name__
+
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        started = time.monotonic()
+        try:
+            bound = signature.bind(*args, **kwargs)
+            bound.apply_defaults()
+            arguments: Dict[str, Any] = dict(bound.arguments)
+        except Exception:  # noqa: BLE001 — a call agno bound will bind here too
+            arguments = {}
+        try:
+            result = await fn(*args, **kwargs)
+        except Exception as exc:
+            # Classified at the RAISE site: this is the only place that knows
+            # the call broke rather than declined. Recorded, then re-raised
+            # completely unchanged — instrumentation never swallows a tool error.
+            activity.record_tool_call(
+                name,
+                outcome=activity.FAILED,
+                arguments=arguments,
+                error_message=f"{type(exc).__name__}: {exc}",
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+            raise
+        reason = _refused_reason(name, arguments)
+        activity.record_tool_call(
+            name,
+            outcome=activity.REFUSED if reason else activity.SUCCEEDED,
+            arguments=arguments,
+            error_message=reason,
+            duration_ms=int((time.monotonic() - started) * 1000),
+        )
+        return result
+
+    return wrapper
 
 
 async def get_article_info(code: str) -> List[Dict]:
@@ -735,6 +868,31 @@ async def list_sites(query: str = "") -> List[Dict]:
              FROM inventory
             GROUP BY site_code ORDER BY site_code LIMIT 100"""
     )
+
+
+#: The twelve tools, wrapped in place. Rebinding the module globals (rather than
+#: decorating each definition) keeps every caller working unchanged — `app.agent`
+#: imports these names, `app.fastpath` reaches them as `tools.get_stock`, and
+#: both get the instrumented version. It happens at import, so no caller can ever
+#: hold the unwrapped function.
+INSTRUMENTED_TOOLS = (
+    "get_article_info",
+    "search_by_name",
+    "get_stock",
+    "top_by_stock",
+    "filter_by_price",
+    "get_substitutes",
+    "summarize_article",
+    "search_by_meaning",
+    "related_drugs",
+    "drugs_for_same_condition",
+    "find_at_other_stores",
+    "list_sites",
+)
+
+for _tool_name in INSTRUMENTED_TOOLS:
+    globals()[_tool_name] = _instrument(globals()[_tool_name])
+del _tool_name
 
 
 __all__ = [

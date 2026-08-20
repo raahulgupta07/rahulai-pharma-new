@@ -100,6 +100,44 @@ def _is_csv(path: str) -> bool:
     return Path(path).suffix.lower() == ".csv"
 
 
+def read_catalog_frame(path: str) -> "pd.DataFrame":
+    """Read the article export, wherever its header row happens to be.
+
+    ONE reader, used by both ``parse_catalog`` and ``validation._read_frame``.
+    They used to carry a copy each, with a comment on the second saying it must
+    mirror the first — and they still drifted, because only the CSV half was
+    ever taught to adapt.
+
+    The xlsx half assumed a fixed 4-row banner (``skiprows=4``). That was true
+    of every article export we had seen, and then CMHL sent one with the header
+    on row 0. ``skiprows=4`` made row 4 — a sweetener — the header, so the
+    validator reported "missing required column(s): Article Code, Brand Name.
+    Found: 1000000000416, 1104-SUGAR, Aspartame …", the file was rejected, and
+    the catalog stayed empty while the stock file loaded fine beside it.
+
+    So: read the header where it usually is, and only if none of the columns we
+    map appear, fall back to the banner offset. Both layouts load; neither
+    depends on a magic number matching this month's export.
+    """
+
+    if _is_csv(path):
+        # utf-8-sig tolerates a BOM; Burmese text needs UTF-8 either way.
+        try:
+            df = pd.read_csv(path, encoding="utf-8-sig")
+            df.columns = [str(c).strip() for c in df.columns]
+            if not any(c in df.columns for c in _CATALOG_MAP):
+                raise ValueError("expected header not in row 0")
+        except (ValueError, pd.errors.ParserError):
+            df = pd.read_csv(path, skiprows=4, encoding="utf-8-sig")
+    else:
+        df = pd.read_excel(path)
+        df.columns = [str(c).strip() for c in df.columns]
+        if not any(c in df.columns for c in _CATALOG_MAP):
+            df = pd.read_excel(path, skiprows=4)
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+
 def parse_catalog(path: str, report: Optional[Dict] = None) -> List[Dict]:
     """Parse the article export into catalog rows (banner skipped, columns mapped).
 
@@ -111,19 +149,7 @@ def parse_catalog(path: str, report: Optional[Dict] = None) -> List[Dict]:
     nothing anywhere said so. The parse is unchanged; only the reporting is new.
     """
 
-    if _is_csv(path):
-        # utf-8-sig tolerates a BOM; Burmese text needs UTF-8 either way.
-        try:
-            df = pd.read_csv(path, encoding="utf-8-sig")
-            df.columns = [str(c).strip() for c in df.columns]
-            if not any(c in df.columns for c in _CATALOG_MAP):
-                raise ValueError("expected header not in row 0")
-        except (ValueError, pd.errors.ParserError):
-            # Header not in row 0 — assume the xlsx-style 4-row banner.
-            df = pd.read_csv(path, skiprows=4, encoding="utf-8-sig")
-    else:
-        df = pd.read_excel(path, skiprows=4)
-    df.columns = [str(c).strip() for c in df.columns]
+    df = read_catalog_frame(path)
     matched = sorted(c for c in _CATALOG_MAP if c in df.columns)
     df = df.rename(columns=_CATALOG_MAP)
 
@@ -373,17 +399,32 @@ async def ingest_inventory(path: str, report: Optional[Dict] = None) -> int:
     Returns inventory row count. Pass ``report`` to receive parse diagnostics
     in place — ``rows_in_file``, ``rows_parsed`` and ``duplicates`` — which is
     how the operator-facing ingest event explains why those two counts differ.
+
+    Guard: a file that parses to ZERO rows truncates NOTHING. This mirrors the
+    empty/partial-upload guard in ``ingest_catalog`` and it lives HERE, not in
+    the caller, because the truncate lives here. ``ingest_file`` validates first
+    and its shrink guard already refuses a 0-row file — but ``reload_from_data_dir``
+    and ``ingest_paths`` call this function DIRECTLY, with no validation at all,
+    and ``POST /api/embed/reload`` reaches the first of those. Without this,
+    an empty or half-written balance export on the data dir emptied every stock
+    row in the database and the endpoint answered 200.
     """
 
     records = await asyncio.to_thread(parse_inventory, path, report)
+    if not records:
+        logger.warning(
+            "inventory ingest: parsed 0 rows from %s; skipping TRUNCATE "
+            "(empty/partial upload guard) — existing stock left untouched",
+            Path(path).name,
+        )
+        return 0
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute("TRUNCATE inventory")
-            if records:
-                await conn.copy_records_to_table(
-                    "inventory", records=records, columns=_INVENTORY_FIELDS
-                )
+            await conn.copy_records_to_table(
+                "inventory", records=records, columns=_INVENTORY_FIELDS
+            )
     await backfill_catalog_stubs()
     return len(records)
 
@@ -587,6 +628,13 @@ async def ingest_file(
                 "validation": report.as_dict()}
     if kind == "inventory":
         parse_report: Dict = {}
+        # No 0-row branch here on purpose. validate_file already refuses both
+        # shapes that could produce one ("the file contains no rows", and "no
+        # rows have both a valid article code and a site code") using the same
+        # predicate parse_inventory does, so a raise here would be unreachable —
+        # and an unreachable guard reads as protection that is not there. The
+        # real guard is inside ingest_inventory, which is what the UNVALIDATED
+        # callers reach.
         n = await ingest_inventory(path, report=parse_report)
         return {"file": Path(path).name, "kind": "inventory", "rows": n,
                 "duplicates": int(parse_report.get("duplicates") or 0),
@@ -613,7 +661,10 @@ async def reload_from_data_dir(data_dir: Optional[str] = None) -> Dict:
     """Ingest whatever article/balance files exist in ``data_dir``.
 
     Safe no-op per file: only files that exist are loaded, so a missing
-    inventory file never truncates existing stock. Returns load result + counts.
+    inventory file never truncates existing stock. An *empty* one does not
+    either — that guard is inside ``ingest_inventory``, because this path does
+    NOT validate. Both kinds replace: catalog deletes the rows the file omits,
+    inventory truncates. Returns load result + counts.
     """
 
     from app.config import get_settings

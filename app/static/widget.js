@@ -7,7 +7,7 @@
  *     data-user='{"id":"42","store_id":"20060-CCBHSC"}'   <-- store scoping
  *     data-user-sig="<hmac signed server-side>"
  *     data-title="CityCare Agent" data-greeting="Ask about stock..."
- *     data-accent="#006869" data-stream="true" async></script>
+ *     data-accent="#2F3293" data-stream="true" async></script>
  *
  * The signed `store_id` makes the backend scope every answer to that store —
  * the user only sees their branch's data. No store_id = unscoped (all stores).
@@ -19,9 +19,16 @@
   var publicKey = s.getAttribute('data-public-key') || '';
   var userRaw = s.getAttribute('data-user');
   var userSig = s.getAttribute('data-user-sig') || '';
-  var title = s.getAttribute('data-title') || 'CityCare Agent';
+  // `data-title` is a FROZEN attribute and always wins. It is read once here and
+  // remembered as "the customer set it", so the brand default fetched below can
+  // never overwrite a title that is sitting in a customer's live HTML.
+  var titleAttr = s.getAttribute('data-title');
+  var title = titleAttr || 'CityCare Agent';
   var greeting = s.getAttribute('data-greeting') || 'Hi! Ask about stock, prices, or substitutes.';
-  var accent = s.getAttribute('data-accent') || '#006869';
+  // DEFAULT ONLY. A customer's explicit data-accent still wins, and live
+  // embeds already carrying #006869 keep rendering teal until their snippet is
+  // regenerated — that is intended, not drift to fix at runtime.
+  var accent = s.getAttribute('data-accent') || '#2F3293';
   var stream = (s.getAttribute('data-stream') || 'true') !== 'false';
   var user = null;
   try { user = userRaw ? JSON.parse(userRaw) : null; } catch (e) { user = null; }
@@ -40,7 +47,7 @@
   }
   var accent35 = toRgba(accent, 0.35) || accent;
   var accent00 = toRgba(accent, 0) || 'transparent';
-  var accent08 = toRgba(accent, 0.08) || '#f1f5f5';
+  var accent08 = toRgba(accent, 0.08) || '#eaebf7';
   // City Pharma neutrals (hex so they resolve even on older host browsers).
   var INK = '#23262b';      // oklch(19% .015 240)
   var INK2 = '#565b63';     // oklch(42% .014 240)
@@ -48,7 +55,7 @@
   var LINE = '#dde0e4';     // oklch(88% .008 240)
   var PAGEBG = '#fafbfc';   // oklch(98% .004 240)
   var OK = '#1a9d6a';       // step-complete check
-  var DISPLAY = "'Space Grotesk','IBM Plex Sans',-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif";
+  var DISPLAY = "'Nunito','IBM Plex Sans',-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif";
   // Body stack keeps 'Noto Sans Myanmar' so Burmese glyphs always render.
   var BODY = "'IBM Plex Sans','Noto Sans Myanmar',-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif";
   var MONO = "'SFMono-Regular',Menlo,Consolas,monospace";
@@ -56,12 +63,15 @@
   // Load the City Pharma type families (graceful fallback if a host CSP blocks it).
   var fl = document.createElement('link');
   fl.rel = 'stylesheet';
-  fl.href = 'https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=Noto+Sans+Myanmar:wght@400;500&display=swap';
+  fl.href = 'https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Noto+Sans+Myanmar:wght@400;500&family=Nunito:wght@600;700&display=swap';
   document.head.appendChild(fl);
 
   var css = '\
-.cca-btn{position:fixed;bottom:24px;right:24px;width:58px;height:58px;border-radius:50%;background:' + accent + ';color:#fff;border:0;cursor:pointer;box-shadow:0 10px 30px rgba(15,60,58,.35);display:flex;align-items:center;justify-content:center;z-index:2147483000;animation:cca-pulse 2.6s infinite}\
+.cca-btn{position:fixed;bottom:24px;right:24px;width:58px;height:58px;border-radius:50%;background:' + accent + ';color:#fff;border:2px solid #fff;box-sizing:border-box;cursor:pointer;box-shadow:0 10px 30px rgba(25,27,80,.35);display:flex;align-items:center;justify-content:center;z-index:2147483000;animation:cca-pulse 2.6s infinite}\
+.cca-btn.cca-mark{background:#fff;border-color:' + accent + '}\
 .cca-btn svg{width:26px;height:26px}\
+.cca-btn img{width:38px;height:38px;object-fit:contain;border-radius:8px;background:transparent;padding:0;box-sizing:border-box}\
+.cca-hd-ic img{display:block;width:100%;height:100%;object-fit:contain;border-radius:9px;background:#fff;padding:3px;box-sizing:border-box}\
 .cca-panel{position:fixed;bottom:24px;right:24px;width:376px;max-width:calc(100vw - 32px);height:560px;max-height:calc(100vh - 48px);background:#fff;border-radius:18px;box-shadow:0 24px 70px rgba(10,20,25,.28);display:none;flex-direction:column;overflow:hidden;z-index:2147483000;font-family:' + BODY + ';color:' + INK + '}\
 .cca-open{display:flex;animation:cca-fade .22s ease}\
 .cca-hd{display:flex;align-items:center;gap:11px;padding:14px 16px;background:' + accent + ';color:#fff;flex-shrink:0}\
@@ -117,10 +127,14 @@
 .cca-data-p{margin-top:7px;border-top:1px solid ' + LINE + ';padding-top:7px}\
 .cca-data-h{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:' + INK3 + ';margin:7px 0 3px}\
 .cca-data-h:first-child{margin-top:0}\
+.cca-cite{display:flex;align-items:center;gap:5px;margin-top:7px;font-size:11px;color:' + INK3 + ';line-height:1.4}\
+.cca-fu{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}\
+.cca-fu-b{border:1px solid ' + LINE + ';background:' + PAGEBG + ';border-radius:999px;padding:5px 11px;cursor:pointer;font-family:inherit;font-size:11.5px;color:' + INK2 + ';transition:all .15s;line-height:1.3}\
+.cca-fu-b:hover{border-color:' + accent + ';color:' + accent + '}\
 .cca-unk{color:' + INK3 + ';font-style:italic}\
 .cca-num{font-variant-numeric:tabular-nums}\
 @keyframes cca-rot{to{transform:rotate(360deg)}}\
-@keyframes cca-pulse{0%,100%{box-shadow:0 10px 30px rgba(15,60,58,.35),0 0 0 0 ' + accent35 + '}50%{box-shadow:0 10px 30px rgba(15,60,58,.35),0 0 0 8px ' + accent00 + '}}\
+@keyframes cca-pulse{0%,100%{box-shadow:0 10px 30px rgba(25,27,80,.35),0 0 0 0 ' + accent35 + '}50%{box-shadow:0 10px 30px rgba(25,27,80,.35),0 0 0 8px ' + accent00 + '}}\
 @keyframes cca-fade{from{opacity:0;transform:translateY(10px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}}\
 @media (prefers-reduced-motion:reduce){.cca-btn,.cca-open,.cca-spin{animation:none}}';
   var st = document.createElement('style'); st.textContent = css; document.head.appendChild(st);
@@ -308,6 +322,44 @@
     if (TOOL_LABEL[raw]) return TOOL_LABEL[raw];
     return raw.replace(/_/g, ' ').replace(/^\w/, function (c) { return c.toUpperCase(); });
   }
+  /* Tools that return BRANCH rows (one row per shop) rather than product rows.
+     Getting this backwards is what made the chip read "38 rows" for what was
+     really "3 branches" — the count is only meaningful once you name the unit. */
+  var SITE_TOOLS = { get_stock: 1, find_at_other_stores: 1, list_sites: 1 };
+
+  /* What a citation should say. Naming the SOURCE ("product catalogue", "stock
+     at 53 branches") is what a reader wants to know — a dump of 105 rows is a
+     data export, not a citation, and "Show what I checked (105)" tells them
+     nothing about whether to trust the answer. */
+  var SOURCE_LABEL = {
+    get_article_info: 'product catalogue',
+    summarize_article: 'product catalogue',
+    search_by_name: 'product catalogue',
+    search_by_meaning: 'product catalogue',
+    get_substitutes: 'similar products',
+    related_drugs: 'related products',
+    drugs_for_same_condition: 'related products',
+    filter_by_price: 'price list',
+    top_by_stock: 'stock levels',
+    get_stock: 'stock levels',
+    find_at_other_stores: 'branch stock',
+    list_sites: 'branch list'
+  };
+
+  function citationText(results) {
+    var names = [], seen = {}, sites = 0;
+    for (var i = 0; i < results.length; i++) {
+      var r = results[i];
+      var lbl = SOURCE_LABEL[r.tool] || 'pharmacy data';
+      if (!seen[lbl]) { seen[lbl] = 1; names.push(lbl); }
+      if (SITE_TOOLS[r.tool]) sites += r.rows.length;
+    }
+    if (!names.length) return '';
+    var src = names.length === 1 ? names[0]
+      : names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1];
+    return 'Checked against our ' + src + (sites ? ' across ' + sites + ' branch' + (sites === 1 ? '' : 'es') : '');
+  }
+
   function stepText(s) {
     var t = STEP_TPL[s.label] ? STEP_TPL[s.label](s.detail) : toolLabel(s.label);
     return t + (s.count > 1 ? ' ×' + s.count : '');
@@ -335,6 +387,81 @@
   var input = panel.querySelector('.cca-in input');
   var sendBtn = panel.querySelector('.cca-in button');
   add('a', greeting);
+
+  /* ---- brand defaults -----------------------------------------------------
+   *
+   * `/brand` is public and unauthenticated. It supplies the DEFAULT product
+   * name and square icon, so a white-labelled deployment names itself without
+   * every customer having to re-paste a data-title.
+   *
+   * Three rules this must not break:
+   *
+   *  1. `data-title` and `data-accent` are frozen attributes in live customer
+   *     HTML. A supplied one WINS — the brand only fills in what was omitted.
+   *     Accent is not touched here at all.
+   *  2. The widget must work if /brand fails. Everything below is applied
+   *     asynchronously ON TOP of a panel that has already rendered with the
+   *     shipped defaults, so a 404, a CORS refusal or an offline backend simply
+   *     leaves today's widget exactly as it is.
+   *  3. Same origin only. The icon URL is joined to `base` (the origin this
+   *     script was served from); an absolute URL pointing anywhere else is
+   *     dropped rather than loaded onto a customer's page.
+   */
+  function brandAssetUrl(u) {
+    if (typeof u !== 'string' || !u) return '';
+    if (/^https?:\/\//i.test(u)) {
+      try { return new URL(u).origin === base ? u : ''; } catch (e) { return ''; }
+    }
+    return base + (u.charAt(0) === '/' ? '' : '/') + u;
+  }
+
+  function applyBrand(b) {
+    if (!b || typeof b !== 'object') return;
+    var name = typeof b.product_name === 'string' ? b.product_name.trim() : '';
+    if (name) {
+      // The header title is the brand name ONLY when the customer omitted
+      // data-title. The footer attribution is always the product name.
+      if (!titleAttr) {
+        var t = panel.querySelector('.cca-hd-tx b');
+        if (t) t.textContent = name;
+      }
+      var ft = panel.querySelector('.cca-ft');
+      if (ft) ft.textContent = 'Powered by ' + name + ' · cites real inventory data';
+    }
+    var icon = brandAssetUrl(b.assets && b.assets.icon);
+    if (icon) {
+      var alt = name || title;
+      // The launcher carries the customer's mark instead of our glyph, so the
+      // circle flips: white face, accent ring. Measured on the shipped asset —
+      // a navy tile with white type — the mark was 1.15:1 against the accent
+      // face it used to sit on, i.e. invisible, and it is invisible for ANY
+      // customer who uploads a dark logo. On white it measures 12.13:1.
+      //
+      // The ring is not decoration. With an accent face the button read 1.85:1
+      // against a dark customer page and failed WCAG 1.4.11 as a control. Face
+      // and ring now cover opposite grounds: on a light page the accent ring is
+      // the edge (10.51:1), on a dark page the white face is (19.40:1).
+      btn.classList.add('cca-mark');
+      btn.innerHTML = '';
+      var bi = document.createElement('img');
+      bi.src = icon; bi.alt = '';           // decorative: the button is labelled
+      btn.appendChild(bi);
+      var hi = panel.querySelector('.cca-hd-ic');
+      if (hi) {
+        hi.innerHTML = '';
+        var pi = document.createElement('img');
+        pi.src = icon; pi.alt = alt + ' logo';
+        hi.appendChild(pi);
+      }
+    }
+  }
+
+  try {
+    fetch(base + '/brand')
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(applyBrand)
+      .catch(function () { /* older backend / offline — shipped defaults stand */ });
+  } catch (e) { /* no fetch on this host browser — shipped defaults stand */ }
 
   btn.onclick = function () { panel.classList.toggle('cca-open'); if (panel.classList.contains('cca-open')) input.focus(); };
   panel.querySelector('.cca-x').onclick = function () { panel.classList.remove('cca-open'); };
@@ -422,55 +549,80 @@
         scroll();
       },
       plain: function (t) { stepsEl.innerHTML = ''; mdEl.textContent = t; scroll(); },
-      /* "View data (N rows)" — built entirely from the `result` frames we already
-         received. It deliberately calls NO admin endpoint: /admin/catalog/{code}
-         is unscoped and would hand a store-scoped user every sibling branch's
-         stock. These rows are the store-scoped ones the agent actually read. */
+      /* A CITATION, not a data dump. This used to render every row the tools
+         returned as an expandable table — 105 rows under "Show what I checked
+         (105)". That is a data export: it answers "what is in your database",
+         which nobody asked, instead of "where did this answer come from",
+         which is the only thing a citation is for. Now it names the sources in
+         one quiet line.
+
+         Still built entirely from the `result` frames already received — it
+         deliberately calls NO admin endpoint, because /admin/catalog/{code} is
+         unscoped and would hand a store-scoped user every sibling branch's
+         stock. */
       done: function () {
         var n = results.reduce(function (a, r) { return a + r.rows.length; }, 0);
-        if (!n) return;
-        var b = document.createElement('button');
-        b.className = 'cca-data-b';
-        b.type = 'button';
-        b.setAttribute('aria-expanded', 'false');
-        b.innerHTML = TBL_SVG + '<span>View data (' + n + ' row' + (n === 1 ? '' : 's') + ')</span>';
-        var p = document.createElement('div');
-        p.className = 'cca-data-p';
-        p.style.display = 'none';
-        p.innerHTML = results.map(function (r) {
-          return '<div class="cca-data-h">' + esc(toolLabel(r.tool)) + ' · ' + r.rows.length +
-            ' row' + (r.rows.length === 1 ? '' : 's') + '</div>' + rowsTable(r.rows);
-        }).join('');
-        b.onclick = function () {
-          var open = p.style.display === 'none';
-          p.style.display = open ? '' : 'none';
-          b.setAttribute('aria-expanded', open ? 'true' : 'false');
-          bub.classList.toggle('cca-wide', open);
-          scroll();
-        };
-        dataEl.appendChild(b); dataEl.appendChild(p);
+        var cite = n ? citationText(results) : '';
+        if (cite) {
+          var c = document.createElement('div');
+          c.className = 'cca-cite';
+          c.innerHTML = TBL_SVG + '<span>' + esc(cite) + '</span>';
+          dataEl.appendChild(c);
+        }
+        followUps(dataEl, results);
         scroll();
       }
     };
   }
 
-  /** Rows -> table. Everything goes through esc(); a NULL cell means UNKNOWN,
-   *  never 0 — printing a zero there would invent stock that nobody has. */
-  function rowsTable(rows) {
-    if (!rows.length) return '';
-    var cols = Object.keys(rows[0]);
-    return '<div class="cca-tw"><table><thead><tr>' +
-      cols.map(function (k) { return '<th>' + esc(k.replace(/_/g, ' ')) + '</th>'; }).join('') +
-      '</tr></thead><tbody>' +
-      rows.map(function (row) {
-        return '<tr>' + cols.map(function (k) {
-          var v = row[k];
-          if (v === null || v === undefined) return '<td><span class="cca-unk">unknown</span></td>';
-          if (typeof v === 'number') return '<td><span class="cca-num">' + esc(v.toLocaleString()) + '</span></td>';
-          return '<td>' + esc(typeof v === 'object' ? JSON.stringify(v) : v) + '</td>';
-        }).join('') + '</tr>';
-      }).join('') +
-      '</tbody></table></div>';
+  /* Follow-up chips. Built from the `subject` the SSE result frame already
+     carries, so this costs NO extra model call and cannot invent a product:
+     the subject is whatever the tools actually returned. A conversation that
+     ends at one fact makes the reader retype the product name to ask the
+     obvious next thing, which is the difference between a lookup box and an
+     assistant. */
+  function followUps(host, results) {
+    var subject = null, tools = {};
+    for (var i = 0; i < results.length; i++) {
+      tools[results[i].tool] = 1;
+      if (!subject && results[i].subject) subject = results[i].subject;
+    }
+    if (!subject || !subject.name) return;
+    var name = subject.name;
+
+    var qs = [];
+    if (!tools.get_article_info && !tools.summarize_article)
+      qs.push({ chip: 'What is it for?', ask: 'What is ' + name + ' used for?' });
+    if (!tools.get_stock && !tools.find_at_other_stores)
+      qs.push({ chip: 'Where can I get it?', ask: 'Which branches have ' + name + '?' });
+    if (!tools.filter_by_price)
+      qs.push({ chip: 'How much is it?', ask: 'How much is ' + name + '?' });
+    if (!tools.get_substitutes)
+      qs.push({ chip: 'Any alternatives?', ask: 'What are the alternatives to ' + name + '?' });
+    /* There must ALWAYS be somewhere to go next. Once a turn has used most of
+       the tools the list above empties, and the conversation dead-ends on the
+       most detailed answer — exactly where a reader is most likely to have
+       another question. These two work whatever was already asked. */
+    if (!qs.length) {
+      qs.push({ chip: 'How do I take it?', ask: 'How should I take ' + name + '?' });
+      qs.push({ chip: 'Any side effects?', ask: 'What are the side effects of ' + name + '?' });
+    }
+
+    var wrap = document.createElement('div');
+    wrap.className = 'cca-fu';
+    qs.slice(0, 3).forEach(function (q) {
+      var c = document.createElement('button');
+      c.type = 'button';
+      c.className = 'cca-fu-b';
+      c.textContent = q.chip;
+      c.onclick = function () {
+        wrap.remove();          // a chip you already pressed is clutter
+        input.value = q.ask;
+        send();
+      };
+      wrap.appendChild(c);
+    });
+    host.appendChild(wrap);
   }
 
   function send() {

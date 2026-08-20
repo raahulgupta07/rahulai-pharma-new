@@ -223,6 +223,66 @@ async def latest() -> Dict[str, Dict]:
     return out
 
 
+async def latest_by_stamped() -> Dict[str, Dict]:
+    """A summary of the run that produced each STORED file, as ``{stamped: {...}}``.
+
+    ``latest()`` answers "what happened to a file called X", which is the wrong
+    question once X has arrived five times: every stored copy inherits the newest
+    run for the name, so four superseded uploads all displayed the story — and
+    the row count — of the fifth. On 2026-08-13 the newest run for
+    ``balance_stock.xlsx`` was a REJECTION two minutes after a successful load,
+    so five archived copies that had loaded 111,654 rows each showed a rejected
+    run and an em-dash where their row count should be.
+
+    ``stamped`` is written only on the terminal step (``stored``/``set_aside``),
+    because the archive name is not chosen until the file is moved — but every
+    step of an attempt shares its ``run_id``, so the stamp identifies the run and
+    the run carries the whole story.
+    """
+
+    try:
+        rows = await q(
+            """
+            WITH stamped_run AS (
+                SELECT DISTINCT ON (stamped) stamped, run_id
+                  FROM ingest_events
+                 WHERE stamped IS NOT NULL
+                 ORDER BY stamped, id DESC
+            )
+            SELECT s.stamped AS stamped_key, e.*
+              FROM stamped_run s
+              JOIN ingest_events e ON e.run_id = s.run_id
+             ORDER BY s.stamped, e.id
+            """
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("could not read per-file ingest summaries", exc_info=True)
+        return {}
+
+    out: Dict[str, Dict] = {}
+    for raw in rows:
+        key = raw["stamped_key"]
+        e = _row({k: v for k, v in dict(raw).items() if k != "stamped_key"})
+        cur = out.setdefault(key, {
+            "file": e["file"], "run_id": e["run_id"], "kind": None,
+            "stamped": key, "step": None, "status": None, "detail": None,
+            "data": {}, "at": e["at"],
+        })
+        cur["kind"] = e.get("kind") or cur["kind"]
+        if isinstance(e.get("data"), dict):
+            cur["data"] = {**cur["data"], **e["data"]}
+        cur["at"] = e["at"]
+
+        better = _HEADLINE.index(e["step"]) if e["step"] in _HEADLINE else len(_HEADLINE)
+        current = (
+            _HEADLINE.index(cur["step"]) if cur["step"] in _HEADLINE else len(_HEADLINE)
+        )
+        if cur["step"] is None or better < current:
+            cur["step"], cur["status"], cur["detail"] = e["step"], e["status"], e["detail"]
+
+    return out
+
+
 async def prune(days: int = RETENTION_DAYS) -> int:
     """Drop history older than ``days``. Returns the number of rows removed."""
 

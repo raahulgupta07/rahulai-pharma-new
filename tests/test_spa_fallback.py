@@ -51,8 +51,12 @@ def _client() -> TestClient:
     return TestClient(app)
 
 
+def _build_dir() -> Path:
+    return Path(__file__).parent.parent / "admin" / "build"
+
+
 def _has_build() -> bool:
-    return (Path(__file__).parent.parent / "admin" / "build" / "index.html").is_file()
+    return (_build_dir() / "index.html").is_file()
 
 
 needs_build = pytest.mark.skipif(
@@ -166,6 +170,48 @@ def test_admin_root_serves_the_shell_either_way():
         r = _client().get("/admin/", headers=headers)
         assert r.status_code == 200
         assert r.headers["content-type"].startswith("text/html")
+
+
+@needs_build
+def test_the_shell_is_never_served_from_cache_without_revalidating():
+    """A deploy that the user cannot see is a deploy that did not happen.
+
+    The shell is the only file whose contents change while its URL stays the
+    same, and it names which fingerprinted bundle to load. StaticFiles sends an
+    ETag but no Cache-Control, which lets a browser apply heuristic freshness
+    and keep serving the PREVIOUS console for hours after a release. Both paths
+    that can produce the shell are asserted, because they are different code:
+    the deep-link middleware and the static mount.
+    """
+
+    for path, headers in (("/admin/", NAV_HEADERS),      # static mount, html=True
+                          ("/admin/", API_HEADERS),
+                          ("/admin/users", NAV_HEADERS),  # deep-link middleware
+                          ("/admin/settings", NAV_HEADERS)):
+        r = _client().get(path, headers=headers)
+        assert r.status_code == 200, (path, headers)
+        assert r.headers["content-type"].startswith("text/html"), (path, headers)
+        assert r.headers.get("cache-control") == "no-cache", (
+            path, headers, r.headers.get("cache-control"))
+
+
+@needs_build
+def test_fingerprinted_assets_are_cached_hard():
+    """The other half: these must NOT revalidate, or every load pays for it.
+
+    Their URL changes whenever their contents do, so a year is safe. Picking a
+    real file from the build rather than a hardcoded name — the hashes change
+    on every build.
+    """
+
+    build = _build_dir()
+    immutable = build / "_app" / "immutable"
+    assets = [f for f in immutable.rglob("*.js")] + [f for f in immutable.rglob("*.css")]
+    assert assets, "no fingerprinted assets in the build — the guard would pass vacuously"
+    rel = assets[0].relative_to(build)
+    r = _client().get(f"/admin/{rel.as_posix()}", headers={"sec-fetch-dest": "script"})
+    assert r.status_code == 200, rel
+    assert "immutable" in r.headers.get("cache-control", ""), r.headers.get("cache-control")
 
 
 def test_non_get_is_never_diverted_to_the_shell():

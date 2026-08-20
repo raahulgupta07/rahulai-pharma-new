@@ -17,10 +17,10 @@
 </script>
 
 <div
-  class="elev flex flex-col items-center rounded-2xl border-[0.5px] border-line bg-surface p-[18px] transition-transform duration-150 hover:-translate-y-0.5"
+  class="elev flex flex-col items-center rounded-card border border-line bg-surface p-[18px] transition-transform duration-150 hover:-translate-y-0.5"
 >
   <div class="relative h-[84px] w-[84px]">
-    <svg width="84" height="84" class="-rotate-90">
+    <svg aria-hidden="true" focusable="false" width="84" height="84" class="-rotate-90">
       <circle cx="42" cy="42" r={R} fill="none" stroke="var(--color-surface-2)" stroke-width="8" />
       <circle
         cx="42"
@@ -36,9 +36,9 @@
       />
     </svg>
     <div class="absolute inset-0 flex flex-col items-center justify-center">
-      <span class="text-[22px] font-bold tnum text-ink">{center}</span>
+      <span class="text-heading font-bold tnum text-ink">{center}</span>
     </div>
   </div>
-  <div class="mt-3 text-[13px] font-semibold text-ink">{label}</div>
-  {#if sub}<div class="mt-0.5 text-center text-[11.5px] text-ink-3">{sub}</div>{/if}
+  <div class="mt-3 text-body-sm font-semibold text-ink">{label}</div>
+  {#if sub}<div class="mt-0.5 text-center text-label text-ink-3">{sub}</div>{/if}
 </div>
