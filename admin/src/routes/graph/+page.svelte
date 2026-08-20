@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import PageHeader from '$lib/PageHeader.svelte';
+  import { base } from '$app/paths';
   import { ApiError, getJSON } from '$lib/api.js';
   import ErrorState from '$lib/ErrorState.svelte';
 
@@ -17,8 +18,12 @@
     treats: '#5B2D8E' // purple — the palette carries no green
   };
   // Node fills by type.
-  const TYPE_COL = { drug: '#23266F', ing: '#8A4A04', cond: '#5B2D8E' };
-  const TYPE_LABEL = { drug: 'Medicine', ing: 'Ingredient', cond: 'Condition' };
+  // `cat` appears only when the graph falls back to the structural layer —
+  // see `seeded_from` below. Fixed hexes, like the three that were already
+  // here: these are SVG presentation attributes, where `var(--token)` does
+  // not resolve. Noted rather than silently left as a token that never applies.
+  const TYPE_COL = { drug: '#23266F', ing: '#8A4A04', cond: '#5B2D8E', cat: '#008A86' };
+  const TYPE_LABEL = { drug: 'Medicine', ing: 'Ingredient', cond: 'Condition', cat: 'Category' };
 
   const EDGE_META = [
     { key: 'has_generic', label: 'shared generic', color: REL.generic },
@@ -30,6 +35,11 @@
   let counts = $state(null);
   let countsError = $state(null);
   let panel = $state(null); // node detail payload from /admin/graph/node
+  /** Which layer the drawing came from: 'treats' | 'structure' | 'none'.
+   *  The page used to render nothing and say "no graph data" while its own
+   *  counters showed 16,021 edges — the two disagreed and neither explained
+   *  the other. This is what makes the difference visible. */
+  let seededFrom = $state(null);
   let panelError = $state(null);
   let panelLoading = $state(false);
   let graphEmpty = $state(false);
@@ -136,6 +146,7 @@
       // here made Retry a button that silently did nothing.
       if (!d3ref) d3ref = await whenD3Ready();
       const data = await getJSON(`/admin/graph/overview?limit=${limit}`);
+      seededFrom = data?.seeded_from ?? null;
       if (!data?.nodes?.length) { graphEmpty = true; return; }
       graphEmpty = false;
       buildGraph(d3ref, data);
@@ -226,7 +237,7 @@
     rootSel = root;
     zoomBehavior = zoom;
 
-    const radius = (d) => (d.type === 'drug' ? 6 : d.type === 'ing' ? 10 : 11);
+    const radius = (d) => (d.type === 'drug' ? 6 : d.type === 'ing' ? 10 : 11);  // hubs 10-11
 
     const sim = d3
       .forceSimulation(data.nodes)
@@ -358,6 +369,10 @@
       }
       try {
         const data = await getJSON('/admin/graph/overview?limit=80');
+        // The mount path, not just the Retry/limit path. Setting `seededFrom`
+        // in only one of the two loaders is why the layer note stayed hidden on
+        // first load and appeared only after clicking a node-limit button.
+        seededFrom = data?.seeded_from ?? null;
         if (!data?.nodes?.length) {
           graphEmpty = true;
           return;
@@ -404,7 +419,19 @@
 </PageHeader>
 
 <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
-  <p class="text-meta text-ink-3">scroll to zoom · drag to pan · click a medicine</p>
+  <div class="min-w-0">
+    <p class="text-meta text-ink-3">scroll to zoom · drag to pan · click a medicine</p>
+    <!-- Which layer is on screen. Without this the page draws the structural
+         graph while the counters say `treats 0`, and nothing connects the two. -->
+    {#if seededFrom === 'structure'}
+      <p class="mt-1 text-label text-ink-3">
+        Showing the <span class="font-medium text-ink-2">structural</span> graph — ingredients,
+        shared generics and categories, built from the catalog. The
+        <span class="font-medium text-ink-2">treats</span> layer is read out of indication text
+        by the model and has not been built, so conditions are not drawn.
+      </p>
+    {/if}
+  </div>
   <div class="flex items-center gap-1.5">
     <span class="text-meta text-ink-3">nodes</span>
     {#each [80, 200, 500, 1000] as lim}
@@ -435,8 +462,18 @@
         </div>
       </div>
     {:else if graphEmpty}
-      <div class="flex items-center justify-center px-6 text-center text-body-sm text-ink-2" style="height:{fullscreen ? '100vh' : '70vh'}">
-        No graph data is available yet.
+      <!-- What is missing, not just that something is. The old copy said "no
+           graph data is available yet" beside three non-zero counters, which is
+           the one thing a reader cannot reconcile. -->
+      <div class="flex items-center justify-center px-6 text-center" style="height:{fullscreen ? '100vh' : '70vh'}">
+        <div class="max-w-[420px]">
+          <p class="text-body font-semibold text-ink">Nothing to draw</p>
+          <p class="mt-1.5 text-body-sm leading-[1.6] text-ink-2">
+            No edges have been built yet. They are derived from the catalog on ingest,
+            so this fills in once a catalog file has been loaded on
+            <a href={base + '/ftp'} class="font-medium text-accent hover:underline">Data pipeline</a>.
+          </p>
+        </div>
       </div>
     {/if}
     <svg

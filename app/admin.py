@@ -7026,16 +7026,47 @@ async def graph_overview(limit: int = 80) -> Dict:
     a d3 force layout."""
 
     limit = min(max(limit, 10), 200)
+
+    # `treats` is the richest seed — a drug with conditions attached pulls in
+    # ingredients and siblings around it — but it is STAGE 2, extracted from
+    # indication text by the model, and on a deployment where that has never run
+    # there are zero of them. Seeding only from `treats` then returned an empty
+    # graph forever while the page's own counters showed 16,021 structural
+    # edges sitting there: the reader was told "no graph data is available yet"
+    # by a page simultaneously reporting three non-zero totals.
+    #
+    # So: fall back to the structural graph, which every deployment has from
+    # ingest alone. `seeded_from` is returned so the UI can say which layer it
+    # is drawing rather than leaving the difference invisible.
     sel = await q(
         "SELECT DISTINCT src FROM drug_edges WHERE rel='treats' ORDER BY src LIMIT $1", limit
     )
     codes = [r["src"] for r in sel]
+    seeded_from = "treats"
+    rels = ("contains", "treats")
+
     if not codes:
-        return {"nodes": [], "links": []}
+        sel = await q(
+            """SELECT src, count(*) AS n FROM drug_edges
+                WHERE rel IN ('contains','has_generic','in_category')
+                GROUP BY src ORDER BY n DESC, src LIMIT $1""",
+            limit,
+        )
+        codes = [r["src"] for r in sel]
+        seeded_from = "structure"
+        # Category is only worth drawing in this mode: with `treats` present it
+        # is the weaker of the two groupings and just crowds the layout.
+        rels = ("contains", "in_category")
+
+    if not codes:
+        # Genuinely nothing — no edges at all, not merely no `treats`.
+        return {"nodes": [], "links": [], "seeded_from": "none"}
+
     attr_edges = await q(
         """SELECT e.src, e.rel, e.dst FROM drug_edges e
-            WHERE e.src = ANY($1) AND e.rel IN ('contains','treats')""",
+            WHERE e.src = ANY($1) AND e.rel = ANY($2)""",
         codes,
+        list(rels),
     )
     gen_edges = await q(
         """SELECT a.src AS d1, b.src AS d2
@@ -7054,13 +7085,14 @@ async def graph_overview(limit: int = 80) -> Dict:
     for c in codes:
         add(c, "drug", brands.get(c, c))
     links = []
+    NODE_TYPE = {"contains": "ing", "treats": "cond", "in_category": "cat"}
     for e in attr_edges:
-        ntype = "ing" if e["rel"] == "contains" else "cond"
+        ntype = NODE_TYPE[e["rel"]]
         add(e["dst"], ntype, e["dst"])
         links.append({"source": e["src"], "target": e["dst"], "rel": e["rel"]})
     for e in gen_edges:
         links.append({"source": e["d1"], "target": e["d2"], "rel": "generic"})
-    return {"nodes": nodes, "links": links}
+    return {"nodes": nodes, "links": links, "seeded_from": seeded_from}
 
 
 @router.get("/graph/node")
