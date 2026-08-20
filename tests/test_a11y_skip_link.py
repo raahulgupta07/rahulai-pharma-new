@@ -24,6 +24,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.svelte_source import attr, scan_tags
+
 ROOT = Path(__file__).resolve().parents[1]
 LAYOUT = ROOT / "admin" / "src" / "routes" / "+layout.svelte"
 CSS = ROOT / "admin" / "src" / "app.css"
@@ -50,7 +52,15 @@ def test_the_skip_link_exists_and_names_the_target(layout):
 def test_it_comes_before_the_rail_in_the_dom(layout):
     """Otherwise it is the twentieth tab stop and skips nothing."""
     link = layout.index('class="skip-link"')
-    rail = layout.index('<div\n      class="rail')
+    # By attribute, not by the exact bytes of the opening tag — an added
+    # attribute or a reflow used to make this raise ValueError rather than fail
+    # with the reason.
+    rail = next(
+        (start for start, _e, tag, attrs, _sc, closing in scan_tags(layout)
+         if not closing and tag == "div" and "rail" in (attr(attrs, "class") or "").split()),
+        None,
+    )
+    assert rail is not None, "the rail element is gone or no longer carries a literal class"
     assert link < rail, (
         "the skip link is after the rail in the DOM, so a keyboard user reaches "
         "it only after tabbing through every rail row — which is the thing it "

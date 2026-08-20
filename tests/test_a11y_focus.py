@@ -26,6 +26,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.svelte_source import attr, scan_tags
+
 ROOT = Path(__file__).resolve().parents[1]
 CSS = ROOT / "admin" / "src" / "app.css"
 LAYOUT = ROOT / "admin" / "src" / "routes" / "+layout.svelte"
@@ -207,9 +209,19 @@ def test_the_rail_carries_the_scope_class():
     `rail`. Nothing in the stylesheet can catch that.
     """
     src = LAYOUT.read_text()
-    m = re.search(r"<div\s+class=\"(rail[^\"]*)\"", src, re.S)
-    assert m, "the rail element is gone or no longer carries a literal class"
-    classes = m.group(1).split()
+    # Located by ATTRIBUTE, never by attribute ORDER: this used to be
+    # `<div\s+class="rail…"`, which broke the day an `inert` binding was added
+    # ahead of `class` — reporting the rail as "gone" when it had only moved an
+    # attribute. scan_tags is brace/quote aware, so bindings do not end the tag.
+    classes: list[str] = []
+    for _s, _e, tag, attrs, _sc, closing in scan_tags(src):
+        if closing or tag != "div":
+            continue
+        cls = attr(attrs, "class") or ""
+        if "rail" in cls.split():
+            classes = cls.split()
+            break
+    assert classes, "the rail element is gone or no longer carries a literal class"
     assert "rail" in classes, (
         "the rail element lost its `rail` class, so the rail's --focus-ring "
         "override applies to nothing and the ring is back to 1.57:1"

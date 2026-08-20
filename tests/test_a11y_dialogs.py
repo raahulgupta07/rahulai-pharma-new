@@ -33,6 +33,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.svelte_source import blank_comments
+
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "admin" / "src"
 ACTION = SRC / "lib" / "aurora" / "dialog.js"
@@ -49,19 +51,20 @@ def action() -> str:
 
 
 def _no_comments(text: str) -> str:
-    """Blank `<!-- -->` bodies, keeping offsets and newlines.
+    """Blank comment bodies, keeping offsets and newlines.
 
     The prose in this repo talks ABOUT the defects it guards — the comment
     explaining why a drawer must not be hidden with `translate-x-full` contains
     the string `translate-x-full`. An earlier version of the transform test
     reported those two comments as the defect they describe.
+
+    This used to blank only `<!-- -->` and it caught the trap a SECOND time: a
+    `//` note in the layout's `<script>`, explaining that `-translate-x-full`
+    hides pixels rather than tab stops, was reported as the very leak it
+    describes. `svelte_source.blank_comments` handles both kinds and is the one
+    implementation — do not grow a third local copy.
     """
-    out = list(text)
-    for m in re.finditer(r"<!--.*?-->", text, re.S):
-        for k in range(m.start(), m.end()):
-            if out[k] != "\n":
-                out[k] = " "
-    return "".join(out)
+    return blank_comments(text)
 
 
 def _dialog_tags(text: str) -> list[tuple[int, str]]:
