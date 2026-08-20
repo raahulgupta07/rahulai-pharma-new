@@ -1,12 +1,12 @@
 /*
- * City Pharma Agent embed widget — drop-in floating chat bubble.
+ * City Care Agent embed widget — drop-in floating chat bubble.
  *
  * Usage (host page, e.g. Laravel layout.blade):
  *   <script src="https://YOUR_BACKEND/api/embed/widget.js"
  *     data-embed-id="..." data-public-key="..."
  *     data-user='{"id":"42","store_id":"20060-CCBHSC"}'   <-- store scoping
  *     data-user-sig="<hmac signed server-side>"
- *     data-title="CityCare Agent" data-greeting="Ask about stock..."
+ *     data-title="City Care Agent" data-greeting="Ask about stock..."
  *     data-accent="#2F3293" data-stream="true" async></script>
  *
  * The signed `store_id` makes the backend scope every answer to that store —
@@ -23,7 +23,7 @@
   // remembered as "the customer set it", so the brand default fetched below can
   // never overwrite a title that is sitting in a customer's live HTML.
   var titleAttr = s.getAttribute('data-title');
-  var title = titleAttr || 'CityCare Agent';
+  var title = titleAttr || 'City Care Agent';
   var greeting = s.getAttribute('data-greeting') || 'Hi! Ask about stock, prices, or substitutes.';
   // DEFAULT ONLY. A customer's explicit data-accent still wins, and live
   // embeds already carrying #006869 keep rendering teal until their snippet is
@@ -48,7 +48,7 @@
   var accent35 = toRgba(accent, 0.35) || accent;
   var accent00 = toRgba(accent, 0) || 'transparent';
   var accent08 = toRgba(accent, 0.08) || '#eaebf7';
-  // City Pharma neutrals (hex so they resolve even on older host browsers).
+  // City Care Agent neutrals (hex so they resolve even on older host browsers).
   var INK = '#23262b';      // oklch(19% .015 240)
   var INK2 = '#565b63';     // oklch(42% .014 240)
   var INK3 = '#7c828b';     // oklch(58% .012 240)
@@ -60,7 +60,7 @@
   var BODY = "'IBM Plex Sans','Noto Sans Myanmar',-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif";
   var MONO = "'SFMono-Regular',Menlo,Consolas,monospace";
 
-  // Load the City Pharma type families (graceful fallback if a host CSP blocks it).
+  // Load the City Care Agent type families (graceful fallback if a host CSP blocks it).
   var fl = document.createElement('link');
   fl.rel = 'stylesheet';
   fl.href = 'https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Noto+Sans+Myanmar:wght@400;500&family=Nunito:wght@600;700&display=swap';
@@ -379,7 +379,13 @@
     '<div class="cca-in">' +
       '<div class="cca-inbox"><input placeholder="Ask in English or Burmese…">' +
       '<button aria-label="Send">' + SEND_SVG + '</button></div>' +
-      '<div class="cca-ft">Powered by City Pharma · cites real inventory data</div>' +
+      // No product name here on purpose. `applyBrand` fills in "Powered by
+      // <name>" the moment GET /brand answers; hardcoding one meant a customer
+      // site briefly displayed whatever this file happened to say — which
+      // survived a product rename and showed the OLD name on someone else's
+      // page. A footer that gains a name is fine; one that shows the wrong
+      // name, however briefly, is not.
+      '<div class="cca-ft">cites real inventory data</div>' +
     '</div>';
   document.body.appendChild(btn); document.body.appendChild(panel);
 

@@ -215,8 +215,8 @@ def test_unconfigured_install_returns_the_hardcoded_strings(api_client):
     """The defaults ARE the old UI's literals. A typo here renames the product."""
 
     body = api_client.get("/brand").json()
-    assert body["product_name"] == "City Pharma"
-    assert body["short_name"] == "City Pharma"
+    assert body["product_name"] == "City Care Agent"
+    assert body["short_name"] == "City Care"
     assert body["tagline"] == "Stock Intelligence"
     assert body["console_subtitle"] == "Admin console"
     assert body["login_promise"] == (
@@ -248,7 +248,7 @@ def test_brand_never_500s_on_a_db_error(api_client, monkeypatch):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["version"] == "default"
-    assert body["product_name"] == "City Pharma"
+    assert body["product_name"] == "City Care Agent"
 
 
 def test_a_hand_edited_dark_logo_mode_is_clamped_on_READ(api_client):
@@ -344,7 +344,7 @@ def test_admin_document_marks_defaults_vs_overrides(api_client, super_admin):
     assert body["is_default"]["product_name"] is False
     assert "product_name" in body["overridden"]
     assert body["is_default"]["tagline"] is True
-    assert body["defaults"]["product_name"] == "City Pharma"
+    assert body["defaults"]["product_name"] == "City Care Agent"
 
 
 # ---- 3. upload validation — the security-critical half ---------------------
@@ -501,7 +501,7 @@ def test_reset_restores_every_default(api_client, super_admin):
     assert r.status_code == 200, r.text
 
     body = api_client.get("/brand").json()
-    assert body["product_name"] == "City Pharma"
+    assert body["product_name"] == "City Care Agent"
     assert body["parent_name"] == "CMHL"
     assert body["assets"] == {
         "icon": None, "lockup": None, "lockup_dark": None, "parent": None,

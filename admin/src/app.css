@@ -344,6 +344,33 @@ body {
   outline-offset: 2px;
   border-radius: var(--radius-control);
 }
+
+/* `.field-shell` — a control assembled from TWO elements: a bordered container
+   plus a borderless input/textarea sitting inside its padding. The chat
+   composer and the header search box are both built this way.
+
+   The rule above draws its ring on the inner field, which lands INSIDE the
+   container's own edge — measured as `solid 2px accent offset 2px` nested
+   within `solid 1px accent`, in both themes, on all eight pages that carry the
+   header search. Two concentric accent rings read as a rendering fault rather
+   than as focus.
+
+   `outline-none` on the inner field does not prevent it, and that is the part
+   worth remembering: the utility lives in `@layer utilities` while this
+   stylesheet is unlayered, so the global rule wins the cascade no matter how
+   the element is classed. Every `outline-none` in this codebase is inert
+   against it. The suppression has to be at least as specific AND unlayered.
+
+   So the container owns the indicator (2px at offset 0, reading as one thicker
+   edge alongside the border it already tints) and the inner field has none. */
+.field-shell:focus-within {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 0;
+}
+.field-shell > input:focus-visible,
+.field-shell > textarea:focus-visible {
+  outline: none;
+}
 /* Skip link. The rail is nineteen tab stops and it comes before the content on
    every screen, so without this a keyboard user pressed Tab nineteen times to
    reach the page they were already looking at.

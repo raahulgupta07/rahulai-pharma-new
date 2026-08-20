@@ -6,6 +6,7 @@
   import { getJSON } from '$lib/api.js';
   import { goto } from '$app/navigation';
   import { browser } from '$app/environment';
+  import { tick } from 'svelte';
   import {
     Activity,
     ArrowRight,
@@ -76,8 +77,8 @@
   // renders blank or says "{product_name}" for a second is worse than one that
   // renders the shipped name and corrects itself.
   const BRAND_DEFAULTS = {
-    product_name: 'City Pharma',
-    short_name: 'City Pharma',
+    product_name: 'City Care Agent',
+    short_name: 'City Care',
     tagline: 'Stock Intelligence',
     console_subtitle: 'Admin console',
     login_promise: 'Ask about stock in plain words — English or Burmese. Read-only by design.',
@@ -374,14 +375,18 @@
    * `.focus()` is called explicitly. Doing it through the href alone leaves
    * focus on the link — the viewport scrolls, the next Tab returns to the rail
    * row after the link, and the skip link has skipped nothing. */
-  function skipToContent(e) {
+  async function skipToContent(e) {
     e.preventDefault();
     const main = document.getElementById('main-content');
     if (!main) return;
-    main.focus();
-    // The rail is a fixed overlay under `lg`; leaving it open would cover what
-    // we just moved focus to.
+    // Close FIRST, then await the DOM. While the mobile drawer is open the
+    // content column is `inert`, and .focus() on an inert element is silently
+    // a no-op — so focusing before closing skipped nothing and left the user on
+    // the link. The close and the `inert` removal are the same update, hence
+    // the tick.
     menuOpen = false;
+    await tick();
+    main.focus();
   }
 
   function toggleTheme() {
@@ -410,6 +415,32 @@
   let parentChip = $derived(!!brand.assets.parent && dark && brand.dark_logo_mode === 'chip');
 
   let menuOpen = $state(false);
+
+  // ---- the rail is a DRAWER below `lg`, and that changes the tab order ------
+  // Measured at 390x844 with the menu shut: 21 of the first 30 tab stops landed
+  // on rail links sitting at x=-276, i.e. off-screen. A keyboard or switch user
+  // on a phone tabbed through the whole of an invisible navigation before
+  // reaching the page. `-translate-x-full` moves the rail out of SIGHT; it does
+  // not move it out of the TAB ORDER.
+  //
+  // With the menu open the mirror image was true: 15 of 40 stops escaped the
+  // drawer into the content behind the scrim, so the "modal" menu was not modal.
+  //
+  // `inert` fixes both, and it is available here precisely because the rail is a
+  // SIBLING of the content rather than nested inside it — the case dialog.js
+  // records as out of reach for the modals. Whichever of the two is not the
+  // user's current context is inert.
+  let isDesktop = $state(true); // assume desktop until measured: nothing inert on first paint
+  $effect(() => {
+    if (!browser) return;
+    const mq = window.matchMedia('(min-width: 1024px)');
+    const sync = () => (isDesktop = mq.matches);
+    sync();
+    mq.addEventListener('change', sync);
+    return () => mq.removeEventListener('change', sync);
+  });
+  let railInert = $derived(!isDesktop && !menuOpen);
+  let contentInert = $derived(!isDesktop && menuOpen);
 
   // ---- signed-in identity (derived from /auth/me, never hardcoded) ----
   // Before /auth/me answers, `me` is null: render a skeleton, never a
@@ -699,8 +730,13 @@
       {/if}
 
       <div class="mx-auto w-full max-w-[440px] py-8 lg:py-10">
-        <h1 class="page-title text-display-lg leading-[1.12] tracking-[-0.02em] text-ink sm:text-hero">
-          {greeting},<br />sign in to <span class="text-accent">{brand.product_name}</span>
+        <h1 class="page-title text-display-lg leading-[1.12] tracking-[-0.02em] text-ink [text-wrap:balance] sm:text-hero">
+          {greeting},<br />sign in to
+          <!-- The name moves as a unit. `text-wrap: balance` on the h1 does not
+               rebalance across the <br>, so a two-word product name broke as
+               "City Care / Agent" and left the last word orphaned. Keeping the
+               name unbroken puts the whole of it on line two. -->
+          <span class="whitespace-nowrap text-accent">{brand.product_name}</span>
         </h1>
         <p class="mt-3 max-w-[390px] text-body leading-[1.5] text-ink-3">
           {brand.login_promise}
@@ -756,7 +792,7 @@
               autocomplete="username"
               bind:value={email}
               onkeydown={(e) => e.key === 'Enter' && signIn()}
-              placeholder="you@citypharma.mm"
+              placeholder="you@company.com"
               class="w-full border-0 bg-transparent p-0 text-body text-ink placeholder:text-ink-3 focus:outline-none"
             />
           </label>
@@ -1105,6 +1141,7 @@
       light/dark switch moves the page beside it, never the rail.
     -->
     <div
+      inert={railInert}
       class="rail fixed inset-y-0 left-0 z-40 flex w-[288px] flex-shrink-0 flex-col overflow-hidden
         bg-rail-bg text-rail-ink transition-transform duration-200
         lg:static lg:z-auto lg:w-[236px] lg:translate-x-0
@@ -1253,7 +1290,7 @@
     </div>
 
     <!-- ---------- content column: header, then the page ---------- -->
-    <div class="flex min-w-0 flex-1 flex-col">
+    <div inert={contentInert} class="flex min-w-0 flex-1 flex-col">
       <header
         class="relative z-50 flex h-[60px] flex-none items-center gap-3 border-b border-line bg-page px-6"
       >
@@ -1278,8 +1315,10 @@
         </nav>
 
         <div class="relative hidden min-w-[150px] max-w-[280px] flex-[1_1_auto] md:block">
+                <!-- `field-shell`: this container owns the focus ring, because
+                     the input inside it is borderless. See app.css. -->
                 <div
-                  class="flex w-full items-center gap-2 rounded-card border border-line bg-surface px-2.5 py-[7px]
+                  class="field-shell flex w-full items-center gap-2 rounded-card border border-line bg-surface px-2.5 py-[7px]
                     focus-within:border-accent"
                 >
                   <Search size={15} class="flex-none text-ink-3" />

@@ -65,9 +65,9 @@
 
   // What the answer is signed with. The design calls the assistant by the
   // product's own name, so it follows branding rather than being hardcoded —
-  // an unbranded install still reads "City Pharma Assistant", which is what
+  // an unbranded install still reads "City Care Agent Assistant", which is what
   // shipped before, not a placeholder.
-  let brandName = $state('City Pharma Assistant');
+  let brandName = $state('City Care Agent Assistant');
 
   // Same rule the layout uses: an asset URL is same-origin by construction. A
   // relative path is joined to the API base; an absolute URL is accepted ONLY
@@ -1061,8 +1061,12 @@
           <ErrorState error={sessionError} retry={makeSession} what="a chat session with the agent" />
         </div>
       {/if}
+      <!-- `field-shell` is a styling hook, not decoration: app.css uses it to
+           move the focus ring onto this container and suppress the textarea's
+           own. Without it the global ring draws a SECOND, inner ring inside
+           this border — see the note there. -->
       <div
-        class="mx-auto max-w-[748px] rounded-hero border border-line bg-surface pb-2 pl-4 pr-2 pt-3.5 shadow-[var(--shadow-card)] transition-colors focus-within:border-accent"
+        class="field-shell mx-auto max-w-[748px] rounded-hero border border-line bg-surface pb-2 pl-4 pr-2 pt-3.5 shadow-[var(--shadow-card)] transition-colors focus-within:border-accent"
       >
         <textarea
           bind:this={ta}

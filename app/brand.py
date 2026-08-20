@@ -38,8 +38,8 @@ from app.db import execute, q
 # ---------------------------------------------------------------------------
 
 DEFAULTS: Dict[str, str] = {
-    "product_name": "City Pharma",
-    "short_name": "City Pharma",
+    "product_name": "City Care Agent",
+    "short_name": "City Care",
     "tagline": "Stock Intelligence",
     "console_subtitle": "Admin console",
     "login_promise": (

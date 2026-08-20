@@ -106,7 +106,7 @@ $signature = hash_hmac('sha256', $canonical, config('services.cityagent.secret_k
 
   // Complete, framework-free PHP. Drop into any .php page — no Laravel needed.
   const phpReadySnippet = $derived(`<?php
-// ===== City Pharma chat widget — drop-in PHP =====
+// ===== City Care Agent chat widget — drop-in PHP =====
 $CITYAGENT_BASE = '${cleanBase}';       // public backend URL
 $EMBED_ID       = '${embedId}';         // from the Tenants page
 $PUBLIC_KEY     = '${publicKey}';

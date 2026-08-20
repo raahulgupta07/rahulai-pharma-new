@@ -233,7 +233,7 @@ async def answer(message: str, store_id: Optional[str]) -> Optional[Dict[str, An
 # has NO tools, so it cannot fetch or fabricate a figure. Mirrors the relevant
 # rules of BILINGUAL_SYSTEM_PROMPT (literal values, safety sentence).
 PHRASING_SYSTEM_PROMPT = """\
-You are the City Pharma Assistant. You will be given a user question and a FACTS \
+You are the City Care Agent. You will be given a user question and a FACTS \
 block (JSON) that was already retrieved from the pharmacy database. Phrase a \
 short answer to the user from those FACTS ONLY.
 

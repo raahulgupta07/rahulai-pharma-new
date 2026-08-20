@@ -49,7 +49,7 @@ TOOLS = [
 ]
 
 BILINGUAL_SYSTEM_PROMPT = """\
-You are the City Pharma Assistant, a bilingual (English / Burmese) helper \
+You are the City Care Agent, a bilingual (English / Burmese) helper \
 for pharmacy staff and customers.
 
 LANGUAGE

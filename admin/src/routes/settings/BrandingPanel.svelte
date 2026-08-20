@@ -624,7 +624,7 @@
           </span>
         {/if}
         <span class="leading-tight">
-          <span class="page-title block text-body text-ink">{form.product_name || 'City Pharma'}</span>
+          <span class="page-title block text-body text-ink">{form.product_name || 'City Care Agent'}</span>
           <span class="block text-micro uppercase tracking-[0.14em] text-ink-3">{form.tagline || 'Stock Intelligence'}</span>
         </span>
       </span>
@@ -639,7 +639,7 @@
       {@render markBlock(d, 22)}
       <div class="w-[330px]">
         <div class="page-title text-display leading-[1.18] text-ink">
-          Good morning,<br />sign in to <span class="text-accent">{form.product_name || 'City Pharma'}</span>
+          Good morning,<br />sign in to <span class="text-accent">{form.product_name || 'City Care Agent'}</span>
         </div>
         <p class="mt-3 text-body-sm leading-relaxed text-ink-2">
           {form.login_promise || 'Ask about stock in plain words — English or Burmese. Read-only by design.'}
@@ -672,7 +672,7 @@
           </span>
         {/if}
         <div class="leading-[1.15]">
-          <div class="page-title text-body text-ink">{form.short_name || form.product_name || 'City Pharma'}</div>
+          <div class="page-title text-body text-ink">{form.short_name || form.product_name || 'City Care'}</div>
           <div class="text-micro font-semibold uppercase tracking-[0.14em] text-ink-3">
             {form.console_subtitle || 'Admin console'}
           </div>

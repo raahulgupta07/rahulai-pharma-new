@@ -8,6 +8,32 @@ Format: `## <version> — <YYYY-MM-DD>`, then any of `### Fixed`, `### Added`,
 `### Changed`, `### Security`. `app/release_notes.py` parses exactly that, and
 the admin console renders it, so a heading it does not recognise is dropped.
 
+## 1.6.1 — 2026-08-20
+
+### Fixed
+
+- The chat assistant did not appear at all on the live site. The page is served
+  over a secure connection, but the assistant's script was being requested over
+  an insecure one, so the browser refused to run it and showed the page with no
+  chat button on it. Nothing was wrong with the assistant itself.
+- On a phone, pressing Tab moved through the whole of the closed navigation menu
+  before reaching the page — twenty-one invisible steps. The menu is hidden off
+  the side of the screen, but it was still in the keyboard's path. Opening the
+  menu had the opposite fault: the keyboard could wander out of it onto the page
+  behind. Neither happens now.
+- Both the message box and the search box drew two rings when selected, one
+  inside the other, which read as a rendering fault.
+- "Skip to content" did nothing when the phone menu was open.
+
+### Changed
+
+- The product is now called City Care Agent throughout — the sign-in screen, the
+  browser tab, the assistant's own name, and the line under the chat window on
+  customer sites. A few places still said City Pharma.
+- The sign-in headline no longer breaks the product name across two lines.
+- The email box on the sign-in screen shows a neutral example address instead of
+  one built from the old product name.
+
 ## 1.6.0 — 2026-08-20
 
 ### Fixed

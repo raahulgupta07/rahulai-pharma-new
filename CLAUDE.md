@@ -744,15 +744,15 @@ the contract above outranks the design.
    serving `widget.js` as a concatenation of one shared source.
 2. The SSE loop reads only `j.delta`. It parses `event: step` and `event: result`
    and **discards** them, so the structured tool rows never reach the DOM.
-3. **The admin source drawer cannot be reused.** It calls
-   `GET /admin/catalog/{code}`, which is admin-authenticated *and* returns every
-   branch's stock and price with **no store scoping** (`app/admin.py`,
-   `catalog_one`). Wiring it into a store-scoped widget would hand a scoped
-   pharmacist every sibling branch's inventory — the same leak class already fixed
-   in `search_by_meaning` / `related_drugs`. A widget drawer needs its own
-   session-scoped endpoint filtering through `_site_clause()`. While there, note
-   `catalog_one` computes `total_stock` as `sum(s["stock_qty"] or 0)`, which
-   coerces NULL (unknown) to zero and contradicts the `NULLS LAST` invariant.
+3. **The admin source drawer needs a session-scoped endpoint before reuse.** It
+   calls `GET /admin/catalog/{code}`, which is admin-authenticated — a widget
+   session token is not an admin bearer, so the widget cannot call it as-is.
+   ~~unscoped~~ **Both defects this entry used to describe are FIXED**:
+   `catalog_one` now filters sites through `tools._site_clause` against
+   `caller_store_scope`, and `total_stock` sums only known figures, reporting
+   `unknown_site_count` alongside. Verified live 2026-08-20 by opening the
+   drawer from a chat answer: real catalog row, zero console errors.
+   Do not re-report either as a bug; read `app/admin.py::catalog_one` first.
 
 ## Conventions
 
