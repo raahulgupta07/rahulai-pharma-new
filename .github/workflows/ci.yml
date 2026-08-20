@@ -141,6 +141,25 @@ jobs:
                   await run_sql_file(str(f))
                   print("migration:", f.name, flush=True)
 
+              # Agno creates its own tables lazily, on first WRITE — a read does
+              # not trigger it. On a long-lived deployment they already exist,
+              # so nothing notices. In CI the first agent write lands DURING the
+              # suite, which moves the schema after the test template has been
+              # fingerprinted and fails the isolation guard with a bare hash
+              # mismatch. Creating them up front is all it takes: the guard only
+              # needs the schema to be STABLE across the run, not to match any
+              # particular deployment.
+              #
+              # `_create_all_tables` is private, so this must fail loudly if a
+              # future agno renames it — a silent skip here comes back as that
+              # same unreadable hash mismatch.
+              from app import agent as agent_mod
+              db = agent_mod._get_learning_db()
+              if db is None:
+                  raise SystemExit("agno learning DB could not be built")
+              await db._create_all_tables()
+              print("agno tables created", flush=True)
+
           asyncio.run(main())
           PY
 
