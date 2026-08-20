@@ -4,36 +4,127 @@ on:
   push:
   pull_request:
 
+# Both jobs used to run with `working-directory: pharmacy-agent`, a directory
+# that does not exist — the repo root IS the pharmacy agent. Every run since at
+# least 2026-07-14 failed before a single command executed:
+#
+#   An error occurred trying to start process '/usr/bin/bash' with working
+#   directory '.../rahulai-pharma-new/pharmacy-agent'. No such file or directory
+#
+# So the red cross meant "the pipeline is misconfigured", never "the code is
+# broken", and fifteen commits — including security fixes — went up with no CI
+# behind them at all. Paths corrected, and the backend job now runs the real
+# suite against real services rather than two files, so a green tick is worth
+# something.
+
 jobs:
   admin-build:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: pharmacy-agent/admin
+        working-directory: admin
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - run: npm install
-      - run: npm run build   # verifies the SvelteKit admin compiles
+          cache: npm
+          cache-dependency-path: admin/package-lock.json
+      - run: npm ci
+      # Type/template errors that `npm run build` tolerates. It does NOT catch a
+      # deleted function still referenced by `onclick={...}` — that reports zero
+      # errors and crashes at runtime — which is why the suite below greps for
+      # exactly that.
+      - run: npx svelte-check --threshold error --output human
+      - run: npm run build
 
   backend-tests:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: pharmacy-agent
+
+    services:
+      postgres:
+        # pgvector, not plain postgres: schema.sql declares a vector column and
+        # CREATE EXTENSION vector fails on the stock image.
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: pharma
+          POSTGRES_PASSWORD: pharma
+          POSTGRES_DB: pharmacy
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U pharma"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+
+    env:
+      POSTGRES_URL: postgresql://pharma:pharma@localhost:5432/pharmacy
+      REDIS_URL: redis://localhost:6379/0
+      # conftest derives a scratch database per run and refuses to touch the one
+      # named here; these are throwaway CI values, not deployment secrets.
+      SECRET_KEY: ci-only-not-a-real-secret-32-bytes-long
+      OPENROUTER_API_KEY: ci-not-used-no-test-calls-the-model
+      ADMIN_EMAIL: admin@ci.local
+      ADMIN_PASSWORD: ci-only-password
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -r requirements.txt
-      # Data-coupled tests (test_tools/test_api/...) need the real dataset + a
-      # live Postgres/Redis, so they run in the deploy env. CI verifies the
-      # parts that don't need data: imports, smoke, and eval-set structure.
-      - run: python -c "import app.api, app.agent, app.tools, app.graph, app.auth, app.admin; print('imports ok')"
-      - run: python -m pytest tests/test_smoke.py "tests/test_eval.py::test_eval_set_well_formed" -q
+          cache: pip
+      - run: pip install -r requirements.txt -r requirements-dev.txt
 
-  # Full suite + live eval + load test run in the deploy environment (need the
-  # dataset, OpenRouter key, and live services). See RUNBOOK.md.
+      # A fresh database has no schema, and conftest builds its per-run template
+      # by fingerprinting the live one. Three stages, in this order — verified
+      # against an empty database, because a fresh install is the one path a
+      # long-lived deployment never exercises:
+      #
+      #   1. schema.sql            the catalog/inventory core
+      #   2. the app's ensure_*    chat_logs, chat_feedback, users, auth_events,
+      #                            turn_metrics, app_events, turn_calls, edges,
+      #                            ingest_events — created at BOOT, not by any
+      #                            migration and not by schema.sql
+      #   3. migrations/*.sql      which ALTER the tables stage 2 creates
+      #
+      # Skipping stage 2 fails five of the ten migrations with
+      # `relation "chat_logs" does not exist` / `"chat_feedback" does not exist`.
+      - name: Create the schema
+        run: |
+          python - <<'PY'
+          import asyncio
+          from pathlib import Path
+          from app.db import apply_schema, run_sql_file
+
+          async def main():
+              await apply_schema()
+              from app import activity, auth, graph, ingest_events
+              from app import admin as admin_mod
+              for fn in (
+                  admin_mod.ensure_chat_logs, admin_mod.ensure_feedback,
+                  activity.ensure_turn_metrics, activity.ensure_app_events,
+                  activity.ensure_turn_calls, auth.ensure_users_table,
+                  auth.ensure_auth_events, graph.ensure_edges_table,
+                  ingest_events.ensure_schema,
+              ):
+                  await fn()
+                  print("boot:", fn.__name__, flush=True)
+              for f in sorted(Path("migrations").glob("*.sql")):
+                  await run_sql_file(str(f))
+                  print("migration:", f.name, flush=True)
+
+          asyncio.run(main())
+          PY
+
+      - name: Imports resolve
+        run: python -c "import app.api, app.agent, app.tools, app.graph, app.auth, app.admin; print('imports ok')"
+
+      # The whole suite. It needs no OpenRouter call and no real catalog: the
+      # data-coupled tests build their own rows. -p no:randomly keeps ordering
+      # stable so a failure is reproducible from the log alone.
+      - name: Test suite
+        run: python -m pytest tests/ -q --maxfail=5
