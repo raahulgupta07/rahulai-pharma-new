@@ -70,6 +70,13 @@ jobs:
       OPENROUTER_API_KEY: ci-not-used-no-test-calls-the-model
       ADMIN_EMAIL: admin@ci.local
       ADMIN_PASSWORD: ci-only-password
+      # Consumed by psql/pg_dump when they run on the runner rather than inside
+      # a container. PGUSER/LIVE_DB match the service above.
+      PGHOST: localhost
+      PGPORT: "5432"
+      PGPASSWORD: pharma
+      PGUSER: pharma
+      LIVE_DB: pharmacy
 
     steps:
       - uses: actions/checkout@v4
@@ -78,6 +85,16 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt -r requirements-dev.txt
+
+      # The suite clones a template database with pg_dump | psql. Locally those
+      # run inside the Postgres container; here there is no container, so the
+      # client has to exist on the runner. `tests/setup_test_db.sh` picks the
+      # path automatically.
+      - name: Postgres client
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-16 || sudo apt-get install -y -qq postgresql-client
+          psql --version
 
       # A fresh database has no schema, and conftest builds its per-run template
       # by fingerprinting the live one. Three stages, in this order — verified

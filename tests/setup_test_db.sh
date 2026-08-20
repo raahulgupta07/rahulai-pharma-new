@@ -49,8 +49,20 @@ if [ "$TEST_DB" = "$LIVE_DB" ]; then
   exit 1
 fi
 
-if ! docker inspect "$PG_CONTAINER" >/dev/null 2>&1; then
-  echo "no such container: $PG_CONTAINER (set PG_CONTAINER=...)" >&2
+# How we reach Postgres. Locally it runs in a container and every client call
+# goes through `docker exec`. In CI it is a service on localhost with the client
+# installed and no container to exec into, which is why this script used to end
+# every CI run with "no such container: pharmacy-opt-postgres-1". Same commands
+# either way; only the prefix differs.
+if docker inspect "$PG_CONTAINER" >/dev/null 2>&1; then
+  pgrun() { docker exec "$PG_CONTAINER" "$@"; }
+  pgsh()  { docker exec "$PG_CONTAINER" sh -c "$1"; }
+elif command -v psql >/dev/null 2>&1; then
+  echo "==> no container '$PG_CONTAINER'; using the local client against ${PGHOST:-localhost}"
+  pgrun() { "$@"; }
+  pgsh()  { sh -c "$1"; }
+else
+  echo "no such container: $PG_CONTAINER (set PG_CONTAINER=...), and no psql on PATH" >&2
   exit 1
 fi
 
@@ -60,15 +72,15 @@ fi
 # first. Callers inside the suite already hold the template lock exclusively, so
 # this only ever sees connections from outside the suite.
 echo "==> dropping and recreating '$TEST_DB'"
-docker exec "$PG_CONTAINER" psql -q -U "$PGUSER" -d postgres \
+pgrun psql -q -U "$PGUSER" -d postgres \
   -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
       WHERE datname = '$TEST_DB' AND pid <> pg_backend_pid()" >/dev/null
-docker exec "$PG_CONTAINER" psql -q -v ON_ERROR_STOP=1 -U "$PGUSER" -d postgres \
+pgrun psql -q -v ON_ERROR_STOP=1 -U "$PGUSER" -d postgres \
   -c "DROP DATABASE IF EXISTS \"$TEST_DB\"" \
   -c "CREATE DATABASE \"$TEST_DB\" OWNER \"$PGUSER\""
 
 echo "==> cloning '$LIVE_DB' -> '$TEST_DB' (schema + data; ~230 MB, takes a minute)"
-docker exec "$PG_CONTAINER" sh -c \
+pgsh \
   "pg_dump -U '$PGUSER' -d '$LIVE_DB' | psql -q -v ON_ERROR_STOP=1 -U '$PGUSER' -d '$TEST_DB'"
 
 # The live database is currently carrying pytest debris of its own (144
@@ -77,7 +89,7 @@ docker exec "$PG_CONTAINER" sh -c \
 # Activity-feed noise. Purging it from the LIVE database is the owner's call and
 # is deliberately not done anywhere in this repo.
 echo "==> clearing inherited pytest debris from the clone"
-docker exec "$PG_CONTAINER" psql -q -v ON_ERROR_STOP=1 -U "$PGUSER" -d "$TEST_DB" \
+pgrun psql -q -v ON_ERROR_STOP=1 -U "$PGUSER" -d "$TEST_DB" \
   -c "DELETE FROM app_events WHERE ip = 'testclient'" \
   -c "DELETE FROM users WHERE email LIKE '%@corp.mm'"
 
@@ -91,7 +103,7 @@ echo "==> stamping the schema fingerprint"
 # live to decide whether to rebuild, this one stamps the result. If they diverge
 # the template rebuilds on every run. Pinned by
 # test_postgres_isolation.py::test_the_template_matches_the_live_schema.
-FP=$(docker exec "$PG_CONTAINER" psql -tA -U "$PGUSER" -d "$LIVE_DB" -c \
+FP=$(pgrun psql -tA -U "$PGUSER" -d "$LIVE_DB" -c \
   "SELECT md5(string_agg(t,'|' ORDER BY t)) FROM (
      SELECT 'c:'||table_name||'.'||column_name||':'||data_type
             ||':'||is_nullable||':'||coalesce(column_default,'') AS t
@@ -102,11 +114,11 @@ FP=$(docker exec "$PG_CONTAINER" psql -tA -U "$PGUSER" -d "$LIVE_DB" -c \
      UNION ALL
      SELECT 'k:'||conname||':'||pg_get_constraintdef(oid)
        FROM pg_constraint WHERE connamespace='public'::regnamespace) s")
-docker exec "$PG_CONTAINER" psql -q -v ON_ERROR_STOP=1 -U "$PGUSER" -d postgres \
+pgrun psql -q -v ON_ERROR_STOP=1 -U "$PGUSER" -d postgres \
   -c "COMMENT ON DATABASE \"$TEST_DB\" IS 'fingerprint:$FP'"
 
 echo "==> done. Row counts in '$TEST_DB':"
-docker exec "$PG_CONTAINER" psql -U "$PGUSER" -d "$TEST_DB" -c \
+pgrun psql -U "$PGUSER" -d "$TEST_DB" -c \
   "SELECT 'catalog' t, count(*) FROM catalog
    UNION ALL SELECT 'inventory', count(*) FROM inventory
    UNION ALL SELECT 'users', count(*) FROM users
