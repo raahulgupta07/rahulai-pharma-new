@@ -8,6 +8,41 @@ Format: `## <version> — <YYYY-MM-DD>`, then any of `### Fixed`, `### Added`,
 `### Changed`, `### Security`. `app/release_notes.py` parses exactly that, and
 the admin console renders it, so a heading it does not recognise is dropped.
 
+## 1.6.0 — 2026-08-20
+
+### Fixed
+
+- The chat button on your website was invisible. It carried the CityCare mark on
+  an indigo circle, and the mark is itself a navy tile, so there was nothing to
+  see but a blob. It now sits on white inside a coloured ring — and that ring is
+  what keeps the button visible on a customer site with a dark page, where it
+  used to disappear almost completely.
+- The Knowledge graph drew nothing at all, while the counts above it reported
+  16,021 connections. It was only ever willing to draw the "treats" layer, which
+  is read out of indication text by the model and has not been built here. It now
+  draws the connections that do exist — ingredients, shared generics and
+  categories — and says in words which layer you are looking at and which one is
+  missing.
+- Opening the live preview on Embed and integration left a second chat button
+  stuck to the console. It followed you onto other pages, and every visit that
+  used the preview added another one.
+
+### Changed
+
+- The chat box is quieter. The four example questions were filled pills that read
+  as the main thing to press when they are only suggestions; they are now plain
+  text, and there are three. The branch and language pickers lost their boxes,
+  the read-only marker no longer looks like a button you can press, and the send
+  button is the one thing on the row with any weight.
+- Branch assistant shows the preview inside a browser frame, with the real
+  address it loads from. Without it the panel was a white rectangle that read as
+  a page that had failed to load.
+- There is one live widget in the console, not two. Embed and integration links
+  to Branch assistant instead of running its own copy.
+- "Live preview" is now "What a branch sees", and "Live test" is now "Test on a
+  customer domain". The two pages looked like duplicates; the names now say which
+  question each one answers.
+
 ## 1.5.0 — 2026-08-20
 
 ### Added
