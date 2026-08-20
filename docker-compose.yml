@@ -58,7 +58,14 @@ services:
   # SFTP drop point. Users upload article*/balance* xlsx into /upload.
   # Auth: password (SFTP_PASSWORD) AND/OR SSH key (drop *.pub in ./sftp/keys).
   sftp:
-    image: atmoz/sftp:alpine
+    # Built from docker/sftp (atmoz/sftp, MIT, vendored) rather than pulled:
+    # upstream publishes amd64 ONLY, so on an ARM host the container cannot
+    # start at all — `exec /entrypoint: exec format error`, forever. Nothing in
+    # the image is architecture-specific; it was simply never published for
+    # arm64. Building it here means one `up -d --build` works on either.
+    build:
+      context: ./docker/sftp
+    image: citycare-sftp:local
     ports:
       - "2222:22"            # connect: sftp -P 2222 pharma@<host>
     # uid:gid:dir tail makes atmoz create + chown the upload dir to the user,

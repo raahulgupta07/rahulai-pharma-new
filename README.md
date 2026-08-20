@@ -150,6 +150,12 @@ docker compose -p pharmacy-opt \
 # admin :8091 · postgres :5434 · redis :6381 · sftp :2223
 ```
 
+`--build` is not optional for a first run: the SFTP service is built from
+`docker/sftp` rather than pulled. Upstream `atmoz/sftp` publishes **amd64 only**,
+so on an ARM host the pulled image cannot start at all — it restarts forever with
+`exec /entrypoint: exec format error`. Building it here makes one command produce
+a working stack on either architecture. See `docker/sftp/README.md`.
+
 `app/schema.sql` applies automatically on startup; `app/admin.py:ensure_admin_schema`
 adds the `users.store_id`, `drug_alias`, and `catalog.last_seen` columns on boot.
 Sign in with `ADMIN_EMAIL` / `ADMIN_PASSWORD` from `.env`.
