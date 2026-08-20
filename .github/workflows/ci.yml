@@ -144,4 +144,4 @@ jobs:
       # data-coupled tests build their own rows. -p no:randomly keeps ordering
       # stable so a failure is reproducible from the log alone.
       - name: Test suite
-        run: python -m pytest tests/ -q --maxfail=5
+        run: python -m pytest tests/ -q -rf
