@@ -154,13 +154,26 @@ docker compose -p pharmacy-opt \
 adds the `users.store_id`, `drug_alias`, and `catalog.last_seen` columns on boot.
 Sign in with `ADMIN_EMAIL` / `ADMIN_PASSWORD` from `.env`.
 
-Migrations mirror the same end state for a from-scratch DB and are idempotent:
+Migrations are idempotent — re-running them is a no-op — but they are **not**
+self-sufficient: five of the ten `ALTER` tables that only exist once the app has
+booted (`chat_logs`, `chat_feedback`), so applying them to a from-scratch
+database fails with `relation "chat_logs" does not exist`. Bring the stack up
+first, which is the order below anyway:
 
 ```bash
+# 1. the app boots and creates its own tables (schema.sql + the ensure_* set)
+docker compose -p pharmacy-opt \
+  -f docker-compose.yml -f docker-compose.optimized.yml up -d --build
+
+# 2. only then
 for f in migrations/*.sql; do
   docker exec -i pharmacy-opt-postgres-1 psql -U pharmacy -d pharmacy < "$f"
 done
 ```
+
+Verified against an empty database: schema.sql alone + migrations = 5 ok, 5
+failed; with the app's boot-time table creation in between = 10 ok, 0 failed,
+and a second pass is 10 ok as well.
 
 Frontend-only dev loop (no image rebuild): `cd admin && npm run dev` (SPA on :5173,
 proxies the API).
