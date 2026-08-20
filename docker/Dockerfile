@@ -42,4 +42,23 @@ EXPOSE 8000
 HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=5 \
     CMD python -c "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:8000/health').status==200 else sys.exit(1)"
 
-CMD ["uvicorn", "app.api:app", "--host", "0.0.0.0", "--port", "8000"]
+# `--proxy-headers` is load-bearing behind TLS, and its absence is invisible
+# until a browser refuses to run the widget.
+#
+# Starlette builds `request.base_url` from the scheme uvicorn sees on the wire.
+# Without this flag that is always `http`, even when the proxy terminated TLS —
+# so `GET /embed/preview` (app/api.py) emitted
+# `<script src="http://<host>/api/embed/widget.js">` onto a page the browser had
+# loaded over https, and Chrome blocked it as mixed content. The page rendered,
+# the API answered 200, and the chat widget simply never appeared.
+#
+# `--forwarded-allow-ips` is the trust boundary: uvicorn honours the forwarded
+# headers ONLY from these peers. It is deliberately NOT `*`. The container port
+# is published on the host, so anything that can reach it could otherwise assert
+# its own scheme and client IP. `FORWARDED_ALLOW_IPS` is overridable per
+# deployment because the trusted peer differs by topology; the default covers a
+# proxy on the same host. Set it to the address the proxy actually connects
+# FROM — when the proxy dials the host's public address, that is the public IP,
+# not a private one.
+ENV FORWARDED_ALLOW_IPS=127.0.0.1
+CMD ["sh", "-c", "exec uvicorn app.api:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips \"$FORWARDED_ALLOW_IPS\""]
