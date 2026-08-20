@@ -119,14 +119,21 @@ jobs:
 
           async def main():
               await apply_schema()
-              from app import activity, auth, graph, ingest_events
+              from app import activity, auth, brand, graph, ingest_events
               from app import admin as admin_mod
+              # Order matters: ensure_admin_schema references `users`, so auth
+              # runs first. Every DDL ensure_* in app/ is here — miss one and it
+              # runs later at app startup instead, which moves the schema AFTER
+              # the test template was fingerprinted and fails the isolation
+              # guard with a hash mismatch rather than anything legible.
               for fn in (
-                  admin_mod.ensure_chat_logs, admin_mod.ensure_feedback,
+                  auth.ensure_users_table, auth.ensure_auth_events,
+                  admin_mod.ensure_admin_schema, admin_mod.ensure_chat_logs,
+                  admin_mod.ensure_feedback, brand.ensure_brand_tables,
                   activity.ensure_turn_metrics, activity.ensure_app_events,
-                  activity.ensure_turn_calls, auth.ensure_users_table,
-                  auth.ensure_auth_events, graph.ensure_edges_table,
-                  ingest_events.ensure_schema,
+                  activity.ensure_turn_calls, activity.ensure_chat_logs_actor,
+                  activity.ensure_chat_feedback_turn,
+                  graph.ensure_edges_table, ingest_events.ensure_schema,
               ):
                   await fn()
                   print("boot:", fn.__name__, flush=True)
@@ -144,4 +151,45 @@ jobs:
       # data-coupled tests build their own rows. -p no:randomly keeps ordering
       # stable so a failure is reproducible from the log alone.
       - name: Test suite
-        run: python -m pytest tests/ -q -rf
+        run: |
+          # 30 tests need the real 5,292-SKU catalog and 111,654 inventory
+          # rows. That is customer data: it is not in the repo and must not be.
+          # They are named individually rather than skipped by a marker so this
+          # list cannot grow silently — if it needs to change, the diff shows
+          # exactly which guard stopped running in CI. They still run in the
+          # deploy environment against live data; see RUNBOOK.md.
+          #
+          # Everything else — 1,242 tests, including every source-level guard
+          # for accessibility, tokens, scoping logic and dead controls — runs.
+          python -m pytest tests/ -q -rf \
+            --deselect "tests/test_admin_listings.py::test_catalog_flags_stub_rows" \
+            --deselect "tests/test_admin_scope.py::test_stores_summary_scopes_a_pinned_admin" \
+            --deselect "tests/test_admin_scope.py::test_stores_summary_unscoped_admin_keeps_every_branch" \
+            --deselect "tests/test_analytics.py::test_data_health_inventory_half_is_scoped" \
+            --deselect "tests/test_analytics.py::test_data_health_shape" \
+            --deselect "tests/test_api.py::test_ready_reports_counts" \
+            --deselect "tests/test_cache.py::test_reload_endpoint_bumps_version" \
+            --deselect "tests/test_embed_preflight.py::test_a_substring_decoy_branch_is_not_counted_as_visible" \
+            --deselect "tests/test_embed_preflight.py::test_prefix_and_suffix_tokens_resolve_to_the_same_single_branch[20005-CCYK]" \
+            --deselect "tests/test_embed_preflight.py::test_prefix_and_suffix_tokens_resolve_to_the_same_single_branch[20005]" \
+            --deselect "tests/test_embed_preflight.py::test_prefix_and_suffix_tokens_resolve_to_the_same_single_branch[CCYK]" \
+            --deselect "tests/test_embed_preflight.py::test_scoped_store_reports_one_branch_and_no_sibling_leak" \
+            --deselect "tests/test_embed_preflight.py::test_unregistered_credential_is_reported_false" \
+            --deselect "tests/test_embed_preview.py::test_preview_link_mints_a_working_url" \
+            --deselect "tests/test_ingest_replace.py::test_the_validated_path_refuses_a_file_that_would_load_nothing[rows1-valid article code]" \
+            --deselect "tests/test_security.py::test_find_at_other_stores_does_not_weaken_get_stock" \
+            --deselect "tests/test_security.py::test_find_at_other_stores_excludes_scoped_site" \
+            --deselect "tests/test_security.py::test_find_at_other_stores_unscoped_no_exclusion" \
+            --deselect "tests/test_security.py::test_get_stock_cannot_cross_branch" \
+            --deselect "tests/test_security.py::test_get_stock_scoped_to_site" \
+            --deselect "tests/test_security.py::test_summarize_article_scoped_total" \
+            --deselect "tests/test_sftp_files.py::TestLive::test_one_live_file_per_kind_and_the_rest_are_superseded" \
+            --deselect "tests/test_tools.py::test_get_article_info_real" \
+            --deselect "tests/test_tools.py::test_get_stock_top_site" \
+            --deselect "tests/test_tools.py::test_search_by_name_real" \
+            --deselect "tests/test_tools.py::test_summarize_article_real" \
+            --deselect "tests/test_tools.py::test_top_by_stock_real_site" \
+            --deselect "tests/test_tools_scope.py::test_list_sites_unscoped_search_still_matches_substrings" \
+            --deselect "tests/test_tools_scope.py::test_top_by_stock_scope_excludes_a_substring_decoy" \
+            --deselect "tests/test_validation.py::TestData::test_a_few_blank_brands_are_tolerated" \
+            --deselect "tests/test_validation.py::TestData::test_mostly_blank_brand_names_are_rejected"
