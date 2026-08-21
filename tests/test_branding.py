@@ -222,8 +222,10 @@ def test_unconfigured_install_returns_the_hardcoded_strings(api_client):
     assert body["login_promise"] == (
         "Ask about stock in plain words — English or Burmese. Read-only by design."
     )
-    assert body["legal_footer"] == "© 2026 City Medical Health & Logistics · Read-only"
-    assert body["pending_title"] == "CMHL Secure Platform"
+    assert body["legal_footer"] == "© 2026 City Mart Holding Co., Ltd. · Read-only"
+    # Empty is the value, not a missing one: the hold screen builds its own
+    # headline from `product_name` unless an operator overrides it here.
+    assert body["pending_title"] == ""
     assert body["parent_name"] == "CMHL"
     assert body["dark_logo_mode"] == "chip"
     assert body["assets"] == {

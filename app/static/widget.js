@@ -30,6 +30,10 @@
   // regenerated — that is intended, not drift to fix at runtime.
   var accent = s.getAttribute('data-accent') || '#2F3293';
   var stream = (s.getAttribute('data-stream') || 'true') !== 'false';
+  // PREVIEW ONLY. `data-open="true"` starts the panel open, exactly as one
+  // launcher click would leave it. Live customer embeds never send it, so the
+  // default stays closed and any other value behaves as today.
+  var startOpen = s.getAttribute('data-open') === 'true';
   var user = null;
   try { user = userRaw ? JSON.parse(userRaw) : null; } catch (e) { user = null; }
 
@@ -68,9 +72,13 @@
 
   var css = '\
 .cca-btn{position:fixed;bottom:24px;right:24px;width:58px;height:58px;border-radius:50%;background:' + accent + ';color:#fff;border:2px solid #fff;box-sizing:border-box;cursor:pointer;box-shadow:0 10px 30px rgba(25,27,80,.35);display:flex;align-items:center;justify-content:center;z-index:2147483000;animation:cca-pulse 2.6s infinite}\
-.cca-btn.cca-mark{background:#fff;border-color:' + accent + '}\
+/* A brand mark is a SQUARE tile, so a circle crops its corners and shrinks it.\
+   Scoped to .cca-mark ONLY: with no brand icon the button keeps the built-in\
+   round chat glyph, and the base .cca-btn rule above must stay a circle. */\
+.cca-btn.cca-mark{background:#fff;border-color:' + accent + ';border-radius:16px}\
 .cca-btn svg{width:26px;height:26px}\
 .cca-btn img{width:38px;height:38px;object-fit:contain;border-radius:8px;background:transparent;padding:0;box-sizing:border-box}\
+.cca-btn.cca-mark img{width:46px;height:46px;border-radius:11px}\
 .cca-hd-ic img{display:block;width:100%;height:100%;object-fit:contain;border-radius:9px;background:#fff;padding:3px;box-sizing:border-box}\
 .cca-panel{position:fixed;bottom:24px;right:24px;width:376px;max-width:calc(100vw - 32px);height:560px;max-height:calc(100vh - 48px);background:#fff;border-radius:18px;box-shadow:0 24px 70px rgba(10,20,25,.28);display:none;flex-direction:column;overflow:hidden;z-index:2147483000;font-family:' + BODY + ';color:' + INK + '}\
 .cca-open{display:flex;animation:cca-fade .22s ease}\
@@ -128,7 +136,11 @@
 .cca-data-h{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:' + INK3 + ';margin:7px 0 3px}\
 .cca-data-h:first-child{margin-top:0}\
 .cca-cite{display:flex;align-items:center;gap:5px;margin-top:7px;font-size:11px;color:' + INK3 + ';line-height:1.4}\
-.cca-fu{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}\
+/* A SIBLING of the assistant bubble, not a child of it: chips are invitations to\
+   press, not part of what the assistant said. `align-self:flex-start` lines the\
+   row up with the left edge of the .cca-a bubble; the 8px gap on .cca-msgs is\
+   the whole gap above it, so there is no margin-top here to double it. */\
+.cca-fu{display:flex;flex-wrap:wrap;gap:5px;align-self:flex-start;max-width:84%}\
 .cca-fu-b{border:1px solid ' + LINE + ';background:' + PAGEBG + ';border-radius:999px;padding:5px 11px;cursor:pointer;font-family:inherit;font-size:11.5px;color:' + INK2 + ';transition:all .15s;line-height:1.3}\
 .cca-fu-b:hover{border-color:' + accent + ';color:' + accent + '}\
 .cca-unk{color:' + INK3 + ';font-style:italic}\
@@ -469,7 +481,13 @@
       .catch(function () { /* older backend / offline — shipped defaults stand */ });
   } catch (e) { /* no fetch on this host browser — shipped defaults stand */ }
 
-  btn.onclick = function () { panel.classList.toggle('cca-open'); if (panel.classList.contains('cca-open')) input.focus(); };
+  // The open half of the toggle, named so `data-open` can reuse it instead of
+  // duplicating the class + focus pair (two copies would drift apart).
+  function openPanel() { panel.classList.add('cca-open'); input.focus(); }
+  btn.onclick = function () {
+    if (panel.classList.contains('cca-open')) panel.classList.remove('cca-open');
+    else openPanel();
+  };
   panel.querySelector('.cca-x').onclick = function () { panel.classList.remove('cca-open'); };
 
   function scroll() { msgs.scrollTop = msgs.scrollHeight; }
@@ -575,7 +593,8 @@
           c.innerHTML = TBL_SVG + '<span>' + esc(cite) + '</span>';
           dataEl.appendChild(c);
         }
-        followUps(dataEl, results);
+        // The chips go AFTER the bubble, not inside it — `bub`, not `dataEl`.
+        followUps(bub, results);
         scroll();
       }
     };
@@ -586,8 +605,13 @@
      the subject is whatever the tools actually returned. A conversation that
      ends at one fact makes the reader retype the product name to ask the
      obvious next thing, which is the difference between a lookup box and an
-     assistant. */
-  function followUps(host, results) {
+     assistant.
+
+     `after` is the assistant BUBBLE, and the row is inserted as its next
+     sibling in `.cca-msgs` rather than appended inside it. Inside the bubble
+     the chips sat under the citation line, within the same border, and read as
+     part of the answer; as a sibling they read as something to press. */
+  function followUps(after, results) {
     var subject = null, tools = {};
     for (var i = 0; i < results.length; i++) {
       tools[results[i].tool] = 1;
@@ -628,7 +652,9 @@
       };
       wrap.appendChild(c);
     });
-    host.appendChild(wrap);
+    // `after.nextSibling` is null while the turn is the newest one, and
+    // insertBefore(node, null) appends — so this is correct either way.
+    if (after.parentNode) after.parentNode.insertBefore(wrap, after.nextSibling);
   }
 
   function send() {
@@ -694,4 +720,9 @@
 
   sendBtn.onclick = send;
   input.addEventListener('keydown', function (e) { if (e.key === 'Enter') send(); });
+
+  // Last statement in the IIFE on purpose: btn, panel, input and the greeting
+  // bubble all exist and are in the document by here, so the preview opens on
+  // the same finished widget a click would have opened.
+  if (startOpen) openPanel();
 })();

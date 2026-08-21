@@ -133,7 +133,10 @@
       key: 'pending_title',
       label: 'Hold-screen title',
       limit: 40,
-      where: 'Heading an approved-pending account sees instead of the console'
+      // The only field with no shipped wording of its own: blank is a real
+      // choice, so the copy has to say what blank produces.
+      where:
+        'Optional heading a not-yet-approved account sees — blank reads “Thanks for signing in to ‹product name›”'
     }
   ];
   const TEXT_KEYS = [...IDENTITY_FIELDS, ...PARENT_FIELDS].map((f) => f.key);
@@ -653,7 +656,7 @@
         {#if asset('parent')}
           <img src={asset('parent').url} alt={(form.parent_name || 'Parent organisation') + ' logo'} class="h-4 w-auto object-contain" />
         {/if}
-        <span>{form.legal_footer || '© 2026 City Medical Health & Logistics · Read-only'}</span>
+        <span>{form.legal_footer || '© 2026 City Mart Holding Co., Ltd. · Read-only'}</span>
       </div>
     </div>
   {/snippet}
@@ -849,7 +852,7 @@
               What an authenticated but unapproved account sees instead of the console.
             </p>
             <div class="mt-3 rounded-panel border border-line bg-page px-5 py-6 text-center">
-              <div class="page-title text-title text-ink">{form.pending_title || 'CMHL Secure Platform'}</div>
+              <div class="page-title text-title text-ink">{form.pending_title || 'Thanks for signing in to ' + (form.product_name || 'City Care Agent')}</div>
               <p class="mx-auto mt-2 max-w-[320px] text-meta leading-relaxed text-ink-2">
                 You are accessing a restricted {form.parent_name || 'CMHL'} system. Activity is logged.
               </p>

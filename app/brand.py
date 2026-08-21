@@ -15,7 +15,9 @@ release with nothing in the logs to explain it. Bytes live in ``brand_assets``.
 install must render exactly as it did before this table existed, so the defaults
 below are not placeholders: they are the literal strings that were in the
 Svelte source. A missing row, an empty JSONB blob and a hand-truncated column
-all resolve to the same rendered page.
+all resolve to the same rendered page. ``pending_title`` is the one field whose
+default is empty, because the screen it heads composes its own sentence from
+``product_name``: there the shipped look IS the empty string.
 
 The schema is created two ways — ``migrations/0005_branding.sql`` for a database
 someone already has, and :func:`ensure_brand_tables` on every boot for a fresh
@@ -46,8 +48,13 @@ DEFAULTS: Dict[str, str] = {
         "Ask about stock in plain words — English or Burmese. "
         "Read-only by design."
     ),
-    "legal_footer": "© 2026 City Medical Health & Logistics · Read-only",
-    "pending_title": "CMHL Secure Platform",
+    "legal_footer": "© 2026 City Mart Holding Co., Ltd. · Read-only",
+    # The one default that is empty on purpose. The hold screen generates its
+    # own headline from `product_name`, so this field is an OVERRIDE of that
+    # sentence, not the sentence itself — empty means "use the generated one",
+    # which is the shipped look. A non-empty default here would be a second
+    # product name to keep in sync with the first.
+    "pending_title": "",
     "parent_name": "CMHL",
     "dark_logo_mode": "chip",
 }
@@ -64,6 +71,15 @@ DEFAULT_MAX_LEN = 200
 #: puts the light lockup on an accent chip; ``variant`` swaps in the separately
 #: uploaded dark lockup. Anything else is a branch that does not exist.
 DARK_LOGO_MODES: Tuple[str, ...] = ("chip", "variant")
+
+#: Fields where the empty string is a VALUE, not a missing one. Only
+#: ``pending_title``: the hold screen composes its own headline from
+#: ``product_name``, and this field overrides that sentence — so clearing the
+#: box is the operator saying "use the generated one", which is a setting they
+#: must be able to reach. Every other field is a literal the UI has no
+#: substitute for; a blank ``product_name`` or ``legal_footer`` is a bug, and
+#: refusing it is doing real work. Do not widen this tuple to "be consistent".
+EMPTY_ALLOWED: Tuple[str, ...] = ("pending_title",)
 
 ASSET_KEYS: Tuple[str, ...] = ("icon", "lockup", "lockup_dark", "parent")
 
@@ -148,8 +164,9 @@ def clean_text(field: str, value: Any) -> str:
     """Validate one branding field, returning the value that should be stored.
 
     Raises :class:`BrandError` on a non-string, an over-length string, a string
-    that is empty once control characters are removed, or a ``dark_logo_mode``
-    outside :data:`DARK_LOGO_MODES`.
+    that is empty once control characters are removed (except for the fields in
+    :data:`EMPTY_ALLOWED`), or a ``dark_logo_mode`` outside
+    :data:`DARK_LOGO_MODES`.
     """
 
     if field not in DEFAULTS:
@@ -162,6 +179,12 @@ def clean_text(field: str, value: Any) -> str:
 
     cleaned = _strip_controls(value)
     if not cleaned:
+        if field in EMPTY_ALLOWED:
+            # Returned, not skipped: the caller stores this, and a stored ""
+            # is what makes the override clearable. `_coerce_stored` runs this
+            # same function on READ, so "" has to survive here or it would be
+            # quietly replaced by the default on the way back out.
+            return ""
         raise BrandError(f"{field} must not be empty")
 
     if field == "dark_logo_mode":
@@ -687,6 +710,7 @@ def extension_for(mime: str) -> str:
 __all__ = [
     "ASSET_KEYS",
     "DARK_LOGO_MODES",
+    "EMPTY_ALLOWED",
     "DEFAULTS",
     "MAX_ASSET_BYTES",
     "MAX_ASSET_PIXELS",

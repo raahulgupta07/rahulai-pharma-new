@@ -941,7 +941,9 @@ async def embed_preview(request: Request, t: str = ""):
     # store is HMAC-locked, so the preview can answer for that branch and no
     # other, exactly like the real embed.
     snippet = _snippet_html(req, sign_user(_outlet_user(req.store_id)))
-    return HTMLResponse(_demo_page(req, snippet), headers=headers)
+    # The preview is the ONLY caller that opens the widget for the reader —
+    # see _demo_page. Everything customer-facing leaves it closed.
+    return HTMLResponse(_demo_page(req, snippet, auto_open=True), headers=headers)
 
 
 # ---- the admin SPA -----------------------------------------------------------

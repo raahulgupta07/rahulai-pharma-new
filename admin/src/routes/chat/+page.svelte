@@ -854,14 +854,17 @@
           <p class="text-body text-ink-2">
             Ask about stock, price, substitutes or a branch — English or မြန်မာ.
           </p>
-          <!-- Examples, so they are drawn as examples: quiet text, one click.
-               Filled pills read as the page's primary action, which they are
-               not — the primary action is the box below. -->
+          <!-- Outlined pills, because these really do send the question on one
+               click and plain text read as body copy — nothing said they were
+               pressable. Still not FILLED: a solid accent pill reads as the
+               page's primary action, which they are not — the primary action is
+               the box below. Outlined is the middle ground: visibly a control,
+               quieter than the composer. -->
           <div class="mt-3 flex flex-wrap gap-1">
             {#each suggestions as sg}
               <button
                 onclick={() => send(sg.q)}
-                class="bilingual rounded-control px-1.5 py-1 text-meta text-ink-2 transition-colors hover:bg-surface-2 hover:text-ink"
+                class="bilingual rounded-full border border-line bg-surface px-3 py-1.5 text-meta text-ink-2 transition-colors hover:border-accent hover:bg-accent-soft hover:text-accent"
               >
                 {sg.q}
               </button>
@@ -1061,12 +1064,14 @@
           <ErrorState error={sessionError} retry={makeSession} what="a chat session with the agent" />
         </div>
       {/if}
-      <!-- `field-shell` is a styling hook, not decoration: app.css uses it to
-           move the focus ring onto this container and suppress the textarea's
-           own. Without it the global ring draws a SECOND, inner ring inside
-           this border — see the note there. -->
+      <!-- `field-shell` and `field-shell-ring` are styling hooks, not decoration:
+           app.css uses `field-shell` to suppress the textarea's own focus ring
+           (without it the global ring draws a SECOND, inner ring inside this
+           border) and `field-shell-ring` to draw the ring on this container
+           instead. The ring is needed here because a 1px border colour change is
+           this box's only other focus signal — see the note there. -->
       <div
-        class="field-shell mx-auto max-w-[748px] rounded-hero border border-line bg-surface pb-2 pl-4 pr-2 pt-3.5 shadow-[var(--shadow-card)] transition-colors focus-within:border-accent"
+        class="field-shell field-shell-ring mx-auto max-w-[748px] rounded-hero border border-line bg-surface pb-2 pl-4 pr-2 pt-3.5 shadow-[var(--shadow-card)] transition-colors focus-within:border-accent"
       >
         <textarea
           bind:this={ta}

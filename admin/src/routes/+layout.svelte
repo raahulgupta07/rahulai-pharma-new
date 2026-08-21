@@ -26,6 +26,7 @@
     Loader2,
     Lock,
     LogOut,
+    Mail,
     Gavel,
     Menu,
     MessageCircle,
@@ -82,8 +83,13 @@
     tagline: 'Stock Intelligence',
     console_subtitle: 'Admin console',
     login_promise: 'Ask about stock in plain words — English or Burmese. Read-only by design.',
-    legal_footer: '© 2026 City Medical Health & Logistics · Read-only',
-    pending_title: 'CMHL Secure Platform',
+    legal_footer: '© 2026 City Mart Holding Co., Ltd. · Read-only',
+    // Empty on purpose, and NOT a missing value: the pending screen reads an
+    // empty title as "use the generated headline", which names whatever the
+    // product is currently called instead of freezing one deployment's wording
+    // into the default. `applyBrand` treats blank as unset, so an operator who
+    // clears the field in Branding lands back here rather than on a blank line.
+    pending_title: '',
     parent_name: 'CMHL',
     dark_logo_mode: 'chip'
   };
@@ -176,6 +182,15 @@
   // with a password, which is the only way back when a realm breaks.
   let showSso = $derived(ssoEnabled && signinMode !== 'local');
   let ssoPrimary = $derived(showSso && signinMode === 'sso_only');
+  // Which credential SHAPE the form collects: 'email' | 'ldap'. This is the
+  // person's own choice and is NOT signin_mode — that one is backend policy.
+  //
+  // Nothing changes on the wire. /auth/login takes `email` as a plain str (not
+  // EmailStr), tries the local table first, and on failure falls through to
+  // login_ldap(), which binds a BARE username. So switching mode only changes
+  // what we ask for and what we call it; the request body is identical.
+  let credMode = $state(browser ? localStorage.getItem('login_mode') || 'email' : 'email');
+  const isLdap = $derived(credMode === 'ldap');
   let pwOpen = $state(false);
   let showPw = $state(false);
   let remember = $state(browser ? localStorage.getItem('login_email') != null : true);
@@ -305,8 +320,24 @@
           : ssoEnabled
             ? 'hybrid'
             : 'local';
+        // A remembered LDAP choice must not outlive LDAP being switched off in
+        // /admin/auth — that would strand someone on a Username field whose
+        // credentials the server can no longer check, with no way back.
+        if (credMode === 'ldap' && !ldapEnabled) setMode('email');
       })
       .catch(() => {});
+  }
+
+  /** Switch the form between a local email and a directory username. */
+  function setMode(m) {
+    credMode = m;
+    // An error raised against the other credential shape is now misleading.
+    loginErr = '';
+    // Never carry a typed password across the switch. The identifier IS kept:
+    // plenty of directory usernames are the local part of the work email, and
+    // retyping it would be a pointless tax.
+    password = '';
+    if (browser) localStorage.setItem('login_mode', m);
   }
 
   async function signIn() {
@@ -412,7 +443,24 @@
     !!lockupSrc && dark && !(brand.dark_logo_mode === 'variant' && brand.assets.lockup_dark)
   );
   let iconChip = $derived(!!brand.assets.icon && dark && brand.dark_logo_mode === 'chip');
-  let parentChip = $derived(!!brand.assets.parent && dark && brand.dark_logo_mode === 'chip');
+  // NOTE: there is deliberately no `parentChip` beside this. The parent mark's
+  // chip is white and unconditional at both call sites — see the comment on the
+  // pending screen's footer for why deriving it from `dark_logo_mode` produced
+  // an unreadable logo rather than a configurable one.
+
+  // Which sign-in the held account actually used, for the pending screen's badge.
+  // /auth/me returns `auth_sources` (LDAP and SSO both provision role=user,
+  // approved=false), so this needs no extra call. Stated ONLY when exactly one
+  // of the two external sources is present: identities merge by email here, so
+  // an account can carry both, and "Signed in with LDAP" on a session that came
+  // through Keycloak is a confident lie. Empty means the badge is not rendered.
+  let signedInWith = $derived.by(() => {
+    const src = me?.auth_sources || [];
+    const viaLdap = src.includes('ldap');
+    const viaSso = src.includes('oidc');
+    if (viaLdap === viaSso) return '';
+    return viaLdap ? 'LDAP' : ssoName;
+  });
 
   let menuOpen = $state(false);
 
@@ -780,26 +828,44 @@
             focus-within. The input keeps its own `id`/`for` pairing so a screen
             reader still announces the label — nesting alone is not enough for
             every AT.
+
+            `field-shell` (app.css) suppresses the inner input's own focus
+            outline, which the unlayered global focus rule would otherwise draw
+            INSIDE this border. No `field-shell-ring` here on purpose: the box
+            already signals focus with the accent border plus the ring-4 glow,
+            so a hard outline would add a third edge.
           -->
           <label
-            class="block rounded-card border border-line bg-surface px-[15px] py-2.5 transition-colors focus-within:border-accent focus-within:ring-4 focus-within:ring-accent/15"
+            class="field-shell block rounded-card border border-line bg-surface px-[15px] py-2.5 transition-colors focus-within:border-accent focus-within:ring-4 focus-within:ring-accent/15"
             for="email"
           >
-            <span class="block text-label font-semibold tracking-[0.03em] text-ink-3">Email</span>
+            <span class="block text-label font-semibold tracking-[0.03em] text-ink-3"
+              >{isLdap ? 'Username' : 'Email'}</span
+            >
+            <!--
+              One input, two costumes. The `id` stays `email` in BOTH modes so
+              the label's `for` pairing never breaks; only the visible text
+              changes. `type` follows the mode because an email input rejects a
+              bare username in some browsers' built-in validation, and
+              `autocomplete="username"` is already the right token for both.
+            -->
             <input
               id="email"
-              type="email"
+              type={isLdap ? 'text' : 'email'}
               autocomplete="username"
               bind:value={email}
               onkeydown={(e) => e.key === 'Enter' && signIn()}
-              placeholder="you@company.com"
+              placeholder={isLdap ? 'jsmith' : 'you@company.com'}
               class="w-full border-0 bg-transparent p-0 text-body text-ink placeholder:text-ink-3 focus:outline-none"
             />
           </label>
 
           <div class="relative mt-2.5">
+            <!-- Same shell pattern as the Email field above: `field-shell`
+                 suppresses the input's own outline, and no `field-shell-ring`
+                 because the accent border + glow already show focus. -->
             <label
-              class="block rounded-card border border-line bg-surface px-[15px] py-2.5 transition-colors focus-within:border-accent focus-within:ring-4 focus-within:ring-accent/15"
+              class="field-shell block rounded-card border border-line bg-surface px-[15px] py-2.5 transition-colors focus-within:border-accent focus-within:ring-4 focus-within:ring-accent/15"
               for="pw"
             >
               <span class="block text-label font-semibold tracking-[0.03em] text-ink-3">Password</span>
@@ -834,6 +900,17 @@
           {#if loginErr}
             <p role="alert" class="mt-3 rounded-card bg-danger-soft px-3.5 py-2.5 text-body-sm text-danger">
               {loginErr}
+              <!--
+                login_ldap() returns the same "invalid credentials" for a blank
+                password, a blank username and a rejected bind, so the server
+                text cannot tell someone what to change. The commonest cause by
+                far is typing the email address here, so say so.
+              -->
+              {#if isLdap}
+                <span class="mt-1 block text-meta text-ink-2"
+                  >Use your directory username (jsmith), not your email address.</span
+                >
+              {/if}
             </p>
           {/if}
 
@@ -845,7 +922,9 @@
               ? 'border border-line bg-surface text-ink hover:bg-surface-2'
               : 'bg-accent text-on-accent shadow-[var(--shadow-accent)] hover:bg-accent-hover'}"
           >
-            {#if signingIn}<Loader2 size={16} class="animate-spin" /> Signing in…{:else}Continue with email <ArrowRight size={16} />{/if}
+            {#if signingIn}<Loader2 size={16} class="animate-spin" /> Signing in…{:else if isLdap}<Building
+                size={16}
+              /> Sign in with LDAP{:else}Continue with email <ArrowRight size={16} />{/if}
           </button>
         {/snippet}
 
@@ -859,6 +938,27 @@
           >
             {@render ssoLogo(ssoType, 18)}
             Sign in with {ssoName}
+          </button>
+        {/snippet}
+
+        <!--
+          The mode switch. This replaced a static line of prose that told people
+          to "use your work email above" — true, but only if their directory
+          account happens to be keyed on their email. Directory accounts are
+          usually keyed on a bare username, which the old screen had no way to
+          ask for, so LDAP looked absent even when it was switched on.
+        -->
+        {#snippet ldapSwitch()}
+          <button
+            type="button"
+            onclick={() => setMode(isLdap ? 'email' : 'ldap')}
+            class="flex min-h-[48px] w-full items-center justify-center gap-2.5 rounded-card border border-line bg-page px-4 text-body font-semibold text-ink transition-colors hover:bg-surface-2"
+          >
+            {#if isLdap}
+              <Mail size={17} class="text-accent" /> Continue with Email
+            {:else}
+              <Building size={17} class="text-accent" /> Continue with LDAP
+            {/if}
           </button>
         {/snippet}
 
@@ -891,9 +991,7 @@
             <div id="pw-disclosure" class="mt-4" hidden={!pwOpen}>
               {@render passwordForm()}
               {#if ldapEnabled}
-                <p class="mt-3 flex items-center justify-center gap-1.5 rounded-card bg-surface px-4 py-2.5 text-meta text-ink-2">
-                  <Building size={13} class="text-accent" /> Directory (LDAP) sign-in is enabled — use your work email above.
-                </p>
+                <div class="mt-3">{@render ldapSwitch()}</div>
               {/if}
             </div>
           </div>
@@ -915,9 +1013,7 @@
                 {@render ssoBlock(false)}
               {/if}
               {#if ldapEnabled}
-                <p class="mt-2 flex items-center justify-center gap-1.5 rounded-card bg-page px-4 py-2.5 text-meta text-ink-2">
-                  <Building size={13} class="text-accent" /> Directory (LDAP) sign-in is enabled — use your work email above.
-                </p>
+                <div class={showSso ? 'mt-2' : ''}>{@render ldapSwitch()}</div>
               {/if}
             </div>
           {/if}
@@ -926,6 +1022,21 @@
         <p class="mt-6 flex items-center gap-1.5 text-meta text-ink-3">
           <Lock size={11} /> No self-signup — accounts are created by an administrator.
         </p>
+        <!--
+          This notice belongs BEFORE you sign in. It used to sit on the pending
+          screen, where it landed on somebody who had just authenticated
+          correctly and read as an accusation. Said here it is what it actually
+          is: the terms of the box you are about to enter. Kept deliberately
+          quiet — same `text-meta text-ink-3` as the line above — because a
+          warning styled louder than the sign-in button is the other failure.
+        -->
+        <p class="mt-2 flex items-start gap-1.5 text-meta leading-relaxed text-ink-3">
+          <ShieldCheck size={11} class="mt-[3px] flex-shrink-0" />
+          <span>
+            You are accessing a restricted {brand.parent_name} system. Activity is logged. Access to
+            pharmacy stock data is granted only to authorised staff.
+          </span>
+        </p>
       </div>
 
       <div class="flex items-center gap-2.5 text-meta text-ink-3">
@@ -933,7 +1044,7 @@
           <img
             src={brand.assets.parent}
             alt={brand.parent_name + ' logo'}
-            class="h-5 w-auto flex-shrink-0 object-contain {parentChip ? 'rounded-control bg-surface p-0.5' : ''}"
+            class="block h-6 w-auto flex-none rounded-xs bg-white px-1.5 py-0.5 object-contain"
           />
         {/if}
         <span>{brand.legal_footer}</span>
@@ -1037,18 +1148,63 @@
     </div>
   </div>
 {:else if meLoaded && me && !me.approved}
-  <!-- Authenticated, but access is held until an admin approves this account. -->
+  <!--
+    Authenticated, but access is held until an admin approves this account.
+
+    This screen is read by someone who just signed in CORRECTLY, so it opens by
+    thanking them, not by warning them. The restricted-system notice that used
+    to lead here now sits on the sign-in screen, where it is a condition of
+    entry rather than a rebuke after the fact.
+  -->
   <div class="flex min-h-screen items-center justify-center bg-page px-4">
     <div class="elev w-[440px] max-w-[94vw] rounded-panel border border-line bg-surface p-9 text-center">
-      <span
-        class="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-full bg-accent-soft text-accent"
-      >
-        <ShieldCheck size={28} />
-      </span>
-      <div class="page-title text-title text-ink">{brand.pending_title}</div>
+      <!--
+        The brand mark, resolved the same way the sign-in screen resolves it:
+        the uploaded square icon when there is one, the built-in shield when
+        there is not. An install that has never uploaded a logo must render the
+        shield, never a broken <img> — `assets.icon` is '' in that case, and
+        `brandAsset` also returns '' for a cross-origin URL.
+
+        The dark-mode chip is `bg-surface-2`, not the sign-in screen's
+        `bg-surface`: this card IS `bg-surface`, so that value would draw a chip
+        the same colour as the thing behind it. Same mechanism, one step up.
+      -->
+      {#if brand.assets.icon}
+        <span
+          class="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-card {iconChip
+            ? 'bg-surface-2'
+            : ''}"
+        >
+          <!-- decorative: the product name is in the headline below -->
+          <img src={brand.assets.icon} alt="" class="h-12 w-12 object-contain" />
+        </span>
+      {:else}
+        <span
+          class="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-full bg-accent-soft text-accent"
+        >
+          <ShieldCheck size={28} />
+        </span>
+      {/if}
+
+      <!-- Omitted entirely when the source is unknown or ambiguous — see
+           `signedInWith`. A guessed sign-in method is worse than no badge. -->
+      {#if signedInWith}
+        <div
+          class="mb-3 inline-flex items-center gap-1.5 rounded-full border border-line bg-surface-2 px-2.5 py-1 text-label text-ink-2"
+        >
+          <KeyRound size={11} /> Signed in with {signedInWith}
+        </div>
+      {/if}
+
+      <!-- An empty `pending_title` means "use the generated headline", so a
+           rename of the product carries here without an operator editing a
+           second field. A configured title wins, because a deployment that
+           typed one meant it. -->
+      <div class="page-title text-title text-ink">
+        {brand.pending_title || `Thanks for signing in to ${brand.product_name}`}
+      </div>
       <p class="mx-auto mt-3 max-w-[340px] text-body-sm leading-relaxed text-ink-2">
-        You are accessing a restricted {brand.parent_name} system. Activity is logged. Access to
-        pharmacy stock data is granted only to authorised staff.
+        An administrator will review your login request. You do not need to do anything else here.
       </p>
 
       <div class="mt-6 rounded-card border border-line bg-page px-4 py-3.5 text-left">
@@ -1060,19 +1216,22 @@
             <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-warning opacity-70"></span>
             <span class="relative inline-flex h-2 w-2 rounded-full bg-warning"></span>
           </span>
-          Awaiting administrator approval
+          Waiting for approval
         </div>
         <!--
-          Do not claim anything was sent. There is no notification path in this
-          system — no email, no webhook, no alert. The only true statements are
-          that the account is pending, that a human admin must approve it on the
-          Users page, and that this screen re-checks /auth/me every 5s.
+          The headline above may thank them and say an administrator will review
+          it. This paragraph may NOT claim anything was sent. There is no
+          notification path in this system — no email, no webhook, no alert — so
+          an admin who is not told stays untold. The only true statements are
+          that the account is pending, that the person must ask an administrator
+          themselves, that a human approves it on People & access, and that this
+          screen re-checks /auth/me every 5s and lets itself in.
         -->
-        <p class="mt-1.5 text-meta text-ink-3">
-          Signed in as <span class="text-ink-2">{me.email}</span>. Your account is pending — an
-          administrator has to approve it on the Users page before the console opens. Nobody is
-          alerted automatically, so ask an administrator directly. This screen re-checks every few
-          seconds and unlocks itself the moment your access is approved — you do not need to sign
+        <p class="mt-1.5 text-meta leading-relaxed text-ink-3">
+          Signed in as <span class="text-ink-2">{me.email}</span>. Nobody is alerted automatically,
+          so tell an administrator directly — they approve accounts on
+          <span class="text-ink-2">People &amp; access</span>. This screen re-checks every few
+          seconds and unlocks itself the moment your access is approved; you will not have to sign
           in again.
         </p>
       </div>
@@ -1081,12 +1240,43 @@
         <Loader2 size={14} class="animate-spin" /> Checking for approval…
       </div>
 
+      <!-- The only control on the screen, so it has to be obviously reachable:
+           `rounded-control` gives the global :focus-visible outline something to
+           trace. Do not reach for `outline-none` here — app.css is unlayered and
+           wins over the utility anyway (see the note at the top of that file). -->
       <button
         onclick={signOut}
-        class="mt-6 inline-flex items-center gap-1.5 text-body-sm font-medium text-ink-2 hover:text-ink"
+        class="mt-6 inline-flex items-center gap-1.5 rounded-control px-2 py-1 text-body-sm font-medium text-ink-2 hover:text-ink"
       >
         <LogOut size={14} /> Sign out
       </button>
+
+      <!--
+        Who built it, and who operates it.
+
+        The chip is WHITE and unconditional, copied from the sign-in footer
+        rather than derived. Two things were wrong with the obvious version:
+        `bg-surface-2` is #1D2043 on the dark theme, so the "chip" came out
+        darker than the card and the purple half of the CMHL artwork vanished
+        into it; and gating on `dark_logo_mode === 'chip'` reads as respecting
+        the setting while actually making the mark unreadable whenever an
+        install has it set to anything else. The artwork is ink-on-white with
+        the company name set inside it — it needs white behind it and enough
+        height for that name to resolve as words. Measured at h-5: illegible.
+
+        With no parent asset uploaded the line stands alone rather than
+        reserving space for nothing.
+      -->
+      <div class="mt-7 flex items-center justify-center gap-2.5 border-t border-line pt-4 text-meta text-ink-3">
+        {#if brand.assets.parent}
+          <img
+            src={brand.assets.parent}
+            alt={brand.parent_name + ' logo'}
+            class="block h-6 w-auto flex-none rounded-xs bg-white px-1.5 py-0.5 object-contain"
+          />
+        {/if}
+        <span>Powered by City AI</span>
+      </div>
     </div>
   </div>
 {:else}
@@ -1316,9 +1506,12 @@
 
         <div class="relative hidden min-w-[150px] max-w-[280px] flex-[1_1_auto] md:block">
                 <!-- `field-shell`: this container owns the focus ring, because
-                     the input inside it is borderless. See app.css. -->
+                     the input inside it is borderless. See app.css.
+                     `field-shell-ring` too: unlike the sign-in fields this box's
+                     only focus signal is a 1px border, so app.css draws the 2px
+                     ring on the box while suppressing the input's own. -->
                 <div
-                  class="field-shell flex w-full items-center gap-2 rounded-card border border-line bg-surface px-2.5 py-[7px]
+                  class="field-shell field-shell-ring flex w-full items-center gap-2 rounded-card border border-line bg-surface px-2.5 py-[7px]
                     focus-within:border-accent"
                 >
                   <Search size={15} class="flex-none text-ink-3" />

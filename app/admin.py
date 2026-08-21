@@ -7380,8 +7380,17 @@ def _outlet_user(store_id: str) -> Dict[str, str]:
     return {"id": f"outlet:{store_id}", "store_id": store_id}
 
 
-def _snippet_html(req: "OutletSnippetRequest", signature: str) -> str:
-    """The <script> tag a customer dev pastes onto their site."""
+def _snippet_html(req: "OutletSnippetRequest", signature: str, *, auto_open: bool = False) -> str:
+    """The <script> tag a customer dev pastes onto their site.
+
+    ``auto_open`` is a PREVIEW-ONLY escape hatch and must stay default-off: the
+    snippet customers copy, download and already have in live HTML is defined by
+    the ``False`` branch, and it must keep producing the same bytes it always
+    has. It is a keyword argument rather than a field on
+    ``OutletSnippetRequest`` for the same reason — the request model is what the
+    admin UI posts, and nothing a customer can send should be able to make their
+    own embed open itself on every page load.
+    """
 
     import html as _html
 
@@ -7397,28 +7406,109 @@ def _snippet_html(req: "OutletSnippetRequest", signature: str) -> str:
         f'data-title="{_html.escape(title)}"',
         f'data-accent="{_html.escape(req.accent or "#2F3293")}"',
         f'data-stream="{"true" if req.stream else "false"}"',
-        "async",
     ]
+    if auto_open:
+        # widget.js: data-open="true" starts the panel OPEN; absent (the
+        # customer snippet) keeps today's closed-launcher behaviour.
+        attrs.append('data-open="true"')
+    attrs.append("async")
     return "<script " + "\n        ".join(attrs) + "></script>"
 
 
-def _demo_page(req: "OutletSnippetRequest", snippet: str) -> str:
-    """A complete standalone page that already works — open it, ask a question."""
+def _demo_page(req: "OutletSnippetRequest", snippet: str, *, auto_open: bool = False) -> str:
+    """A complete standalone page that already works — open it, ask a question.
+
+    ``auto_open`` defaults OFF, and the default is the safety property: this
+    function's output reaches CUSTOMERS in two places — ``demo_html`` in the
+    ``/embed/snippet`` response and ``index.html`` in the outlet ZIP — and a
+    widget that opens itself on every page load of a pharmacy's own site is a
+    product defect. Defaulting on would make that the outcome of forgetting an
+    argument. Only ``GET /embed/preview`` asks for it, explicitly, because that
+    page exists to SHOW the widget: rendered inside the console, a closed 58px
+    launcher in the far bottom-right is often below the fold, so the one thing
+    the reader came to try is the one thing they cannot see, and the panel reads
+    as a page that failed to load.
+
+    Note that when ``auto_open`` is set the ``snippet`` argument is REBUILT and
+    the passed value discarded — pass a customised snippet with ``auto_open`` and
+    the customisation is lost.
+
+    Everything here is inline: the page must render standalone and offline, off
+    a saved file, with no CSS, font, image or script fetched from anywhere.
+    """
 
     import html as _html
+
+    if auto_open:
+        # Preview-only. Rebuilt rather than string-patched so the tag comes from
+        # the one function that knows the attribute list; the signature is
+        # deterministic per store, so this is the same HMAC lock the caller
+        # baked in — the store scope is unchanged.
+        from app.security import sign_user
+
+        snippet = _snippet_html(req, sign_user(_outlet_user(req.store_id)), auto_open=True)
+
+    store = _html.escape(req.store_id)
+    title = _html.escape(req.title or ("Pharmacy · " + req.store_id))
+    accent = _html.escape(req.accent or "#2F3293")
 
     return (
         "<!doctype html>\n<html lang=\"en\">\n<head>\n"
         "<meta charset=\"utf-8\">\n"
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-        f"<title>{_html.escape(req.title or ('Pharmacy · ' + req.store_id))}</title>\n"
-        "<style>body{font:16px/1.6 system-ui,sans-serif;max-width:720px;margin:48px auto;padding:0 20px;color:#111}"
-        "code{background:#f4f4f5;padding:2px 6px;border-radius:5px}</style>\n"
+        f"<title>{title}</title>\n"
+        # EVERY content rule is scoped under `.demo`. The widget injects its
+        # launcher and panel into this same document.body, so a bare `li`,
+        # `ul` or `p` selector here repaints the ASSISTANT'S OWN ANSWERS. That
+        # is not hypothetical: an unscoped
+        #     ul{list-style:none;display:flex} li{...;font-family:ui-monospace}
+        # turned a five-item answer into a row of grey monospace pills inside
+        # the chat panel. The markdown was correct the whole time; this page
+        # was painting over it. Do not reintroduce a bare element selector.
+        "<style>\n"
+        "*{box-sizing:border-box}\n"
+        "body{font:15px/1.55 system-ui,-apple-system,Segoe UI,sans-serif;margin:0;"
+        "color:#18181b;background:#f6f7f9}\n"
+        f".demo header{{background:#fff;border-bottom:1px solid #e5e7eb;border-top:3px solid {accent}}}\n"
+        ".demo .bar{max-width:640px;margin:0 auto;padding:10px 20px;display:flex;"
+        "align-items:baseline;gap:10px;flex-wrap:wrap}\n"
+        ".demo .bar b{font-size:15px;letter-spacing:.2px}\n"
+        ".demo .bar span{font-size:12px;color:#71717a}\n"
+        ".demo main{max-width:640px;margin:0 auto;padding:20px}\n"
+        ".demo .card{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:18px 20px}\n"
+        ".demo h1{font-size:19px;line-height:1.3;margin:0 0 8px}\n"
+        ".demo p{margin:0 0 10px;color:#3f3f46}\n"
+        ".demo ul{margin:0;padding:0;list-style:none;display:flex;flex-wrap:wrap;gap:8px}\n"
+        ".demo li{background:#f4f4f5;border:1px solid #e5e7eb;border-radius:999px;"
+        "padding:4px 11px;font-size:13px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}\n"
+        ".demo .lbl{font-size:12px;text-transform:uppercase;letter-spacing:.6px;color:#71717a;"
+        "margin:14px 0 7px}\n"
+        f".demo .note{{margin:14px 0 0;font-size:13px;color:#52525b;border-left:2px solid {accent};"
+        "padding-left:10px}\n"
+        ".demo footer{max-width:640px;margin:0 auto;padding:0 20px 24px;font-size:12px;color:#a1a1aa}\n"
+        "</style>\n"
         "</head>\n<body>\n"
-        f"<h1>Store {_html.escape(req.store_id)} — stock assistant</h1>\n"
-        "<p>Ask about a product (e.g. <code>do you have ROYAL-D 25G</code>) or where else "
-        "to find it (<code>which other stores have ROYAL-D 25G</code>). The widget is "
-        "locked to this store.</p>\n"
+        # The wrapper the CSS above is scoped to. The widget's own nodes are
+        # siblings of this div, so nothing in here can reach them.
+        "<div class=\"demo\">\n"
+        f"<header><div class=\"bar\"><b>Store {store}</b>"
+        "<span>Pharmacy · example customer site</span></div></header>\n"
+        "<main><div class=\"card\">\n"
+        # The product's own name, not a second one invented here. `title` is
+        # already resolved above (req.title, or the per-store default), so a
+        # rename reaches this heading the same way it reaches the panel.
+        f"<h1>{title} — store {store}</h1>\n"
+        "<p>Ask what is on the shelf here, or where else to find it. The assistant "
+        "is locked to this store and answers for no other branch.</p>\n"
+        "<div class=\"lbl\">Try asking</div>\n"
+        "<ul><li>do you have ROYAL-D 25G</li>"
+        "<li>which other stores have ROYAL-D 25G</li></ul>\n"
+        "<p class=\"note\">The chat panel below is the embedded widget — on a live "
+        "site it sits in the corner behind a launcher button.</p>\n"
+        "</div></main>\n"
+        "<footer>This page is a demonstration of the embed. Everything above the "
+        "widget is the customer&rsquo;s own site.</footer>\n"
+        "</div>\n"
         "<!-- CityAgent pharmacy embed — paste this <script> on your own site -->\n"
         f"{snippet}\n"
         "</body>\n</html>\n"
@@ -7565,7 +7655,8 @@ async def embed_snippet(req: OutletSnippetRequest) -> Dict:
         "user": user,
         "signature": signature,
         "snippet": snippet,
-        "demo_html": _demo_page(req, snippet),
+        # Customer-facing HTML: the <script> in it must match snippet exactly.
+        "demo_html": _demo_page(req, snippet, auto_open=False),
     }
 
 
@@ -7627,7 +7718,8 @@ async def embed_snippets_zip(req: OutletSnippetRequest = Body(...)) -> Any:
             sig = sign_user(_outlet_user(code))
             snip = _snippet_html(one, sig)
             folder = f"outlet-{code}"
-            zf.writestr(f"{folder}/index.html", _demo_page(one, snip))
+            # Ships next to snippet.txt in the customer's folder — same tag.
+            zf.writestr(f"{folder}/index.html", _demo_page(one, snip, auto_open=False))
             zf.writestr(f"{folder}/snippet.txt", snip + "\n")
             zf.writestr(f"{folder}/README.txt", _outlet_readme(one))
     buf.seek(0)
@@ -8705,6 +8797,1496 @@ async def sftp_keys_add(k: SftpKey) -> Dict:
         "type": parsed["type"],
         "fingerprint": parsed["fingerprint"],
         "active": "immediately",
+    }
+
+
+# ---- generating the keypair for the partner --------------------------------
+#
+# Why this exists next to the paste-a-public-key path above, and why it is
+# STRICTLY THE WEAKER OF THE TWO.
+#
+# In the manual flow the partner runs `ssh-keygen` on their own machine and
+# sends us the `.pub` half. The private key never exists anywhere but their
+# disk — not on our server, not in an email, not in a support chat. That is the
+# property that makes SSH key auth better than the shared password it replaces,
+# and nothing below improves on it.
+#
+# In THIS flow the private key is generated on our server and then has to travel
+# to the partner. However carefully it is handled, for the length of that trip
+# it exists in a second place and passes through whatever channel the operator
+# picks. It is a real, permanent downgrade in the trust model.
+#
+# It exists anyway because the manual flow has an adoption cost we measured in
+# the field: partners who cannot get a keypair generated do not fall back to
+# doing it properly, they fall back to asking for the password. A generated key
+# that is scoped to one label and revocable in one click beats a shared
+# password. That is the comparison this endpoint wins — not the comparison
+# against the manual path, which it loses.
+#
+# Prefer POST /admin/sftp/keys. Reach for this one when the partner cannot.
+
+
+class SftpKeyGenerate(BaseModel):
+    label: str
+
+
+def _generated_keypair() -> Tuple[str, str]:
+    """A fresh Ed25519 keypair as ``(openssh_private_pem, openssh_public_line)``.
+
+    Ed25519 rather than RSA: fixed small size, no key-size parameter for an
+    operator to get wrong, and accepted by `ssh-ed25519` in SFTP_KEY_TYPES
+    above, so the public half goes through the SAME `_parse_public_key`
+    validation as a pasted one rather than around it.
+
+    ⚠️ The private half is returned as a plain string and is never given a name
+    outside the request that asked for it. It is NEVER written to disk, NEVER
+    logged, NEVER stored in the database, and NEVER returned by any other
+    endpoint. Nothing in this function touches a file, a logger or a pool.
+    """
+
+    # Imported here rather than at module scope: `cryptography` is only needed
+    # by this one route, and a missing wheel should fail this endpoint, not
+    # every import of the admin router.
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    key = Ed25519PrivateKey.generate()
+    private_pem = key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.OpenSSH,
+        serialization.NoEncryption(),
+    ).decode()
+    public_line = (
+        key.public_key()
+        .public_bytes(serialization.Encoding.OpenSSH, serialization.PublicFormat.OpenSSH)
+        .decode()
+    )
+    return private_pem, public_line
+
+
+async def _script_for_response(
+    request: Request, label: str, fingerprint: str, private_pem: Optional[str]
+) -> Tuple[Optional[str], Optional[str]]:
+    """`(script, reason_it_could_not_be_built)` — exactly one of the two is set.
+
+    Used by the two endpoints that hold key material, and it must never be able
+    to fail them. Registering a key is the thing the caller asked for and it has
+    already happened by the time we get here; turning an unusable *address* into
+    a 500 would throw away a private half for a key that is live in
+    `authorized_keys` — the exact failure `sftp_keys_generate` orders its steps
+    to avoid.
+
+    So the address guard still runs, in full, through `_pack_address` — same
+    resolver, same refusals as the pack — but its 400 is caught and returned as
+    a REASON next to a null script rather than raised. The caller still gets
+    every field it got before; it just does not get a script that would point a
+    partner at `localhost` every night for a year.
+    """
+
+    try:
+        addr = _pack_address(await sftp_connection(request))
+    except HTTPException as exc:      # 400 only: the address cannot be shipped
+        return None, str(exc.detail)
+
+    return (
+        _partner_script(
+            addr, label, fingerprint, private_pem, await cache.get_ingest_enabled()
+        ),
+        None,
+    )
+
+
+@router.post("/sftp/keys/generate", dependencies=[Depends(require_super_admin)])
+async def sftp_keys_generate(k: SftpKeyGenerate, request: Request) -> Dict:
+    """Generate a keypair for a partner, register the public half, return the private half ONCE.
+
+    Everything about registration — the label charset rule, the public key
+    parse, the duplicate-label and duplicate-fingerprint checks, the key limit,
+    the 503 when the keys directory is not mounted, the single lock around the
+    read-modify-write, and the atomic rewrite of BOTH `authorized_keys` and
+    `keys/<label>.pub` — is `sftp_keys_add` above, called directly. This route
+    adds exactly one thing to that path: it makes the key material instead of
+    being handed it.
+
+    ⚠️ **Order is load-bearing.** Generate, then register, and only then build
+    the response. If registration raises — duplicate label, key limit, missing
+    mount — the caller gets that error and NO private key, because a private key
+    for a key that was never installed is a secret in circulation that buys
+    nobody anything. The generated key is simply dropped on the floor.
+    """
+
+    # 1. Generate. Nothing is persisted yet, so a failure here changes nothing.
+    private_pem, public_line = _generated_keypair()
+
+    # 2. Register the PUBLIC half through the manual path, unchanged. Any
+    #    HTTPException it raises (400 bad label, 409 duplicate, 503 not mounted)
+    #    propagates to the caller as-is and we never reach step 3.
+    registered = await sftp_keys_add(SftpKey(label=k.label, public_key=public_line))
+
+    # The exact line that was written to authorized_keys and keys/<label>.pub —
+    # built the same way the writer built it, so what we hand the partner and
+    # what sshd will read cannot drift.
+    public_key = _canonical_line(
+        registered["type"], public_line.split()[1], registered["label"]
+    )
+
+    # 3. Audit. THAT a key was generated, for WHICH label, with the fingerprint
+    #    — all three are public facts and are exactly what a reviewer needs. The
+    #    private key is not passed here and must never be: `record_event`
+    #    redacts by key NAME, which is a second line of defence, not a licence
+    #    to hand it a secret.
+    #
+    #    Recorded explicitly because `activity._ROUTES` has no entry for this
+    #    path, so the `activity_audit` middleware records route + status with an
+    #    empty `detail` and the label would be lost. (The one-line fix on the
+    #    other side is an entry `("POST", r"^/admin/sftp/keys/generate$",
+    #    ("keys", ("label",)))`; until then this row is the one carrying the
+    #    label, and the middleware's is a bare companion under the same action.)
+    from app import activity
+    from app import auth as authmod
+
+    actor_email, actor_role = None, None
+    try:
+        header = request.headers.get("authorization") or ""
+        if header.lower().startswith("bearer "):
+            claims = authmod.decode_token(header.split(" ", 1)[1])
+            actor_email, actor_role = claims.get("email"), claims.get("role")
+    except Exception:  # noqa: BLE001 — an unreadable token is an anonymous actor
+        pass
+
+    await activity.record_event(
+        activity.action_for("POST", "/admin/sftp/keys/generate"),
+        actor_email=actor_email,
+        actor_role=actor_role,
+        target=registered["label"],
+        method="POST",
+        path="/admin/sftp/keys/generate",
+        status=200,
+        detail={"label": registered["label"], "fingerprint": registered["fingerprint"]},
+    )
+
+    # 4. The one and only time the private key leaves this process.
+    #
+    #    ⚠️ Nothing captures this response body. Verified rather than assumed:
+    #    the app has three HTTP middlewares (`app/api.py`) and none reads a
+    #    response body. `observability` logs method/path/status/latency only;
+    #    `activity_audit` reads the REQUEST body — bounded to allowlisted JSON
+    #    routes — and writes `detail=summarize_body(...)`, never the response;
+    #    `spa_deep_link` only diverts GET/HEAD document navigations. The request
+    #    body it may read here is `{"label": …}`, which holds no secret. There
+    #    is no access log that records bodies and no response-body capture
+    #    anywhere in the app, so this route needs no opt-out.
+    #
+    #    It is also why `private_key` is assembled here and not stored on
+    #    `registered`: the dict returned by `sftp_keys_add` is the shape the
+    #    list/add endpoints already return, and it stays free of key material.
+    #    `script` is built LAST, from the values that are already public plus
+    #    the private half, and only after the key is registered — so it can
+    #    never be handed over for a key that was not installed. It is a second
+    #    rendering of the same secret and is subject to every rule above: never
+    #    logged, never stored, never audited. The audit row written in step 3
+    #    carries label + fingerprint and nothing else.
+    script, script_unavailable = await _script_for_response(
+        request, registered["label"], registered["fingerprint"], private_pem
+    )
+
+    return {
+        "label": registered["label"],
+        "fingerprint": registered["fingerprint"],
+        "public_key": public_key,
+        # Shown once, by the console, and then gone. We keep no copy.
+        "private_key": private_pem,
+        # One ready-to-run .sh with the key already in it. `None` (with a reason
+        # beside it) when the SFTP address is not fit to ship — see
+        # `_script_for_response`. Everything above is unchanged either way.
+        "script": script,
+        "script_unavailable": script_unavailable,
+    }
+
+
+@router.post("/sftp/keys/{label}/regenerate", dependencies=[Depends(require_super_admin)])
+async def sftp_keys_regenerate(label: str, request: Request) -> Dict:
+    """Replace an existing partner's key in place: same row, same label, new credential.
+
+    Why this exists rather than revoke-then-add. The registry answers one
+    question an auditor actually asks — "who could send us files, and when?" —
+    and it answers it by label. Deleting `Rahul` and adding `Rahul` back drops
+    that row and re-creates it, so the timeline reads as a partner who left and
+    a different partner who arrived, and `added_at` on the new row says nothing
+    about when this partner was first trusted. Rotating in place keeps the name,
+    keeps its place in the audit trail, and records the rotation as one event
+    carrying both fingerprints — the one it replaced and the one that replaced
+    it.
+
+    ⚠️ **The old key stops working immediately.** sshd re-reads
+    `authorized_keys` on every connection, so the moment this returns, the
+    partner's current private key is refused and they are cut off until they
+    install the one in this response. That is the point of a rotation, but it
+    means this is not a background maintenance action: do it when somebody on
+    the partner's side is ready to receive the new key.
+
+    Everything in the long note above `SftpKeyGenerate` applies here too — the
+    private half is generated on our server and has to travel, which is a real
+    downgrade against a partner-generated keypair. It is returned exactly once
+    and never written, logged or stored.
+    """
+
+    # ---- validate, in the order that keeps a failure harmless ---------------
+    #
+    # Same rule as `sftp_keys_generate`: nothing is generated and nothing is
+    # written until every check that can refuse has refused. A 400 or a 404 here
+    # leaves the partner's existing key exactly where it was.
+    label = _clean_label(label)
+
+    # The mount check physically has to precede the existence check — "is a key
+    # registered under this label?" is a read of `keys/` and there is no `keys/`
+    # to read when the volume is not mounted. A 503 here is therefore "I cannot
+    # tell you", not "no such key", which is why it must not be softened into a
+    # 404.
+    root = _keys_root()
+
+    async with _sftp_keys_lock:
+        pub = root / "keys" / f"{label}.pub"
+        if not pub.is_file():
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"no key labelled '{label}' is registered, so there is nothing to "
+                    "rotate. Register one with POST /admin/sftp/keys (or /generate)."
+                ),
+            )
+
+        try:
+            previous = _parse_public_key(pub.read_text(encoding="utf-8").strip())
+        except (HTTPException, OSError):
+            # A file under this label that we did not write. Refusing is not
+            # pedantry: the swap below removes the old line by matching its key
+            # MATERIAL, and a file we cannot parse yields no material to match.
+            # Rotating anyway would leave a line we could not identify still in
+            # authorized_keys — a rotation that revokes nothing while reporting
+            # success. Revoke and re-add instead, where the operator sees it.
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"the file registered as '{label}' is not a public key this console "
+                    "wrote, so its old line cannot be identified and removed. Revoke it "
+                    f"(DELETE /admin/sftp/keys/{label}) and register a new key instead."
+                ),
+            )
+
+        # ---- generate ------------------------------------------------------
+        # Still nothing on disk has changed; a failure here (a missing
+        # `cryptography` wheel) leaves the old key live.
+        private_pem, public_line = _generated_keypair()
+        parsed = _parse_public_key(public_line)      # same validation as a pasted key
+        line = _canonical_line(parsed["type"], parsed["b64"], label)
+
+        # ---- swap ----------------------------------------------------------
+        #
+        # ⚠️ Written out longhand rather than as `sftp_keys_delete` then
+        # `sftp_keys_add`. Those are two rewrites of authorized_keys with a
+        # window between them in which the file contains neither this partner's
+        # old key nor their new one — and if the second write fails, that window
+        # never closes. sshd reads the file on EVERY connection, so during that
+        # window this partner cannot connect at all. The read-modify-write below
+        # is one pass: drop the old line, append the new one, and hand the whole
+        # result to a single `_atomic_write`, whose rename is atomic. A partner
+        # connecting mid-swap reads either the complete old file or the complete
+        # new one.
+        #
+        # `keys/<label>.pub` is written FIRST, and deliberately: it is the
+        # durable registry (atmoz/sftp rebuilds authorized_keys from it at boot)
+        # while authorized_keys is the live copy. If the .pub write fails we
+        # raise before touching authorized_keys and the old key keeps working,
+        # live and after a restart. If the .pub write succeeds and the
+        # authorized_keys write fails, the old key is STILL live — sshd is
+        # reading the untouched authorized_keys — and the caller gets a 500 with
+        # no private key, so nobody is holding a credential for a key that was
+        # not installed. Neither order is transactional across two files; this
+        # one fails towards the partner keeping access. Re-running the rotation
+        # is the fix (note that on that retry `previous_fingerprint` reports the
+        # half-written key, since that is what is on disk).
+        (root / "keys").mkdir(parents=True, exist_ok=True)
+        _atomic_write(root / "keys" / f"{label}.pub", line + "\n", 0o644)
+
+        ak = root / "authorized_keys"
+        try:
+            current = ak.read_text(encoding="utf-8") if ak.exists() else ""
+        except OSError:
+            current = ""
+
+        kept: List[str] = []
+        for ln in current.splitlines():
+            if not ln.strip():
+                continue
+            parts = ln.split()
+            # Match on the key material first — that is what sshd actually
+            # authenticates against — then on our own comment, which catches a
+            # line we wrote whose blob has since been edited by hand. Same pair
+            # of tests `sftp_keys_delete` uses, for the same reason: miss one
+            # and the old key survives the rotation and still opens the door.
+            if len(parts) >= 2 and parts[1] == previous["b64"]:
+                continue
+            if len(parts) >= 3 and parts[2] == f"pharma:{label}":
+                continue
+            kept.append(ln)          # anything an operator added by hand stays
+        kept.append(line)
+
+        # ONE write. Old line gone and new line present in the same rename.
+        _atomic_write(ak, "\n".join(kept) + "\n", 0o600)
+
+    # ---- audit -------------------------------------------------------------
+    #
+    # Label, new fingerprint, previous fingerprint. All three are public facts
+    # and together they are the whole story a reviewer needs: this partner's
+    # access moved from that key to this one, at this time, by this actor. The
+    # private key is not passed here and must never be.
+    #
+    # Recorded explicitly for the same reason `sftp_keys_generate` does it:
+    # `activity._ROUTES` has no entry for this path, so the `activity_audit`
+    # middleware would record route + status with an empty `detail` and both
+    # fingerprints would be lost. `target=label` is passed to `action_for` so
+    # the slug collapses to one filterable action instead of one per partner.
+    from app import activity
+    from app import auth as authmod
+
+    actor_email, actor_role = None, None
+    try:
+        header = request.headers.get("authorization") or ""
+        if header.lower().startswith("bearer "):
+            claims = authmod.decode_token(header.split(" ", 1)[1])
+            actor_email, actor_role = claims.get("email"), claims.get("role")
+    except Exception:  # noqa: BLE001 — an unreadable token is an anonymous actor
+        pass
+
+    path = f"/admin/sftp/keys/{label}/regenerate"
+    await activity.record_event(
+        activity.action_for("POST", path, target=label),
+        actor_email=actor_email,
+        actor_role=actor_role,
+        target=label,
+        method="POST",
+        path=path,
+        status=200,
+        detail={
+            "label": label,
+            "fingerprint": parsed["fingerprint"],
+            "previous_fingerprint": previous["fingerprint"],
+        },
+    )
+
+    # The one and only time this private key leaves the process. See the note in
+    # `sftp_keys_generate` step 4 for why no middleware captures this body.
+    # Built after the swap and after the audit, from a key that is already live
+    # in authorized_keys. Same rules as the private half it embeds: never
+    # logged, never stored, never passed to `record_event`.
+    script, script_unavailable = await _script_for_response(
+        request, label, parsed["fingerprint"], private_pem
+    )
+
+    return {
+        "label": label,
+        "fingerprint": parsed["fingerprint"],
+        "previous_fingerprint": previous["fingerprint"],
+        "public_key": line,
+        # Shown once, by the console, and then gone. We keep no copy.
+        "private_key": private_pem,
+        # The replacement script, key included — this is what the partner has to
+        # install for their old one to stop mattering. `None` with a reason when
+        # the address is not fit to ship; see `_script_for_response`.
+        "script": script,
+        "script_unavailable": script_unavailable,
+    }
+
+
+# ---- the partner pack (a ZIP the partner can unzip and run) -----------------
+#
+# The console can already show an operator every value a partner needs, and the
+# operator then retypes them into an email. That email is where the mistakes
+# live: a port dropped, a folder invented, `chmod 600` left out, and — the one
+# that costs a week — the address copied from a screen that was only ever a
+# GUESS about how the outside world reaches this box.
+#
+# So the pack is generated, not written, and it refuses to exist when the values
+# in it would be wrong. A ZIP is worse than a copied command here: it looks
+# authoritative, it gets saved next to the partner's other credentials, and it
+# gets opened again in eight months by somebody who was not on the call.
+#
+# TWO MODES, and the default is the one that carries no secret.
+#
+#   include_private_key=false  Documentation with the real values in it. The
+#                             partner runs ssh-keygen themselves and sends the
+#                             public half back, so the private key never exists
+#                             anywhere but their disk. Nothing is created
+#                             server-side. Safe to email.
+#   include_private_key=true   We generate the keypair (through
+#                             `sftp_keys_generate`, unchanged) and ship the
+#                             private half inside the archive. The archive IS
+#                             the credential from that moment on. See the long
+#                             note above `SftpKeyGenerate` for why this mode is
+#                             strictly the weaker of the two.
+
+
+class SftpPartnerPack(BaseModel):
+    """What to build the pack for. `label` is the same label the key registry uses."""
+
+    label: str
+    include_private_key: bool = False
+
+
+# Addresses that are real hostnames as far as any parser is concerned and are
+# useless — or actively misleading — in a file that leaves this building. A pack
+# full of commands pointing at the reader's own laptop must not be downloadable.
+_PACK_BAD_HOSTS = frozenset({"localhost", "0.0.0.0", "::", "::1", "[::1]", "0:0:0:0:0:0:0:1"})
+
+
+def _pack_address(conn: Dict) -> Dict:
+    """The connection values, or a 400 that says why they cannot be shipped.
+
+    Takes the dict `GET /sftp/connection` already returns, so the address in the
+    pack is resolved by exactly the code the console reads — there is no second
+    resolver here to drift from it. The password it carries is deliberately NOT
+    copied out: this pack is the key-auth flow and adding the shared secret to a
+    file that gets emailed would undo the point of it.
+
+    Refused, all with 400:
+
+    * no address at all;
+    * an address that only ever loops back to the machine reading it;
+    * ``host_source != "env"`` — i.e. the value was DETECTED from the admin
+      request's Host header rather than saved in ``SFTP_PUBLIC_HOST``. The
+      console is allowed to show a detected host with a "confirm this" prompt
+      next to it. A file cannot carry that prompt, and by the time it is wrong
+      the partner has been failing to connect for a week.
+    """
+
+    host = (conn.get("host") or "").strip()
+    source = conn.get("host_source") or "none"
+
+    # `[::1]` and `::1` are the same address wearing different brackets.
+    bare = host.strip("[]").lower()
+
+    if not host:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "no SFTP address is configured, so a pack would contain commands "
+                "that connect to nothing. Set SFTP_PUBLIC_HOST to the hostname "
+                "partners reach this server on and try again."
+            ),
+        )
+    if bare in _PACK_BAD_HOSTS or bare.startswith("127.") or bare.endswith(".localhost"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"the configured SFTP address is '{host}', which only ever means "
+                "'the machine running this command'. A partner following the pack "
+                "would connect to their own laptop. Set SFTP_PUBLIC_HOST to the "
+                "public hostname of this server."
+            ),
+        )
+    if source != "env":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"the address '{host}' was DETECTED from this browser request, not "
+                "configured. It is a reasonable guess for the console to show, but "
+                "it can be flatly wrong behind a proxy and the SFTP port need not "
+                "be published on that name at all. A downloaded pack outlives the "
+                "guess, so set SFTP_PUBLIC_HOST to the confirmed hostname first."
+            ),
+        )
+
+    return {
+        "host": host,
+        "port": int(conn.get("port") or 22),
+        "username": conn.get("username") or "pharma",
+        "upload_path": (conn.get("upload_path") or "upload/").rstrip("/") or "upload",
+    }
+
+
+def _pack_write(zf: Any, name: str, text: str, mode: int) -> None:
+    """One entry, with a POSIX mode recorded in `external_attr`.
+
+    ⚠️ **Measured, not assumed: this does not survive most extractions.** Both
+    `zf.writestr(name, text)` and a `ZipInfo` carrying `0o600 << 16` extract as
+    0644 under Python's own `extractall` and under most GUI unzippers. The bits
+    are set anyway for the tools that do honour them, but nothing in the pack is
+    allowed to DEPEND on them — which is why `chmod 600` is the first line of
+    setup.sh rather than a sentence in the README, and why every README says
+    `sh setup.sh` (which needs no executable bit) instead of `./setup.sh`.
+    """
+
+    import zipfile
+
+    info = zipfile.ZipInfo(name, date_time=time.localtime()[:6])
+    info.external_attr = (mode & 0xFFFF) << 16
+    info.compress_type = zipfile.ZIP_DEFLATED
+    zf.writestr(info, text)
+
+
+def _pack_filename_help() -> str:
+    """The ingest naming contract, derived from `filename_rules()` — never retyped.
+
+    A partner who sends `data.csv` has done everything right and still gets
+    nothing, because the watcher cannot tell what the file is. Deriving this
+    from the same helper the admin page uses means the pack cannot advertise a
+    name the watcher would drop into `failed/`.
+    """
+
+    rules = filename_rules()
+    lines = [
+        "FILE NAMES MATTER",
+        "  We work out what a file IS from its name. A name we cannot read is",
+        f"  moved to {rules['unmatched_dir']} and nothing is imported.",
+        "",
+        "    extension   " + ", ".join(rules["extensions"]),
+    ]
+    for kind in rules["kinds"]:
+        words = ", ".join(kind["keywords"])
+        if words:
+            lines.append(f"    {kind['kind']:<11} name must contain: {words}")
+    good = ", ".join(g["name"] for g in rules["good"])
+    bad = ", ".join(b["name"] for b in rules["bad"])
+    lines += ["", f"    good        {good}", f"    rejected    {bad}"]
+    return "\n".join(lines)
+
+
+def _pack_conn_block(addr: Dict) -> str:
+    """The four values, formatted identically in every README in every mode."""
+
+    return (
+        "YOUR CONNECTION\n"
+        f"  host       {addr['host']}\n"
+        f"  port       {addr['port']}\n"
+        f"  username   {addr['username']}\n"
+        f"  folder     {addr['upload_path']}/\n"
+        "  protocol   SFTP over SSH, public-key authentication (no password)\n"
+    )
+
+
+def _pack_send_sh(addr: Dict, key_rel: str, after_upload_line: str) -> str:
+    """`send.sh` — upload exactly one file. Identical in both modes.
+
+    ``after_upload_line`` is passed in rather than hardcoded because what
+    happens after an upload is a SETTING. See the caller.
+    """
+
+    return f"""#!/bin/sh
+# Upload one file to CityCare. Usage:  sh send.sh <file>
+#
+# POSIX sh on purpose: this has to run on whatever the partner has.
+set -e
+
+KEY="$(dirname "$0")/{key_rel}"
+
+if [ $# -ne 1 ]; then
+    echo "usage: sh send.sh <file>" >&2
+    echo "example: sh send.sh articles-export-2026-07-13.csv" >&2
+    exit 2
+fi
+
+FILE="$1"
+
+if [ ! -f "$FILE" ]; then
+    echo "no such file: $FILE" >&2
+    exit 1
+fi
+
+if [ ! -f "$KEY" ]; then
+    echo "private key not found at $KEY" >&2
+    echo "run 'sh setup.sh' first." >&2
+    exit 1
+fi
+
+# A ZIP cannot carry file permissions, so the key almost certainly extracted as
+# 0644 and ssh refuses to use it ("Permissions 0644 ... are too open"). Fix it
+# here as well as in setup.sh, so send.sh works even if setup.sh was skipped.
+chmod 600 "$KEY" 2>/dev/null || true
+
+echo "uploading $FILE to {addr['host']} ..."
+
+sftp -b - \\
+    -i "$KEY" \\
+    -o IdentitiesOnly=yes \\
+    -o StrictHostKeyChecking=accept-new \\
+    -P "{addr['port']}" \\
+    "{addr['username']}@{addr['host']}" <<SFTP_COMMANDS
+cd "{addr['upload_path']}"
+put "$FILE"
+bye
+SFTP_COMMANDS
+
+{after_upload_line}
+
+# If you have lftp instead of sftp, the equivalent one-liner is:
+#   lftp -u "{addr['username']}", -p {addr['port']} \\
+#        -e 'set sftp:connect-program "ssh -i '"$KEY"' -o IdentitiesOnly=yes"; \\
+#            cd {addr['upload_path']}; put "'"$FILE"'"; bye' \\
+#        sftp://{addr['host']}
+"""
+
+
+# ---- the one-file partner script -------------------------------------------
+#
+# The pack above is four files in a ZIP and it works, but the partner still has
+# to unzip it keeping its folders, run setup.sh, then run send.sh once PER FILE
+# and remember what each file is called. `_partner_script` collapses that into a
+# single `.sh` that takes no arguments: it installs its own key on first run and
+# then uploads every data file sitting next to it.
+#
+# The part that earns its keep is the REFUSAL. Our watcher works out what a file
+# is from its NAME; a name it cannot read is moved to `failed/` and nothing is
+# imported. From the partner's side that upload succeeded — clean transfer, no
+# error, no reply — so they believe the job is done, and the one party who could
+# notice cannot open this console to find out. The script therefore applies the
+# SAME rules on THEIR machine, before the upload, and names the fix. A file we
+# would quietly set aside never leaves their disk.
+#
+# Same address guard as the pack (`_pack_address`), for a stronger reason. A ZIP
+# is opened once; a script is saved, pointed at by a crontab line, and re-run
+# every night for months. A wrong host in it is wrong every one of those nights.
+
+
+def _script_rules_sh() -> Dict[str, str]:
+    """The naming contract as shell, generated from `filename_rules()`.
+
+    Never retyped — same source the admin page and the pack README read, so the
+    script cannot refuse a name the watcher would have accepted, or accept one
+    it would have dropped into `failed/`.
+
+    Two details make the translation faithful rather than approximate:
+
+    * ``detect_kind`` lowercases the basename and tests catalog BEFORE
+      inventory. A ``case`` runs its first matching arm, so emitting the kinds
+      in the order ``filename_rules()`` reports them (AST order, i.e. source
+      order) reproduces that precedence exactly.
+    * the extension test is done on the lowercased name rather than by globbing
+      ``*.csv``, because a glob is case-sensitive and ``STOCK.CSV`` is a file
+      the watcher accepts.
+
+    Returns the ``case`` arms as strings for the template below.
+    """
+
+    rules = filename_rules()
+
+    ext_arm = "|".join("*" + str(e).lower() for e in rules["extensions"])
+
+    kind_arms = []
+    for kind in rules["kinds"]:
+        words = [w for w in kind["keywords"] if w]
+        if not words:
+            continue
+        pattern = "|".join(f"*{w.lower()}*" for w in words)
+        kind_arms.append(f'        {pattern}) echo "{kind["kind"]}" ; return 0 ;;')
+
+    good = [g["name"] for g in rules["good"]] or ["articles-export-20260713.csv"]
+    while len(good) < 2:
+        good.append(good[-1])
+
+    return {
+        "ext_arm": ext_arm,
+        "kind_arms": "\n".join(kind_arms),
+        "good_a": good[0],
+        "good_b": good[1],
+        "unmatched_dir": rules["unmatched_dir"],
+    }
+
+
+def _partner_script(
+    addr: Dict,
+    label: str,
+    fingerprint: str,
+    private_pem: Optional[str],
+    auto_load: bool,
+) -> str:
+    """One self-contained POSIX `sh` file a partner keeps, schedules and re-runs.
+
+    ``private_pem`` is the private half when we have just made it (the two key
+    endpoints), or ``None`` for a partner whose key we do not hold — then the
+    key block is a clearly-marked PLACEHOLDER and the header says the file will
+    not run until a key is pasted into it. Both forms are valid `sh`: the
+    placeholder sits inside a QUOTED heredoc, where it is inert text.
+
+    ``auto_load`` is the real ingest setting (``cache.get_ingest_enabled()``),
+    passed in for the same reason `_pack_send_sh` takes its closing line as an
+    argument: what happens after an upload is a SETTING, and a script that says
+    "there is nothing else to do" while automatic loading is off sends the
+    partner away believing a half-finished job is finished.
+
+    ⚠️ The heredoc delimiter is QUOTED — ``<<'PRIVATE_KEY'``. Unquoted, the
+    shell would expand ``$`` and backticks inside the key body and write a
+    corrupted key, which fails later as an unreadable-format error that names
+    nothing.
+    """
+
+    r = _script_rules_sh()
+    script_name = f"citycare-upload-{label}.sh"
+    exts = ", ".join(str(e) for e in filename_rules()["extensions"])
+
+    if private_pem:
+        secret_warning = (
+            "#  !! THIS FILE CONTAINS A PRIVATE KEY. IT IS A CREDENTIAL. !!\n"
+            "#     Anyone who has this file can upload to CityCare as you. Treat it the\n"
+            "#     way you treat a password: do not email it, do not paste it into a\n"
+            "#     ticket or a chat channel, do not put it on a shared drive.\n"
+            "#     We keep NO copy of it. If it is lost, tell us -- we will revoke this\n"
+            "#     key and issue a new one, which is quick and is the correct answer."
+        )
+        key_block = private_pem.strip("\n")
+    else:
+        secret_warning = (
+            "#  !! THIS FILE WILL NOT RUN YET -- THERE IS NO KEY IN IT. !!\n"
+            "#     The key block below is a placeholder. CityCare holds only the PUBLIC\n"
+            "#     half of your key (fingerprint below); the private half is on your\n"
+            "#     machine and we have no copy of it, which is how it should be.\n"
+            "#     Open this file in a PLAIN TEXT editor and replace the placeholder\n"
+            "#     lines between the two PRIVATE_KEY markers with the entire contents of\n"
+            "#     your private key file -- every line, including the -----BEGIN and\n"
+            "#     -----END lines. Save, then run it. Until then it stops with a message\n"
+            "#     instead of uploading anything."
+        )
+        key_block = (
+            "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+            "### PASTE-YOUR-PRIVATE-KEY-HERE ### replace these three lines with your key\n"
+            "-----END OPENSSH PRIVATE KEY-----"
+        )
+
+    closing = (
+        '    echo "The files are picked up and imported automatically at our end."\n'
+        '    echo "There is nothing else for you to do."'
+        if auto_load
+        else '    echo "NOTE: automatic loading is currently switched OFF at our end, so"\n'
+             '    echo "your files will WAIT in the folder until someone at CityCare loads"\n'
+             '    echo "them. Please tell us when you have sent something."'
+    )
+
+    return f"""#!/bin/sh
+# ============================================================================
+#  CityCare pharmacy -- upload script
+#  Prepared for: {label}
+#
+{secret_warning}
+#
+#  Key fingerprint: {fingerprint}
+#     Read this back to us and we will confirm this file carries the key we
+#     registered for you, and not a copy of somebody else's. It is the same
+#     string 'ssh-keygen -lf' prints.
+#
+#  WHAT IT DOES, with no arguments at all:
+#    1. installs the key into ~/.ssh (first run only, then it leaves it alone)
+#    2. looks at the {exts} files sitting in the SAME FOLDER as this script
+#    3. refuses any whose name we would not be able to read, and says exactly
+#       how to rename it -- those are files that would otherwise upload fine
+#       and then be set aside at our end without anybody telling you
+#    4. uploads the rest
+#
+#  RUN IT:            sh {script_name}
+#  EVERY NIGHT:       sh {script_name} --every-night
+#                     (prints a crontab line for you to paste -- it installs
+#                      nothing by itself)
+#
+#  POSIX sh on purpose: it has to run on whatever you have.
+# ============================================================================
+
+set -e
+
+LABEL="{label}"
+KEY="$HOME/.ssh/citycare-{label}"
+HOST="{addr['host']}"
+PORT="{addr['port']}"
+ACCOUNT="{addr['username']}"
+REMOTE_DIR="{addr['upload_path']}"
+PLACEHOLDER_MARK="PASTE-YOUR-PRIVATE-KEY-HERE"
+
+# This script's own folder, as an ABSOLUTE path. Both the file scan and the
+# crontab line need it: cron does not run from the folder the script is in, so
+# a relative "." would scan your home directory instead.
+DIR=$(cd "$(dirname "$0")" && pwd)
+SELF="$DIR/$(basename "$0")"
+
+
+# ---- the key -------------------------------------------------------------
+# Written once, then never touched again. Deleting $KEY is how you make this
+# re-install it.
+install_key() {{
+    mkdir -p "$HOME/.ssh"
+    chmod 700 "$HOME/.ssh" 2>/dev/null || true
+
+    # QUOTED delimiter below -- <<'PRIVATE_KEY'. Without the quotes the shell
+    # would try to expand the key's contents and write a broken file.
+    umask 077
+    cat > "$KEY.new" <<'PRIVATE_KEY'
+{key_block}
+PRIVATE_KEY
+
+    if grep -q "$PLACEHOLDER_MARK" "$KEY.new" 2>/dev/null; then
+        rm -f "$KEY.new"
+        echo "" >&2
+        echo "This copy of the script does not have a key in it yet." >&2
+        echo "" >&2
+        echo "Open $SELF in a plain text editor, find the two lines that say" >&2
+        echo "PRIVATE_KEY, and replace everything between them with the whole" >&2
+        echo "contents of your private key file (all of it, including the" >&2
+        echo "-----BEGIN and -----END lines). Save it and run this again." >&2
+        echo "" >&2
+        echo "If you do not have a key yet, ask CityCare for one." >&2
+        return 1
+    fi
+
+    mv "$KEY.new" "$KEY"
+    chmod 600 "$KEY"
+    echo "Installed your key at $KEY"
+}}
+
+
+# ---- what a file IS, worked out from its name ----------------------------
+# These are the SAME rules our server uses. A name that matches nothing here is
+# a name our server cannot read either: it would accept the upload and then move
+# the file to {r['unmatched_dir']} without importing anything, and you would
+# never hear about it. So we stop it here instead.
+classify() {{
+    name=$(basename "$1" | tr 'A-Z' 'a-z')
+    case "$name" in
+{r['kind_arms']}
+    esac
+    return 1
+}}
+
+is_data_file() {{
+    case "$1" in
+        {r['ext_arm']}) return 0 ;;
+    esac
+    return 1
+}}
+
+
+# ---- one upload ----------------------------------------------------------
+# The sftp transcript is kept out of the way unless something fails; on a good
+# run you get one plain sentence per file instead of a wall of "sftp>" lines.
+upload_one() {{
+    _file="$1"
+    _log="${{TMPDIR:-/tmp}}/citycare-upload.$$.log"
+
+    if printf 'cd %s\\nput "%s"\\nbye\\n' "$REMOTE_DIR" "$_file" | sftp -b - \\
+        -i "$KEY" \\
+        -o IdentitiesOnly=yes \\
+        -o StrictHostKeyChecking=accept-new \\
+        -P "$PORT" \\
+        "$ACCOUNT@$HOST" > "$_log" 2>&1
+    then
+        rm -f "$_log"
+        return 0
+    fi
+
+    echo "         FAILED. The server said:" >&2
+    sed 's/^/           /' "$_log" >&2
+    rm -f "$_log"
+    return 1
+}}
+
+
+print_cron() {{
+    echo "To send whatever is in this folder every night at 01:30, run:"
+    echo ""
+    echo "    crontab -e"
+    echo ""
+    echo "and add this ONE line exactly as it appears here:"
+    echo ""
+    # 'sh "$SELF"', not '$SELF'. A downloaded script almost never has its
+    # executable bit set, and cron would answer that with a bare "Permission
+    # denied" in a log nobody is watching yet. Running it through sh needs no
+    # such bit -- the same reason every README here says 'sh setup.sh'.
+    echo "30 1 * * * /bin/sh \\"$SELF\\" >> \\"$DIR/citycare-upload.log\\" 2>&1"
+    echo ""
+    echo "Save and close. That is the whole job."
+    echo ""
+    echo "Nothing has been installed or changed by running this -- the line"
+    echo "above was only printed. It writes what happened each night to"
+    echo "$DIR/citycare-upload.log, which is the first thing to look at if"
+    echo "files ever stop arriving."
+}}
+
+
+# ---- arguments -----------------------------------------------------------
+# There are none, on purpose. --every-night is the single exception and it
+# uploads nothing.
+case "$1" in
+    "")
+        ;;
+    --every-night)
+        print_cron
+        exit 0
+        ;;
+    -h|--help)
+        echo "usage: sh $(basename "$0")                 upload this folder now"
+        echo "       sh $(basename "$0") --every-night   print a crontab line"
+        exit 0
+        ;;
+    *)
+        echo "This script takes no arguments -- just run:  sh $(basename "$0")" >&2
+        echo "It uploads every data file in the folder it is saved in." >&2
+        exit 2
+        ;;
+esac
+
+
+if ! command -v sftp >/dev/null 2>&1; then
+    echo "sftp was not found on this machine." >&2
+    echo "Install OpenSSH (on Windows: Settings > Apps > Optional features >" >&2
+    echo "OpenSSH Client, or use Git Bash / WSL) and run this again." >&2
+    exit 1
+fi
+
+if [ ! -f "$KEY" ]; then
+    install_key || exit 1
+fi
+chmod 600 "$KEY" 2>/dev/null || true
+
+echo "CityCare upload -- $HOST"
+echo "Looking in $DIR"
+echo ""
+
+found=0
+sent=0
+skipped=0
+failed=0
+
+for f in "$DIR"/*; do
+    [ -f "$f" ] || continue
+
+    base=$(basename "$f")
+    lower=$(printf '%s' "$base" | tr 'A-Z' 'a-z')
+
+    is_data_file "$lower" || continue
+    found=$((found + 1))
+
+    # A double quote in the name would break the sftp command line below. It is
+    # a rare name and a one-word fix, so say so rather than send something odd.
+    case "$base" in
+        *'"'*)
+            skipped=$((skipped + 1))
+            echo "SKIPPED  $base"
+            echo "         The name contains a \\" character. Please remove it."
+            echo ""
+            continue
+            ;;
+    esac
+
+    kind=$(classify "$base") || kind=""
+
+    if [ -z "$kind" ]; then
+        skipped=$((skipped + 1))
+        echo "SKIPPED  $base"
+        echo "         We cannot tell what this file is from its name. If it were"
+        echo "         uploaded we would set it aside and import nothing, without"
+        echo "         being able to tell you. Rename it, for example:"
+        echo "           {r['good_a']}"
+        echo "           {r['good_b']}"
+        echo "         then run this again."
+        echo ""
+        continue
+    fi
+
+    echo "Sending  $base  (we will read this as $kind)"
+    if upload_one "$f"; then
+        sent=$((sent + 1))
+        echo "         done."
+    else
+        failed=$((failed + 1))
+    fi
+    echo ""
+done
+
+echo "----------------------------------------------------------------"
+if [ "$found" -eq 0 ]; then
+    echo "No data files found in $DIR"
+    echo "Put your {exts} files in that folder, next to this script, and run"
+    echo "this again."
+    exit 0
+fi
+
+echo "$found file(s) looked at: $sent sent, $skipped skipped, $failed failed."
+
+if [ "$skipped" -gt 0 ]; then
+    echo ""
+    echo "The skipped files were NOT uploaded. Rename them as shown above and"
+    echo "run this again -- nothing you already sent will be sent twice in a way"
+    echo "that causes a problem."
+fi
+
+if [ "$failed" -gt 0 ]; then
+    echo ""
+    echo "Some files did not send. The most common causes:"
+    echo "  'Permission denied (publickey)'  we have not registered your key, or"
+    echo "                                   we registered a different one. Read"
+    echo "                                   us the fingerprint at the top of this"
+    echo "                                   file."
+    echo "  'Connection refused' / timeout   your firewall may block outbound"
+    echo "                                   port $PORT. Ask your network team."
+    exit 1
+fi
+
+if [ "$sent" -gt 0 ]; then
+    echo ""
+{closing}
+fi
+"""
+
+
+def _pack_setup_sh_partner_key(addr: Dict, label: str) -> str:
+    """`setup.sh` for the SAFE mode: the partner makes their own key."""
+
+    return f"""#!/bin/sh
+# Make the SSH key CityCare will register for you. Run this once.
+#   sh setup.sh
+set -e
+
+KEY="$(dirname "$0")/citycare_sftp"
+
+if [ -f "$KEY" ]; then
+    echo "$KEY already exists." >&2
+    echo "Delete it first if you really want a NEW key -- the old one will stop" >&2
+    echo "working once we register the new one." >&2
+    exit 1
+fi
+
+if ! command -v ssh-keygen >/dev/null 2>&1; then
+    echo "ssh-keygen was not found. Install OpenSSH (on Windows: 'Settings >" >&2
+    echo "Apps > Optional features > OpenSSH Client', or use Git Bash/WSL)." >&2
+    exit 1
+fi
+
+ssh-keygen -t ed25519 -f "$KEY" -C "{label}"
+
+chmod 600 "$KEY" 2>/dev/null || true
+
+echo ""
+echo "=============================================================="
+echo "SEND BOTH OF THE FOLLOWING BACK TO CITYCARE"
+echo "=============================================================="
+echo ""
+echo "1. the public key (one line, safe to email):"
+echo ""
+cat "$KEY.pub"
+echo ""
+echo "2. its fingerprint, so we can read it back to you and confirm we"
+echo "   registered YOUR key and not a mistyped one:"
+echo ""
+ssh-keygen -lf "$KEY.pub"
+echo ""
+echo "=============================================================="
+echo "DO NOT SEND $KEY -- the file WITHOUT the .pub ending."
+echo "That is your private key. Nobody, including us, ever needs it."
+echo "=============================================================="
+"""
+
+
+def _pack_setup_sh_generated_key(addr: Dict) -> str:
+    """`setup.sh` for the generated-key mode: fix the mode, then prove it works."""
+
+    return f"""#!/bin/sh
+# Prepare the key that came in this archive and test the connection.
+#   sh setup.sh
+set -e
+
+KEY="$(dirname "$0")/key/citycare_sftp"
+
+if [ ! -f "$KEY" ]; then
+    echo "expected the private key at $KEY but it is not there." >&2
+    echo "Unzip the whole archive, keeping its folders, and run this from" >&2
+    echo "the folder that contains setup.sh." >&2
+    exit 1
+fi
+
+# FIRST, before anything touches it. A ZIP cannot carry file permissions, so
+# this key extracted as 0644 and ssh will refuse it outright with
+#   "Permissions 0644 for 'citycare_sftp' are too open."
+chmod 600 "$KEY"
+echo "key permissions set to 600."
+
+echo "testing the connection to {addr['host']} ..."
+
+sftp -b - \\
+    -i "$KEY" \\
+    -o IdentitiesOnly=yes \\
+    -o StrictHostKeyChecking=accept-new \\
+    -P "{addr['port']}" \\
+    "{addr['username']}@{addr['host']}" <<SFTP_COMMANDS
+cd "{addr['upload_path']}"
+pwd
+bye
+SFTP_COMMANDS
+
+echo ""
+echo "connection OK. Send a file with:  sh send.sh <file>"
+"""
+
+
+def _pack_readme_partner_key(addr: Dict, label: str) -> str:
+    """`README.txt` for the safe mode. Contains no secret."""
+
+    return f"""CityCare pharmacy -- SFTP upload pack
+Prepared for: {label}
+
+WHAT IS IN HERE
+  README.txt   this file
+  setup.sh     makes your SSH key (run this first)
+  send.sh      uploads one file
+
+  There is NO password and NO key in this archive. Nothing in it is secret,
+  so it is safe to forward internally.
+
+  Run the scripts with 'sh setup.sh' and 'sh send.sh'. Unzipping usually
+  drops the executable bit, so './setup.sh' may say "permission denied" --
+  'sh setup.sh' always works.
+
+{_pack_conn_block(addr)}
+STEP 1 -- make your key (once)
+
+    sh setup.sh
+
+  It creates two files next to this README:
+    citycare_sftp        PRIVATE. Stays on your machine forever. Never send
+                         it to anyone, including us. We never ask for it.
+    citycare_sftp.pub    public. This is the half you send back.
+
+STEP 2 -- send us two things
+
+  1. the whole contents of citycare_sftp.pub -- one line, starting
+     "ssh-ed25519 "
+  2. the fingerprint line setup.sh prints, starting "256 SHA256:"
+
+  We register the public key under the label "{label}". It works from your
+  very next connection -- nothing needs restarting on either side. We read
+  the fingerprint back to you so you can confirm we registered your key and
+  not a mistyped copy of it.
+
+STEP 3 -- send a file
+
+    sh send.sh articles-export-2026-07-13.csv
+
+  The file lands in {addr['upload_path']}/ and is imported automatically.
+
+{_pack_filename_help()}
+
+IF SOMETHING GOES WRONG
+  "Permissions ... are too open"    run: chmod 600 citycare_sftp
+  "Permission denied (publickey)"   we have not registered your key yet, or
+                                    we registered a different one -- check the
+                                    fingerprint with: ssh-keygen -lf citycare_sftp.pub
+  "Connection refused" / timeout    your firewall may block outbound
+                                    port {addr['port']}; ask your network team.
+"""
+
+
+def _pack_readme_generated_key(addr: Dict, label: str, fingerprint: str) -> str:
+    """`README-FIRST.txt` for the generated-key mode. This archive IS the secret."""
+
+    return f"""!! READ THIS BEFORE YOU DO ANYTHING ELSE !!
+
+THIS ARCHIVE IS THE CREDENTIAL.
+
+  It contains a private key that opens a CityCare upload account. Anyone who
+  has this file can upload as you. Treat it exactly the way you would treat a
+  password:
+
+    * DO NOT email it, and do not forward the message it arrived in.
+    * DO NOT put it in a ticket, a chat channel, or a shared drive.
+    * Hand it over the way you hand over a password, and delete the copy you
+      were handed once it is in place.
+
+  IT CANNOT BE DOWNLOADED AGAIN. We keep no copy of the private half. If it
+  is lost, tell us and we will revoke this key and issue a new one -- that is
+  the correct response, and it is quick. Do not go looking for a spare copy.
+
+  Registered under the label: {label}
+  Key fingerprint:            {fingerprint}
+
+  Read that fingerprint back to us and we will confirm it matches what we
+  registered. It is the same string 'ssh-keygen -lf' prints.
+
+WHAT IS IN HERE
+  README-FIRST.txt    this file
+  key/citycare_sftp   the private key -- the secret
+  setup.sh            fixes the key's file permissions, then tests the login
+  send.sh             uploads one file
+
+  Run the scripts with 'sh setup.sh' and 'sh send.sh'. Unzipping usually
+  drops the executable bit, so './setup.sh' may say "permission denied" --
+  'sh setup.sh' always works.
+
+{_pack_conn_block(addr)}
+STEP 1 -- prepare the key and test the login
+
+    sh setup.sh
+
+  A ZIP file cannot carry file permissions, so the key has almost certainly
+  arrived world-readable and ssh will refuse to use it. setup.sh runs
+  'chmod 600' on it first -- that is why it exists.
+
+STEP 2 -- send a file
+
+    sh send.sh articles-export-2026-07-13.csv
+
+  The file lands in {addr['upload_path']}/ and is imported automatically.
+
+{_pack_filename_help()}
+
+IF SOMETHING GOES WRONG
+  "Permissions ... are too open"    run: chmod 600 key/citycare_sftp
+  "Permission denied (publickey)"   the key may have been revoked -- ask us to
+                                    check the fingerprint above.
+  "Connection refused" / timeout    your firewall may block outbound
+                                    port {addr['port']}; ask your network team.
+
+WOULD YOU RATHER MAKE YOUR OWN KEY?
+  You can, and it is better: the private key then never leaves your machine
+  at all. Ask us for the pack WITHOUT a key and we will revoke this one.
+"""
+
+
+@router.post("/sftp/partner-pack", dependencies=[Depends(require_super_admin)])
+async def sftp_partner_pack(p: SftpPartnerPack, request: Request) -> Any:
+    """Build the ZIP a partner unzips and runs. Two modes; the default is safe.
+
+    Reuses, rather than restates:
+
+    * `sftp_connection` for the address, port, username, folder AND the
+      `host_source` that says how much to trust the address. One resolver.
+    * `_clean_label` for the label rule -- the label becomes both a filename
+      inside the archive's name and, in generated-key mode, `keys/<label>.pub`.
+    * `_keys_root` for the 503 when the key volume is not mounted.
+    * `sftp_keys_generate` -- unchanged, in full -- for the generated-key mode,
+      so the duplicate-label 409, the key limit, the atomic write of BOTH
+      `authorized_keys` and `keys/<label>.pub`, and the "register first, hand
+      over the secret second" ordering all come from one place.
+    * `filename_rules` for the naming contract printed in the README.
+
+    ⚠️ **Order is load-bearing, for the same reason it is in
+    `sftp_keys_generate`.** Label, mount and address are all validated BEFORE
+    anything is generated or registered. A pack that 400s on its address after
+    having registered a key would leave a live credential behind for an archive
+    that was never downloaded.
+    """
+
+    import io
+    import zipfile
+
+    from fastapi import Response
+
+    label = _clean_label(p.label)
+    _keys_root()                       # 503 here, not after generating a key
+    addr = _pack_address(await sftp_connection(request))
+
+    # What happens AFTER the upload is a setting, not a constant. Automatic
+    # loading can be switched off, and when it is a file sits in the folder as
+    # Waiting until somebody presses Load. Telling a partner "there is nothing
+    # else to do" in that state sends them away believing the job is finished
+    # when it is half done -- and they are the one party who cannot open this
+    # console to find out otherwise. Same defect the page carried between its
+    # status strip and its stale-file note; in a zip it is worse, because the
+    # zip is kept and re-read for months after the setting has moved.
+    after_upload_line = (
+        'echo "sent. It is picked up automatically; there is nothing else to do."'
+        if await cache.get_ingest_enabled()
+        else 'echo "sent. Automatic loading is currently OFF at our end, so it will "\n'
+             '     "wait in the folder until someone loads it. Tell us when you have sent one."'
+    )
+
+    fingerprint = None
+    buf = io.BytesIO()
+
+    if p.include_private_key:
+        # Generate + register through the SAME path, unchanged. Anything it
+        # raises -- 409 duplicate label, 400 key limit, 503 not mounted --
+        # propagates as-is and no archive is built.
+        issued = await sftp_keys_generate(SftpKeyGenerate(label=label), request)
+        fingerprint = issued["fingerprint"]
+
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            _pack_write(zf, "README-FIRST.txt",
+                        _pack_readme_generated_key(addr, label, fingerprint), 0o644)
+            # 0o600 is recorded and will very probably be ignored on extraction;
+            # setup.sh does the real work. See _pack_write.
+            _pack_write(zf, "key/citycare_sftp", issued["private_key"], 0o600)
+            _pack_write(zf, "setup.sh", _pack_setup_sh_generated_key(addr), 0o755)
+            _pack_write(zf, "send.sh", _pack_send_sh(addr, "key/citycare_sftp", after_upload_line), 0o755)
+    else:
+        # Documentation with the real values in it. Nothing is created,
+        # registered or written server-side by this branch.
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            _pack_write(zf, "README.txt", _pack_readme_partner_key(addr, label), 0o644)
+            _pack_write(zf, "setup.sh", _pack_setup_sh_partner_key(addr, label), 0o755)
+            _pack_write(zf, "send.sh", _pack_send_sh(addr, "citycare_sftp", after_upload_line), 0o755)
+
+    # Audit: label + mode + (when we made one) fingerprint. All three are public
+    # facts. The private key is not passed here and never must be.
+    #
+    # The `activity_audit` middleware DOES see this route -- `should_record`
+    # takes every mutating /admin/ path whose last segment has no "." in it, and
+    # "partner-pack" has none (this is exactly why /admin/embed/snippets.zip is
+    # NOT audited). Being unlisted in `activity._ROUTES`, the middleware's row
+    # carries route + status and an empty `detail`, so the row below is the one
+    # holding the label and the mode. The middleware reads the REQUEST body only
+    # -- `{"label": ..., "include_private_key": ...}`, no secret -- and no
+    # middleware in this app reads a response body, so the ZIP itself is never
+    # captured anywhere.
+    from app import activity
+    from app import auth as authmod
+
+    actor_email, actor_role = None, None
+    try:
+        header = request.headers.get("authorization") or ""
+        if header.lower().startswith("bearer "):
+            claims = authmod.decode_token(header.split(" ", 1)[1])
+            actor_email, actor_role = claims.get("email"), claims.get("role")
+    except Exception:  # noqa: BLE001 — an unreadable token is an anonymous actor
+        pass
+
+    detail = {
+        "label": label,
+        "mode": "generated-key" if p.include_private_key else "instructions",
+    }
+    if fingerprint:
+        detail["fingerprint"] = fingerprint
+
+    await activity.record_event(
+        activity.action_for("POST", "/admin/sftp/partner-pack"),
+        actor_email=actor_email,
+        actor_role=actor_role,
+        target=label,
+        method="POST",
+        path="/admin/sftp/partner-pack",
+        status=200,
+        detail=detail,
+    )
+
+    buf.seek(0)
+    return Response(
+        content=buf.read(),
+        media_type="application/zip",
+        headers={
+            # `label` passed _clean_label, so it is [A-Za-z0-9._-] only: nothing
+            # here can break out of the quotes or inject a header line.
+            "Content-Disposition": f'attachment; filename="citycare-sftp-{label}.zip"',
+            # A generated pack is never a cacheable document, and in
+            # generated-key mode it is a secret sitting in a browser download.
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+class SftpPartnerScript(BaseModel):
+    """Which registered partner to write the script for. Same label the registry uses."""
+
+    label: str
+
+
+@router.post("/sftp/partner-script", dependencies=[Depends(require_super_admin)])
+async def sftp_partner_script(p: SftpPartnerScript, request: Request) -> Dict:
+    """The one-file upload script for a partner we ALREADY have a key for.
+
+    The two key endpoints return this script with the key baked in, because that
+    is the one moment the private half exists here. This route is for every
+    moment after it: a partner registered six months ago, working fine, who now
+    wants the nightly upload — or who has lost the script and still has their
+    key. We hold only their PUBLIC half, so the script comes out with a
+    placeholder key block and a header telling them to paste their existing
+    private key into it. That is not a downgrade; it is the flow where the
+    private key never travels at all.
+
+    ⚠️ **Nothing is created, registered or written by this route.** It reads
+    `keys/<label>.pub` to get a fingerprint the partner can check the file
+    against, and renders text. It cannot change who can connect.
+
+    Refusals, in the order they are cheapest and most certain:
+
+    * 400 — the label is not a label (`_clean_label`).
+    * 503 — the keys volume is not mounted, so "is this partner registered?" has
+      no answer. Deliberately not softened to 404: "I cannot tell you" and "no
+      such partner" are different sentences and only one of them is true.
+    * 404 — no key under that label. Writing a script for a partner who cannot
+      connect produces a file that fails every night with a message about keys.
+    * 400 — the address is not fit to ship (`_pack_address`, unchanged: empty,
+      loopback, or merely DETECTED). Stricter here than anywhere else in the
+      console for the reason in the block comment above `_partner_script`: a
+      script is kept, scheduled and re-run, so a guessed hostname in it is a
+      guess that keeps being wrong long after everyone has forgotten it was one.
+    """
+
+    label = _clean_label(p.label)
+    root = _keys_root()                       # 503 before any "does it exist?"
+
+    pub = root / "keys" / f"{label}.pub"
+    if not pub.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"no key labelled '{label}' is registered, so a script for them would "
+                "fail on every run. Register one first with POST /admin/sftp/keys "
+                "(or /generate, which returns the script with the key already in it)."
+            ),
+        )
+
+    try:
+        raw = pub.read_text(encoding="utf-8").strip()
+    except OSError:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"the file registered as '{label}' could not be read, so its fingerprint "
+                "cannot be printed in the script. Re-register the key."
+            ),
+        )
+
+    # 400 with a specific reason if this is not a key line we wrote. The
+    # fingerprint is the whole point of the header — a script carrying a
+    # fingerprint that matches nothing is worse than one carrying none, because
+    # the partner reads it back and we confirm it.
+    parsed = _parse_public_key(raw)
+
+    addr = _pack_address(await sftp_connection(request))
+    script = _partner_script(
+        addr, label, parsed["fingerprint"], None, await cache.get_ingest_enabled()
+    )
+
+    # Audit: label + fingerprint, both public facts, and that is the whole row.
+    # The script is NEVER logged — here it holds no key, but the same call shape
+    # is used by the endpoints where it does, and a rule with an exception in it
+    # is a rule that gets copied wrong.
+    #
+    # Recorded explicitly for the same reason the key routes do it: this path is
+    # not in `activity._ROUTES`, so the middleware's row would carry route +
+    # status and an empty `detail`. The middleware reads the REQUEST body only
+    # (`{"label": ...}`) and no middleware in this app reads a response body.
+    from app import activity
+    from app import auth as authmod
+
+    actor_email, actor_role = None, None
+    try:
+        header = request.headers.get("authorization") or ""
+        if header.lower().startswith("bearer "):
+            claims = authmod.decode_token(header.split(" ", 1)[1])
+            actor_email, actor_role = claims.get("email"), claims.get("role")
+    except Exception:  # noqa: BLE001 — an unreadable token is an anonymous actor
+        pass
+
+    await activity.record_event(
+        activity.action_for("POST", "/admin/sftp/partner-script"),
+        actor_email=actor_email,
+        actor_role=actor_role,
+        target=label,
+        method="POST",
+        path="/admin/sftp/partner-script",
+        status=200,
+        detail={"label": label, "fingerprint": parsed["fingerprint"]},
+    )
+
+    return {
+        "label": label,
+        "fingerprint": parsed["fingerprint"],
+        "script": script,
     }
 
 

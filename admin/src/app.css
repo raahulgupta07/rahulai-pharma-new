@@ -345,6 +345,21 @@ body {
   border-radius: var(--radius-control);
 }
 
+/* Pointer cursor on anything pressable.
+   Tailwind v4 dropped `cursor: pointer` from its button reset, so every button
+   without an explicit `cursor-pointer` class shows an arrow. Measured with the
+   arrow: /admin/ 5 controls, /admin/chat 8, /admin/data 12, /admin/users 4 —
+   Sign out, Toggle theme, Reload and Create among them. A control that does not
+   say it is pressable is the same defect as one that does not look pressable.
+   Disabled stays default, because "you cannot press this" must still read. */
+:where(button, [role="button"], summary):not(:disabled):not([aria-disabled="true"]) {
+  cursor: pointer;
+}
+:where(button, [role="button"]):disabled,
+:where(button, [role="button"])[aria-disabled="true"] {
+  cursor: default;
+}
+
 /* `.field-shell` — a control assembled from TWO elements: a bordered container
    plus a borderless input/textarea sitting inside its padding. The chat
    composer and the header search box are both built this way.
@@ -361,15 +376,28 @@ body {
    the element is classed. Every `outline-none` in this codebase is inert
    against it. The suppression has to be at least as specific AND unlayered.
 
-   So the container owns the indicator (2px at offset 0, reading as one thicker
-   edge alongside the border it already tints) and the inner field has none. */
-.field-shell:focus-within {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 0;
-}
+   So the container owns the indicator and the inner field has none.
+
+   Two classes, because two shells want different things:
+
+     `.field-shell`       suppression only — the inner field draws no ring.
+                          For a box that ALREADY tints its own border on focus
+                          (the sign-in fields carry `focus-within:border-accent`
+                          plus a `ring-4` glow). Adding a hard outline there
+                          would put the third edge straight back.
+
+     `.field-shell-ring`  suppression PLUS a 2px ring on the box, for shells
+                          whose only focus signal is a 1px border (the chat
+                          composer, the header search).
+
+   Anything carrying `-ring` must also carry `.field-shell`. */
 .field-shell > input:focus-visible,
 .field-shell > textarea:focus-visible {
   outline: none;
+}
+.field-shell-ring:focus-within {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 0;
 }
 /* Skip link. The rail is nineteen tab stops and it comes before the content on
    every screen, so without this a keyboard user pressed Tab nineteen times to

@@ -14,6 +14,7 @@
     Upload,
     ChevronLeft,
     ChevronRight,
+    ChevronUp,
     ChevronDown,
     ChevronRight as ChevronR,
     X,
@@ -66,6 +67,82 @@
 
   const num = (v) => (typeof v === 'number' ? v : null);
   const fmt = (v) => (v == null ? '–' : Number(v).toLocaleString());
+
+  // ---- sorting -------------------------------------------------------------
+  //
+  // NEITHER `/admin/catalog` NOR `/admin/inventory` TAKES A SORT PARAMETER.
+  // Both hard-code their ORDER BY (catalog: stubs last, then brand_name;
+  // inventory: stock_qty DESC) and neither returns a total count, so there is
+  // nothing to sort server-side without a backend change. Sorting here
+  // therefore reorders THE PAGE THAT IS LOADED — the `limit`/`offset` window,
+  // 25/50/100 rows — and nothing beyond it. The footer says so in words rather
+  // than letting a reader assume "highest stock" means highest in the whole
+  // 111,654-row table; a sort that quietly means something smaller than it
+  // looks is the same class of bug as a number with no denominator. If a sort
+  // over the full set is wanted, it belongs in the SQL above, with `sort` and
+  // `dir` on the endpoint.
+  //
+  // `key: null` = the server's own order, untouched. That is the initial state,
+  // so nothing is claimed until the reader clicks a column.
+  let cSort = $state({ key: null, dir: 'asc' });
+  let iSort = $state({ key: null, dir: 'asc' });
+
+  /** Columns for the two tables. `key` null = not sortable (Level and Status
+      are both drawn FROM stock_qty; offering them as separate sorts would show
+      two active columns for one ordering). */
+  const C_COLS = [
+    { key: 'article_code', label: 'Code' },
+    { key: 'brand_name', label: 'Brand' },
+    { key: 'generic_name', label: 'Generic' },
+    { key: 'category', label: 'Category' }
+  ];
+  const I_COLS = [
+    { key: 'article_code', label: 'Article' },
+    { key: 'brand_name', label: 'Brand' },
+    { key: 'site_code', label: 'Site' },
+    { key: 'stock_qty', label: 'Stock', numeric: true },
+    { key: null, label: 'Level' },
+    { key: 'price', label: 'Price', numeric: true },
+    { key: null, label: 'Status', numeric: true }
+  ];
+
+  /** Unknown (null) sorts LAST in both directions, never first. Postgres puts
+      NULLs first on a DESC and `tools.py` fights the same fight with
+      `NULLS LAST`: an unknown quantity floating above every measured one reads
+      as "the biggest number here", which is the one thing it is not. */
+  function sortRows(rows, s) {
+    if (!s.key) return rows;
+    const dir = s.dir === 'asc' ? 1 : -1;
+    return [...rows].sort((a, b) => {
+      const av = a?.[s.key] ?? null;
+      const bv = b?.[s.key] ?? null;
+      if (av === null && bv === null) return 0;
+      if (av === null) return 1;
+      if (bv === null) return -1;
+      if (typeof av === 'number' && typeof bv === 'number') return (av - bv) * dir;
+      return String(av).localeCompare(String(bv), undefined, { numeric: true, sensitivity: 'base' }) * dir;
+    });
+  }
+
+  function toggleSort(which, col) {
+    if (!col.key) return;
+    const s = which === 'catalog' ? cSort : iSort;
+    // Re-clicking the active column reverses it; a new column starts in the
+    // direction that is useful first — A→Z for text, biggest-first for numbers.
+    const next =
+      s.key === col.key
+        ? { key: col.key, dir: s.dir === 'asc' ? 'desc' : 'asc' }
+        : { key: col.key, dir: col.numeric ? 'desc' : 'asc' };
+    if (which === 'catalog') cSort = next;
+    else iSort = next;
+  }
+
+  const ariaSort = (s, key) =>
+    s.key === key ? (s.dir === 'asc' ? 'ascending' : 'descending') : 'none';
+  const sortLabel = (cols, s) => cols.find((c) => c.key === s.key)?.label ?? '';
+
+  let cView = $derived(sortRows(cRows, cSort));
+  let iView = $derived(sortRows(iRows, iSort));
 
   async function loadCatalog() {
     cLoading = true;
@@ -242,6 +319,13 @@
   }
 
   let catTotal = $derived(num(ready.catalog_rows));
+  let invTotal = $derived(num(ready.inventory_rows));
+  // `/ready` counts the WHOLE table; neither listing endpoint returns a count
+  // for a filtered query. So the total is shown only when nothing is filtering
+  // it — a "of 5,292" beside a search result would be a total of something the
+  // reader is not looking at.
+  let cFiltered = $derived(!!(cSearch.trim() || cCategory));
+  let iFiltered = $derived(!!(iSearch.trim() || iSite.trim() || iStatus));
   let invMax = $derived(Math.max(1, ...iRows.map((r) => r.stock_qty ?? 0)));
 
   onMount(reloadAll);
@@ -319,6 +403,26 @@
   </span>
 </div>
 
+<!-- A sortable header is a real <button> inside the <th>, and the <th> carries
+     `aria-sort`. A div with an onclick would be invisible to the keyboard and
+     announce nothing; both tables' rows already learned that lesson (see
+     `rowActivate`). The arrow is drawn only on the active column — a full set
+     of grey arrows says "sortable", which the button already says, and hides
+     which one is actually in force. -->
+{#snippet sortHead(which, col, s)}
+  <button
+    type="button"
+    onclick={() => toggleSort(which, col)}
+    class="flex w-full items-center gap-1 whitespace-nowrap transition-colors hover:text-ink
+      {col.numeric ? 'justify-end' : ''} {s.key === col.key ? 'text-ink' : 'text-ink-3'}"
+  >
+    {col.label}
+    {#if s.key === col.key}
+      {#if s.dir === 'asc'}<ChevronUp size={12} />{:else}<ChevronDown size={12} />{/if}
+    {/if}
+  </button>
+{/snippet}
+
 {#if tab === 'catalog'}
   <!-- catalog filters -->
   <div class="my-3.5 flex flex-wrap items-center gap-2">
@@ -348,29 +452,47 @@
   <!-- catalog table -->
   <div class="elev overflow-hidden rounded-hero border border-line bg-surface">
     <div class="max-h-[calc(100vh-360px)] overflow-auto">
+      <!-- The "Sites" column is GONE. It printed the literal 53 on every row —
+           not a count of anything, and `/admin/catalog` returns no per-article
+           site count to replace it with. A number that is the same on 5,292
+           rows is a decoration, and this one was read as "stocked in 53
+           branches" for every product including the stubs. The real
+           per-article figure exists in the detail drawer, which gets it from
+           `/admin/catalog/:code` (`site_count`), scoped to the caller's
+           branch. -->
       <table class="tbl">
         <thead>
-          <tr><th>Code</th><th>Brand</th><th>Generic</th><th>Category</th><th class="num">Sites</th><th style="width:30px"></th></tr>
+          <tr>
+            {#each C_COLS as col}
+              <th class="whitespace-nowrap" aria-sort={ariaSort(cSort, col.key)}>
+                {@render sortHead('catalog', col, cSort)}
+              </th>
+            {/each}
+            <th style="width:30px"></th>
+          </tr>
         </thead>
         <tbody>
           {#if cLoading}
             {#each Array(8) as _}
-              <tr><td colspan="6"><div class="skel" style="height:16px"></div></td></tr>
+              <tr><td colspan="5"><div class="skel" style="height:16px"></div></td></tr>
             {/each}
           {:else if cError}
             <!-- Not "no matches": the query never ran. -->
-            <tr><td colspan="6" class="p-4"><ErrorState error={cError} retry={loadCatalog} what="the catalog" /></td></tr>
+            <tr><td colspan="5" class="p-4"><ErrorState error={cError} retry={loadCatalog} what="the catalog" /></td></tr>
           {:else if cRows.length === 0}
-            <tr><td colspan="6" class="py-10 text-center text-ink-3">No articles match your filters.</td></tr>
+            <tr><td colspan="5" class="py-10 text-center text-ink-3">No articles match your filters.</td></tr>
           {:else}
-            {#each cRows as r (r.article_code)}
+            <!-- One line per row: every cell that can hold a long value is
+                 capped and truncated, and carries the whole value in `title`.
+                 One generic name in this catalog is 140 characters long
+                 ("Glucosamine, MSM, FLEXICOL…") and made a three-line row. -->
+            {#each cView as r (r.article_code)}
               {@const cb = catBadge(r.category)}
               <tr role="button" tabindex="0" onclick={() => openDetail(r.article_code)} onkeydown={(e) => rowActivate(e, () => openDetail(r.article_code))}>
-                <td><span class="rounded-control bg-accent-soft px-1.5 py-0.5 font-mono text-label font-medium text-accent">{r.article_code}</span></td>
-                <td class="font-medium text-ink">{r.brand_name}</td>
-                <td class="text-ink-2">{r.generic_name ?? '—'}</td>
-                <td><span class="rounded-control px-2 py-0.5 text-micro font-semibold {cb.cls}">{cb.txt}</span></td>
-                <td class="num tnum text-ink">53</td>
+                <td class="whitespace-nowrap"><span class="rounded-control bg-accent-soft px-1.5 py-0.5 font-mono text-label font-medium text-accent">{r.article_code}</span></td>
+                <td class="max-w-[260px] truncate font-medium text-ink" title={r.brand_name ?? ''}>{r.brand_name}</td>
+                <td class="max-w-[380px] truncate text-ink-2" title={r.generic_name ?? ''}>{r.generic_name ?? '—'}</td>
+                <td class="whitespace-nowrap" title={r.category ?? ''}><span class="rounded-control px-2 py-0.5 text-micro font-semibold {cb.cls}">{cb.txt}</span></td>
                 <td><ChevronR size={15} class="text-ink-3" /></td>
               </tr>
             {/each}
@@ -379,8 +501,16 @@
       </table>
     </div>
     <!-- footer / pagination -->
-    <div class="flex items-center gap-3 border-t border-line px-4 py-2.5 text-meta text-ink-3">
-      <span>Showing <b class="text-ink">{cOffset + 1}–{cOffset + cRows.length}</b></span>
+    <div class="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-t border-line px-4 py-2.5 text-meta text-ink-3">
+      <span>
+        Showing <b class="text-ink">{cOffset + 1}–{cOffset + cRows.length}</b>
+        {#if !cFiltered && catTotal != null}of <b class="tnum text-ink">{fmt(catTotal)}</b>{:else}(filtered){/if}
+      </span>
+      {#if cSort.key}
+        <!-- Says what the sort covers. See the sorting comment in the script:
+             the endpoint has no sort parameter, so this is the loaded page. -->
+        <span>sorted by {sortLabel(C_COLS, cSort)} — this page only</span>
+      {/if}
       <select
         bind:value={cSize}
         onchange={() => { cOffset = 0; loadCatalog(); }}
@@ -426,7 +556,19 @@
     <div class="max-h-[calc(100vh-360px)] overflow-auto">
       <table class="tbl">
         <thead>
-          <tr><th>Article</th><th>Brand</th><th>Site</th><th class="num">Stock</th><th style="width:120px">Level</th><th class="num">Price</th><th class="num">Status</th></tr>
+          <tr>
+            {#each I_COLS as col}
+              {#if col.key}
+                <th class="whitespace-nowrap {col.numeric ? 'num' : ''}" aria-sort={ariaSort(iSort, col.key)}>
+                  {@render sortHead('inventory', col, iSort)}
+                </th>
+              {:else}
+                <!-- Level and Status are both drawn from stock_qty; sorting
+                     Stock sorts them too. -->
+                <th class="whitespace-nowrap {col.numeric ? 'num' : ''}" style={col.label === 'Level' ? 'width:120px' : ''}>{col.label}</th>
+              {/if}
+            {/each}
+          </tr>
         </thead>
         <tbody>
           {#if iLoading}
@@ -437,28 +579,34 @@
           {:else if iRows.length === 0}
             <tr><td colspan="7" class="py-10 text-center text-ink-3">No inventory matches your filters.</td></tr>
           {:else}
-            {#each iRows as r (r.article_code + r.site_code)}
+            {#each iView as r (r.article_code + r.site_code)}
               {@const sb = stockBadge(r.stock_qty ?? 0)}
               <tr role="button" tabindex="0" onclick={() => openDetail(r.article_code)} onkeydown={(e) => rowActivate(e, () => openDetail(r.article_code))}>
-                <td><span class="rounded-control bg-accent-soft px-1.5 py-0.5 font-mono text-label font-medium text-accent">{r.article_code}</span></td>
-                <td class="font-medium text-ink">{r.brand_name}</td>
-                <td class="font-mono text-meta text-ink-2">{r.site_code}</td>
-                <td class="num tnum font-semibold text-ink">{fmt(r.stock_qty)}</td>
+                <td class="whitespace-nowrap"><span class="rounded-control bg-accent-soft px-1.5 py-0.5 font-mono text-label font-medium text-accent">{r.article_code}</span></td>
+                <td class="max-w-[300px] truncate font-medium text-ink" title={r.brand_name ?? ''}>{r.brand_name}</td>
+                <td class="whitespace-nowrap font-mono text-meta text-ink-2" title={r.site_code ?? ''}>{r.site_code}</td>
+                <td class="num tnum whitespace-nowrap font-semibold text-ink">{fmt(r.stock_qty)}</td>
                 <td>
                   <span class="inline-block h-[6px] w-[90px] overflow-hidden rounded-full bg-accent-soft align-middle">
                     <span class="block h-full bg-accent opacity-80" style="width:{Math.round(((r.stock_qty ?? 0) / invMax) * 100)}%"></span>
                   </span>
                 </td>
-                <td class="num tnum text-ink">{fmt(r.price)} <span class="text-label text-ink-3">MMK</span></td>
-                <td class="num"><span class="rounded-control px-2 py-0.5 text-micro font-semibold {sb.cls}">{sb.txt}</span></td>
+                <td class="num tnum whitespace-nowrap text-ink">{fmt(r.price)} <span class="text-label text-ink-3">MMK</span></td>
+                <td class="num whitespace-nowrap"><span class="rounded-control px-2 py-0.5 text-micro font-semibold {sb.cls}">{sb.txt}</span></td>
               </tr>
             {/each}
           {/if}
         </tbody>
       </table>
     </div>
-    <div class="flex items-center gap-3 border-t border-line px-4 py-2.5 text-meta text-ink-3">
-      <span>Showing <b class="text-ink">{iOffset + 1}–{iOffset + iRows.length}</b></span>
+    <div class="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-t border-line px-4 py-2.5 text-meta text-ink-3">
+      <span>
+        Showing <b class="text-ink">{iOffset + 1}–{iOffset + iRows.length}</b>
+        {#if !iFiltered && invTotal != null}of <b class="tnum text-ink">{fmt(invTotal)}</b>{:else}(filtered){/if}
+      </span>
+      {#if iSort.key}
+        <span>sorted by {sortLabel(I_COLS, iSort)} — this page only</span>
+      {/if}
       <select bind:value={iSize} onchange={() => { iOffset = 0; loadInventory(); }} aria-label="Page size" class="rounded-panel border border-line bg-surface px-2 py-1 text-meta text-ink">
         {#each [25, 50, 100] as n}<option value={n}>{n} / page</option>{/each}
       </select>
@@ -550,3 +698,19 @@
   </div>
 </div>
 {/if}
+
+<style>
+  /* Row density, scoped to this page only.
+     `.tbl` in app.css pads cells 10px top and bottom, which is right for the
+     short listings it was written for (a dozen sites, a handful of files) and
+     wrong for a 5,292-row catalog: with wrapping cells it gave 37–90px rows
+     and eight products on a laptop screen. Truncation (above) makes every row
+     one line; this makes that line the height of the line. ~27px per row, so
+     roughly 23 rows in the same `calc(100vh-360px)` window that used to hold
+     eight. Utilities cannot do this — `.tbl tbody td` outranks a `py-1` on the
+     cell, so it would need an `!important` variant on every one of them. */
+  .tbl tbody td { padding-top: 4px; padding-bottom: 4px; line-height: 1.45; }
+  /* The header is already `position: sticky; top: 0` in app.css — it stays
+     visible over the scrolling body without anything added here. */
+  .tbl thead th { padding-top: 7px; padding-bottom: 7px; }
+</style>

@@ -23,6 +23,13 @@ authlib
 
 aiomysql
 
+# Ed25519 keypair generation for POST /admin/sftp/keys/generate (app/admin.py).
+#
+# It was already here as a TRANSITIVE dependency and nothing declared it, so a
+# future bump of whatever pulls it in would take the SFTP key generator with it.
+# Declared directly because we import it directly.
+cryptography
+
 # The IANA time zone database, for zoneinfo.ZoneInfo.
 #
 # python:3.12-slim ships an incomplete /usr/share/zoneinfo: `Asia/Yangon`

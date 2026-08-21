@@ -2,6 +2,15 @@
   import { onMount } from 'svelte';
   import { base } from '$app/paths';
   import { getJSON } from '$lib/api.js';
+
+  /** The product name, for the preview's panel header.
+   *
+   *  Starts EMPTY, and the request omits the title until `/brand` answers — an
+   *  empty string would be sent as a title and render a blank header, which is
+   *  worse than the one-frame default. `/brand` is public, so this needs no
+   *  token. */
+  let brandName = $state('');
+
   import PageHeader from '$lib/PageHeader.svelte';
   import { ShieldCheck, RefreshCw, ExternalLink, Table2, Languages, ListChecks,
     Quote, Store, CircleDashed, Lock } from '@lucide/svelte';
@@ -90,7 +99,25 @@
 
   const ORIGIN = typeof window === 'undefined' ? '' : window.location.origin;
 
-  onMount(load);
+  async function loadBrandName() {
+    try {
+      const r = await fetch(ORIGIN + '/brand');
+      if (!r.ok) return;
+      const d = await r.json();
+      const n = String(d?.product_name ?? '').trim();
+      if (n) brandName = n;
+    } catch {
+      /* offline or an older backend — the snippet's own default stands */
+    }
+  }
+
+  onMount(async () => {
+    // Awaited, not fired alongside: the preview link is minted with the
+    // title baked into its token, so a name arriving after the mint would
+    // not reach the panel until the next 'New preview'.
+    await loadBrandName();
+    await load();
+  });
 
   async function load() {
     status = 'loading';
@@ -135,7 +162,16 @@
           embed_id: cred.embed_id,
           public_key: cred.public_key,
           base_url: ORIGIN,
-          title: 'Stock assistant'
+          // Spread so an unknown name omits the key rather than sending '',
+          // which _snippet_html would treat as falsy and replace with
+          // "Pharmacy · <store>" — a third name for the same thing.
+          // The preview must call the assistant whatever the product is
+          // currently called. This was the literal 'Stock assistant', which
+          // survived the rename and left the panel header disagreeing with the
+          // rail, the sign-in screen and its own footer. widget.js only falls
+          // back to the brand name when `data-title` is ABSENT, and
+          // `_snippet_html` always emits one, so the name has to be sent.
+          ...(brandName ? { title: brandName } : {})
         })
       });
       previewUrl = r?.url ?? null;

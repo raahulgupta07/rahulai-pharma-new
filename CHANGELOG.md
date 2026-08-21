@@ -8,6 +8,61 @@ Format: `## <version> — <YYYY-MM-DD>`, then any of `### Fixed`, `### Added`,
 `### Changed`, `### Security`. `app/release_notes.py` parses exactly that, and
 the admin console renders it, so a heading it does not recognise is dropped.
 
+## 1.6.2 — 2026-08-21
+
+### Added
+
+- The sign-in screen now has a Continue with LDAP button. Directory sign-in
+  was already switched on and working, but the screen only ever asked for an
+  email address — and most directory accounts are a plain username, which there
+  was no way to type. The button swaps the form to a Username field; Continue
+  with Email switches back, and the choice is remembered next time.
+- Sending files by SFTP is now a page you can follow instead of a set of
+  instructions you have to be told. Adding a partner is four numbered steps, the
+  console makes the key itself rather than asking someone to produce one, and a
+  replayed terminal shows exactly what a partner will type and see.
+- A partner can be handed a single file that already contains their key and
+  address, so there is nothing for them to fill in, rename or copy. It is also
+  available as a downloadable pack.
+- Clicking a partner opens a panel from the right with their key and the exact
+  commands for that partner, ready to copy.
+- A partner's key can be replaced in place — the old one stops working, the
+  new one is issued, and the partner keeps their name, settings and history.
+  Previously the only way was to delete them and start again.
+- Staff who sign in through the directory or single sign-on, and whose account
+  is not approved yet, now get a screen that thanks them by name of product,
+  says an administrator will review the request, and shows which sign-in they
+  used. It still tells them plainly that nobody is alerted automatically and
+  they need to ask an administrator, because that remains true.
+
+### Fixed
+
+- The company name in the footer was wrong on every screen. It read City
+  Medical Health & Logistics; the company is City Mart Holding Co., Ltd.
+- The CMHL logo was almost invisible in dark mode — it sat on a dark tile, and
+  the purple half of the mark disappeared into it.
+- The waiting-for-approval screen sent people to a "Users page" that has not
+  been called that for some time. It now points at People & access.
+
+- The Branch assistant opened on an empty screen with nothing to click.
+- The example questions on that screen looked like ordinary text, so nobody
+  pressed them. They now look like the buttons they always were.
+- The catalog was a wall of text rather than a table, and every row claimed the
+  product was held at 53 sites — the same number on all 5,292 rows, because it
+  was never read from anything. The column is gone.
+- The chat button on customer sites squashed the logo into a circle and cropped
+  its corners. It is now a square tile the right way up.
+- Suggested follow-up questions appeared inside the assistant's answer, as if it
+  had said them. They now sit below it, where they read as offers.
+- Uploaded files needed a Save nobody could see. They are picked up on their own.
+- Buttons across the console had stopped showing the hand cursor, so nothing
+  looked pressable.
+
+### Changed
+
+- The assistant introduces itself as City Care Agent on customer sites; one
+  place still said Stock assistant.
+
 ## 1.6.1 — 2026-08-20
 
 ### Fixed
