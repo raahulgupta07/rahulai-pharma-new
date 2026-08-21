@@ -71,6 +71,11 @@ services:
     # uid:gid:dir tail makes atmoz create + chown the upload dir to the user,
     # so SFTP writes succeed even though it is a mounted volume.
     command: "pharma:${SFTP_PASSWORD:-pharma}:1001:1001:upload"
+    environment:
+      # sshd is key-only unless this says true (docker/sftp/files/sshd_config).
+      # The password above still creates the account; it just cannot be used to
+      # log in. Leave false anywhere the port is reachable from outside.
+      SFTP_ALLOW_PASSWORD: "${SFTP_ALLOW_PASSWORD:-false}"
     volumes:
       - sftp_data:/home/pharma/upload
       # THE shared key volume. The api writes /sftp_ssh/authorized_keys (+ mirrors

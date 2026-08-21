@@ -90,6 +90,20 @@ if [ -d /etc/sftp.d ]; then
     unset f
 fi
 
+# Password auth is OFF in sshd_config (see the comment there). This is the one
+# way back on, and it is deliberately loud: a shared password on an
+# internet-reachable SFTP account is how this ends badly.
+#
+# Applied on EVERY start, not just first run, because the config file lives in
+# the image while the flag lives in the environment — a container recreated
+# with the flag flipped must reflect the flag, not the image.
+if [ "$(echo "${SFTP_ALLOW_PASSWORD:-false}" | tr '[:upper:]' '[:lower:]')" = "true" ]; then
+    log "WARNING: SFTP_ALLOW_PASSWORD=true — enabling password authentication."
+    log "WARNING: the sftp account is SHARED. Do not use this on a host whose"
+    log "WARNING: SFTP port is reachable from outside."
+    sed -i 's/^PasswordAuthentication no$/PasswordAuthentication yes/; s/^KbdInteractiveAuthentication no$/KbdInteractiveAuthentication yes/' /etc/ssh/sshd_config
+fi
+
 if $startSshd; then
     log "Executing sshd"
     exec /usr/sbin/sshd -D -e

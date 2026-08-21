@@ -35,4 +35,11 @@ services:
 
   sftp:
     ports: !override
-      - "2223:22"
+      # ONE value decides both halves of the SFTP handoff: the port docker
+      # publishes here, and the port the console tells a partner to connect to
+      # (`SFTP_PUBLIC_PORT` -> GET /admin/sftp/connection -> the connection card
+      # and the partner pack). They used to be written in two places and they
+      # drifted: this file bound 2223 while `.env` still said 2222, so the page
+      # handed every partner a port with nothing behind it. Reading the same
+      # variable makes that particular lie impossible.
+      - "${SFTP_PUBLIC_PORT:-2223}:22"

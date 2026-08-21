@@ -13,6 +13,25 @@ PermitRootLogin no
 X11Forwarding no
 AllowTcpForwarding no
 
+# Key-only by default.
+#
+# The account here is SHARED — every partner uploads as the same user — so a
+# password on it is a secret that cannot be rotated without telling everybody
+# at once, and in practice it stays at whatever the compose default was. Ours
+# sat at `change-me` on production; the only thing standing between that and
+# the internet was a closed firewall port, which is not a control anyone chose
+# on purpose.
+#
+# Registered keys are the supported path: the admin console generates a
+# keypair per partner, writes the public half to authorized_keys, and can
+# revoke one partner without touching the others.
+#
+# Set SFTP_ALLOW_PASSWORD=true to turn password auth back on (the entrypoint
+# rewrites these two lines and logs a warning). Intended for local
+# development, where the drop folder holds nothing worth stealing.
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+
 # Force sftp and chroot jail
 Subsystem sftp internal-sftp
 ForceCommand internal-sftp

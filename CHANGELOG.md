@@ -8,6 +8,22 @@ Format: `## <version> — <YYYY-MM-DD>`, then any of `### Fixed`, `### Added`,
 `### Changed`, `### Security`. `app/release_notes.py` parses exactly that, and
 the admin console renders it, so a heading it does not recognise is dropped.
 
+## 1.6.4 — 2026-08-21
+
+### Security
+
+- The file-drop server now accepts registered keys only; the shared password
+  no longer opens it. Every partner has their own key, generated on the Data
+  file transfer page, so one partner can be removed without disturbing the
+  rest. Set SFTP_ALLOW_PASSWORD=true to allow passwords again on a development
+  machine.
+
+### Fixed
+
+- The Data file transfer page told partners to connect on the wrong port. The
+  port it displays and the port the server actually opens are now the same
+  setting, so they cannot disagree again.
+
 ## 1.6.3 — 2026-08-21
 
 ### Added
