@@ -101,6 +101,24 @@ RUN_LIVE=1 ./venv/bin/python -m evals.run_eval # live LLM accuracy (Claude, cost
 
 Last results: pytest 38/38; live eval 13/13; load 50 users 0 errors, p95 ~20ms, cache hit 95.6%.
 
+### Data pipeline smoke test (needs a running stack, not pytest)
+
+```bash
+ADMIN_EMAIL=... ADMIN_PASSWORD=... ./scripts/pipeline_smoke.sh \
+  --base https://citycareagent.citygpt.xyz --sftp-host 127.0.0.1
+```
+
+Registers its own partner key, uploads over SFTP as a partner would, waits for
+the watcher, checks the catalog survived and the assistant still answers, then
+revokes the key. Run it FROM the host running sshd unless the SFTP port is
+reachable from where you are — on production it is closed at the security
+group, so `--sftp-host 127.0.0.1` on the box is the only way in.
+
+By default it replays the newest catalog already in the archive, so the load
+nets to zero. Catalog mode is `full_sync`: any OTHER file you pass replaces the
+product list for real, and an inventory file additionally needs
+`--i-know-this-replaces-stock`.
+
 ## Security model
 
 - `store_id` comes from the **signed** session token, force-scoped into every tool — a user cannot read another branch's stock.
