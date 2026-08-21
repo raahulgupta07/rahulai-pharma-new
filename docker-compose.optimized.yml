@@ -19,7 +19,13 @@
 services:
   api:
     ports: !override
-      - "8091:8000"
+      # Env-driven for the same reason the sftp port below is: production
+      # publishes this on 8002, and when the port was a literal here the only
+      # way to say so was to edit this file ON the server. That left the
+      # deployed tree permanently dirty, so every `git pull` had to be talked
+      # past a conflict in a file that also carries real changes — exactly the
+      # situation where somebody eventually resolves it the wrong way.
+      - "${API_PUBLIC_PORT:-8091}:8000"
     environment:
       # The fast path is OFF by default everywhere. Turn it on here so the
       # optimize stack can be benched against the baseline with it running.
