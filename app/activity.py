@@ -367,6 +367,17 @@ _ROUTES: List[Tuple[str, Any, Optional[Tuple[str, Any]]]] = [
     ("POST", re.compile(r"^/admin/answer-style$"), ("keys", ("style",))),
     ("POST", re.compile(r"^/admin/aliases$"), ("keys", ("alias", "article_code"))),
     ("DELETE", re.compile(r"^/admin/aliases/(?P<target>[^/]+)$"), None),
+    # --- branch visibility: who hid a branch, and what they said -------------
+    # `note` is an operator's own words ("branch closed"), written for the next
+    # admin to read. It is kept deliberately: without it the trail records that
+    # somebody hid a branch and never why, which is the question anyone reading
+    # this row six months later is actually asking. Nothing sensitive passes
+    # through this body — the only other field is the status itself.
+    (
+        "POST",
+        re.compile(r"^/admin/stores/(?P<target>[^/]+)/status$"),
+        ("keys", ("status", "note")),
+    ),
     # --- data movement: identified by the path, body is a file or a trigger --
     ("POST", re.compile(r"^/admin/sftp/file/(?P<target>[^/]+)/retry$"), None),
     ("DELETE", re.compile(r"^/admin/sftp/file/(?P<target>[^/]+)$"), None),
@@ -387,6 +398,18 @@ def match_route(method: str, path: str) -> Tuple[Optional[str], Optional[Any]]:
                 target = hit.groupdict().get("target")
             except Exception:  # noqa: BLE001
                 target = None
+            # Edge whitespace is stripped because the ROUTES capture it from the
+            # RAW url while the handlers normalise before they act. A request to
+            # `/admin/stores/20043-CCSJ%20/status` really does change branch
+            # `20043-CCSJ`, and filing the audit row under `'20043-CCSJ '`
+            # records that act against a branch code that does not exist: the
+            # Activity feed shows a branch nobody can look up, and the row no
+            # longer collapses with the handler's own (correctly-named) row, so
+            # one act reads as two. A URL segment with edge whitespace is the
+            # same entity as one without — the audit trail is the last place
+            # that should disagree about which thing was acted on.
+            if isinstance(target, str):
+                target = target.strip() or None
             return target, spec
     return None, None
 
@@ -447,10 +470,19 @@ def action_for(method: str, path: str, target: Optional[str] = None) -> str:
     entry, and it is preferable to guessing which segment is an id.
     """
 
-    drop = {target} if target else set()
+    # ⚠️ Compare STRIPPED, because `match_route` strips the target it captures
+    # while this walks the RAW path. `/admin/stores/20043-CCSJ%20/status` decodes
+    # to a segment `'20043-CCSJ '` and a target `'20043-CCSJ'`; matching them
+    # literally fails, the branch code survives into the slug, and the very
+    # cardinality explosion this function exists to prevent comes back — one
+    # unique action per branch, plus a summary that falls back to the raw route
+    # name and shows a console user our internals. Found on screen by an agent
+    # reading the audit trail, after I introduced it by adding the strip to
+    # `match_route` without changing the comparison here.
+    drop = {target.strip()} if target else set()
     segs = [
         s for s in path.strip("/").split("/")
-        if s and not _ID_LIKE.match(s) and s not in drop
+        if s and not _ID_LIKE.match(s) and s.strip() not in drop
     ]
     if not segs:
         segs = ["root"]

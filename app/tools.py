@@ -90,6 +90,153 @@ def _site_clause(col: str, param: str) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# Branch registry visibility (1.7.0)
+# ---------------------------------------------------------------------------
+#
+# TWO INDEPENDENT FILTERS NOW APPLY TO EVERY INVENTORY READ, and they answer
+# different questions:
+#
+#   `_site_clause` / `_effective_site` — "which branch may THIS SESSION see?"
+#       A per-request store scope from a signed embed token. One branch, chosen
+#       by the caller's credential. Absent in public mode.
+#
+#   `_visible_site_clause`             — "which branches may ANY customer see?"
+#       The `stores` registry. A branch with `status='disabled'` is meant to be
+#       ABSENT, not "closed" or "unavailable" — it must not appear in a stock
+#       row, a branch list, a branch count or a company-wide total.
+#
+# They compose by AND: a scoped session still cannot see a disabled branch, and
+# an unscoped one still cannot see it either. Neither replaces the other, so
+# every site-aware query carries both.
+#
+# ⚠️ THE SHAPE OF THIS FILTER IS LOAD-BEARING — it is an EXCLUSION, never a join.
+# The fragment itself is OWNED BY `app.stores.not_disabled_clause`, which this
+# module delegates to rather than spelling out, so the registry's owner and its
+# readers can never drift apart on what "visible" means:
+#
+#   NOT EXISTS (SELECT 1 FROM stores _s WHERE _s.site_code = <col>
+#                                         AND _s.status = 'disabled')
+#
+# The obvious alternative, `JOIN stores s ON s.site_code = i.site_code AND
+# s.status = 'active'`, returns NOTHING whenever the registry is empty or lags
+# behind inventory — the whole product would answer "we have no stock anywhere",
+# which is far worse than the bug being fixed. Written as an exclusion, the
+# failure mode inverts and becomes harmless:
+#
+#   * registry EMPTY            -> no row is disabled -> nothing excluded ->
+#                                  behaviour identical to 1.6.x.
+#   * a site in `inventory` but
+#     not yet in `stores`       -> nothing excluded -> the branch stays visible.
+#                                  Matches the owner's "missing must never hide a
+#                                  live branch" rule, and `ensure_stores_table()`
+#                                  seeds it as active shortly after anyway.
+#   * `stores` table ABSENT     -> `_registry_ready()` returns False and the
+#                                  predicate degrades to literal TRUE. A missing
+#                                  table can therefore never raise mid-answer.
+#
+# Only an explicit `status='disabled'` row can ever remove anything. There is no
+# input to these queries that makes them return less than 1.6.x did EXCEPT an
+# admin having disabled that exact branch on purpose.
+
+_REGISTRY_READY: bool = False
+_REGISTRY_CHECKED_AT: float = float("-inf")
+_REGISTRY_RECHECK_SECONDS = 30.0
+
+
+async def _registry_ready() -> bool:
+    """Is the `stores` registry table present? Cached, and never re-checked once
+    True (the table is created at boot and is never dropped).
+
+    A negative answer is re-checked at most every
+    ``_REGISTRY_RECHECK_SECONDS`` so a fresh database that gains the table part
+    way through a process starts filtering without a restart — and so a probe
+    is not paid on every single tool call while it is genuinely absent.
+    """
+
+    global _REGISTRY_READY, _REGISTRY_CHECKED_AT
+
+    if _REGISTRY_READY:
+        return True
+    now = time.monotonic()
+    if now - _REGISTRY_CHECKED_AT < _REGISTRY_RECHECK_SECONDS:
+        return False
+    _REGISTRY_CHECKED_AT = now
+    try:
+        rows = await q("SELECT to_regclass('public.stores') IS NOT NULL AS present")
+    except Exception:  # noqa: BLE001 — a probe failure must not break an answer
+        logger.warning("stores registry probe failed; not filtering", exc_info=True)
+        return False
+    _REGISTRY_READY = bool(rows and rows[0].get("present"))
+    return _REGISTRY_READY
+
+
+async def _visible_site_clause(col: str) -> str:
+    """SQL predicate: ``col`` names a branch customers are allowed to see.
+
+    Takes NO query parameter, so it can be spliced into any query without
+    disturbing its ``$n`` numbering. Returns the literal ``TRUE`` when the
+    registry is unavailable — see the note above on why this direction of
+    failure is the only acceptable one.
+
+    ⚠️ ``col`` MUST be table-qualified (``i.site_code``, ``inventory.site_code``)
+    and this is enforced here, not merely documented. The correlated subquery
+    selects from `stores`, which HAS a `site_code` column of its own, so a bare
+    ``site_code`` in the predicate binds to the INNER scope: the clause silently
+    becomes ``_s.site_code = _s.site_code``, which is true for every registry
+    row, so `NOT EXISTS` turns false for EVERY branch as soon as a single branch
+    is disabled — the whole chain answers "no stock anywhere". That is exactly
+    the catastrophe this module is supposed to make impossible, arriving through
+    a different door. It was written that way first and caught by running it.
+
+    `app.stores.not_disabled_clause` RAISES on an unqualified column too, so
+    this check is deliberately duplicated rather than delegated: raising here
+    names THIS caller and the argument it passed, while the helper's copy is the
+    backstop for callers that reach it without going through this wrapper. Do
+    not delete either one on the grounds that the other exists — one guard would
+    still be correct, and the reader who removes the "redundant" one has to pick
+    the right one, from the wrong file, to keep the message useful.
+
+    The two responsibilities are split on purpose: `app.stores` owns the SQL
+    SHAPE (it owns the table), and this wrapper owns the CALLING CONDITIONS —
+    the column is qualified, and the table actually exists.
+    """
+
+    if "." not in col:
+        raise ValueError(
+            f"_visible_site_clause needs a table-qualified column, got {col!r} — "
+            "an unqualified name binds to stores.site_code and hides every branch"
+        )
+    if not await _registry_ready():
+        return "TRUE"
+    # ⚠️ FUNCTION-LOCAL ON PURPOSE — `app.tools` and `app.stores` IMPORT EACH
+    # OTHER, and neither import may be lifted to module scope.
+    #
+    #   app.tools   -> app.stores.not_disabled_clause   (this line)
+    #   app.stores  -> app.tools._site_clause           (in `list_stores`, which
+    #                                                    matches a caller's store
+    #                                                    pin with the same anchored
+    #                                                    site-token rules)
+    #
+    # The cycle is real. Measured, all four arrangements, both import orders:
+    # moving ONE of the two to module scope still imports fine — it is only when
+    # BOTH are at module scope that Python raises
+    #
+    #   ImportError: cannot import name '_site_clause' from partially
+    #   initialized module 'app.tools' (most likely due to a circular import)
+    #
+    # and the process refuses to START — not a test failure, not a first-chat
+    # failure. That is what makes this dangerous rather than merely untidy: the
+    # person who lifts the FIRST one to module scope sees everything work, ships
+    # it, and arms the trap for whoever later does the same to the other side.
+    # So the rule is per-side and unconditional — keep this one local even if
+    # the other side currently looks safe to move. `app.stores` carries the
+    # mirror of this note.
+    from app.stores import not_disabled_clause
+
+    return not_disabled_clause(col)
+
+
 def _to_float(value: Any) -> Optional[float]:
     """Coerce a possibly-``Decimal`` numeric value to ``float`` (or ``None``).
 
@@ -261,6 +408,7 @@ async def get_article_info(code: str) -> List[Dict]:
     """
 
     scope = get_store_scope()
+    visible = await _visible_site_clause("i.site_code")
     rows = await q(
         """
         SELECT i.article_code,
@@ -288,6 +436,7 @@ async def get_article_info(code: str) -> List[Dict]:
           LEFT JOIN catalog c USING (article_code)
          WHERE i.article_code = $1
            AND ($2::text IS NULL OR """ + _site_clause("i.site_code", "$2") + """)
+           AND """ + visible + """
          ORDER BY i.site_code
         """,
         code,
@@ -374,6 +523,7 @@ async def get_stock(code: str, site: str = "") -> List[Dict]:
     """
 
     site = _effective_site(site)
+    visible = await _visible_site_clause("inventory.site_code")
     if site:
         rows = await q(
             """
@@ -383,6 +533,7 @@ async def get_stock(code: str, site: str = "") -> List[Dict]:
               FROM inventory
              WHERE article_code = $1
                AND """ + _site_clause("site_code", "$2") + """
+               AND """ + visible + """
              ORDER BY stock_qty DESC NULLS LAST
             """,
             code,
@@ -396,6 +547,7 @@ async def get_stock(code: str, site: str = "") -> List[Dict]:
                    stock_qty
               FROM inventory
              WHERE article_code = $1
+               AND """ + visible + """
              ORDER BY stock_qty DESC NULLS LAST
             """,
             code,
@@ -416,6 +568,7 @@ async def top_by_stock(site: str, n: int = 5) -> List[Dict]:
     """
 
     site = _effective_site(site)
+    visible = await _visible_site_clause("i.site_code")
     limit = min(max(int(n), 1), 50)
     rows = await q(
         """
@@ -425,6 +578,7 @@ async def top_by_stock(site: str, n: int = 5) -> List[Dict]:
           FROM inventory i
           JOIN catalog c USING (article_code)
          WHERE """ + _site_clause("i.site_code", "$1") + """
+           AND """ + visible + """
          ORDER BY i.stock_qty DESC NULLS LAST
          LIMIT $2
         """,
@@ -453,7 +607,9 @@ async def filter_by_price(
     """
 
     site = _effective_site(site)
-    conditions = ["i.price >= $1"]
+    # Takes no parameter, so it can sit in `conditions` without disturbing the
+    # $n numbering built below.
+    conditions = ["i.price >= $1", await _visible_site_clause("i.site_code")]
     params: List[Any] = [min_price]
 
     if max_price is not None:
@@ -572,6 +728,10 @@ async def summarize_article(code: str) -> Dict:
     """
 
     scope = get_store_scope()
+    # Disabled branches are excluded from the SUM as well as from the row list —
+    # a disabled branch's units are not part of the company total. The owner
+    # decided totals move when a branch is disabled; that is this line.
+    visible = await _visible_site_clause("i.site_code")
     rows = await q(
         """
         SELECT i.article_code,
@@ -593,6 +753,7 @@ async def summarize_article(code: str) -> Dict:
           LEFT JOIN catalog c USING (article_code)
          WHERE i.article_code = $1
            AND ($2::text IS NULL OR """ + _site_clause("i.site_code", "$2") + """)
+           AND """ + visible + """
          GROUP BY i.article_code, c.brand_name, c.generic_name
         """,
         code,
@@ -659,6 +820,8 @@ async def search_by_meaning(query: str, site: str = "") -> List[Dict]:
     qv = to_pgvector(await embed_query_cached(query))
     site = _effective_site(site)
     if site:
+        # "stocked at this site" must not be satisfied by a disabled branch.
+        visible = await _visible_site_clause("i.site_code")
         return await q(
             """
             SELECT c.article_code, c.brand_name, c.generic_name, c.indication
@@ -668,6 +831,7 @@ async def search_by_meaning(query: str, site: str = "") -> List[Dict]:
                    SELECT 1 FROM inventory i
                     WHERE i.article_code = c.article_code
                       AND """ + _site_clause("i.site_code", "$2") + """
+                      AND """ + visible + """
                )
              ORDER BY c.embedding <=> $1::vector
              LIMIT 10
@@ -719,7 +883,8 @@ async def related_drugs(code: str, hops: int = 2, in_stock_site: str = "") -> Li
     codes = [r["article_code"] for r in rows]
     stock = await q(
         """SELECT article_code, stock_qty FROM inventory
-            WHERE """ + _site_clause("site_code", "$1") + """ AND article_code = ANY($2)""",
+            WHERE """ + _site_clause("site_code", "$1") + """ AND article_code = ANY($2)
+              AND """ + await _visible_site_clause("inventory.site_code"),
         site, codes,
     )
     smap = {s["article_code"]: s["stock_qty"] for s in stock}
@@ -766,7 +931,8 @@ async def drugs_for_same_condition(code: str, in_stock_site: str = "") -> List[D
     codes = [r["article_code"] for r in rows]
     stock = await q(
         """SELECT article_code, stock_qty FROM inventory
-            WHERE """ + _site_clause("site_code", "$1") + """ AND article_code = ANY($2)""",
+            WHERE """ + _site_clause("site_code", "$1") + """ AND article_code = ANY($2)
+              AND """ + await _visible_site_clause("inventory.site_code"),
         site, codes,
     )
     smap = {s["article_code"]: s["stock_qty"] for s in stock}
@@ -791,6 +957,7 @@ async def find_at_other_stores(code: str) -> List[Dict]:
     """
 
     scope = get_store_scope()
+    visible = await _visible_site_clause("inventory.site_code")
     if scope:
         rows = await q(
             """
@@ -801,6 +968,7 @@ async def find_at_other_stores(code: str) -> List[Dict]:
              WHERE article_code = $1
                AND stock_qty > 0
                AND NOT """ + _site_clause("site_code", "$2") + """
+               AND """ + visible + """
              ORDER BY stock_qty DESC
              LIMIT 15
             """,
@@ -816,6 +984,7 @@ async def find_at_other_stores(code: str) -> List[Dict]:
               FROM inventory
              WHERE article_code = $1
                AND stock_qty > 0
+               AND """ + visible + """
              ORDER BY stock_qty DESC
              LIMIT 15
             """,
@@ -842,6 +1011,10 @@ async def list_sites(query: str = "") -> List[Dict]:
         articles stocked). Ordered by site_code.
     """
 
+    # A disabled branch must not be nameable, so it is absent from all three
+    # branches here — including the count of rows the model sees, which is what
+    # it uses to answer "how many branches do you have".
+    visible = await _visible_site_clause("inventory.site_code")
     if get_store_scope():
         # Locked to one store — only ever expose that one.
         rows = await q(
@@ -849,6 +1022,7 @@ async def list_sites(query: str = "") -> List[Dict]:
                       count(DISTINCT article_code) AS sku_count
                  FROM inventory
                 WHERE """ + _site_clause("site_code", "$1") + """
+                  AND """ + visible + """
                 GROUP BY site_code ORDER BY site_code""",
             get_store_scope(),
         )
@@ -859,6 +1033,7 @@ async def list_sites(query: str = "") -> List[Dict]:
                       count(DISTINCT article_code) AS sku_count
                  FROM inventory
                 WHERE site_code ILIKE '%' || $1 || '%'
+                  AND """ + visible + """
                 GROUP BY site_code ORDER BY site_code LIMIT 50""",
             query,
         )
@@ -866,6 +1041,7 @@ async def list_sites(query: str = "") -> List[Dict]:
         """SELECT site_code, max(site_name) AS site_name,
                   count(DISTINCT article_code) AS sku_count
              FROM inventory
+            WHERE """ + visible + """
             GROUP BY site_code ORDER BY site_code LIMIT 100"""
     )
 

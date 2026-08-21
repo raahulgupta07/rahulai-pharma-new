@@ -221,6 +221,47 @@ def parse_catalog(path: str, report: Optional[Dict] = None) -> List[Dict]:
     return rows
 
 
+# Spellings of "the branch's name" we will accept in a balance export, best
+# first. No CityCare export has ever carried one — the June and August files
+# both stop at `weighted_cost_price` — so this is entirely about the day one
+# does. Matching only the exact string `site_name` would have meant a partner
+# who sends "Site Name" or "Branch Name" gets silently ignored, and a null name
+# looks precisely like today's normal, so nobody would ever find out.
+_SITE_NAME_COLUMNS = (
+    "site_name",
+    "site_description",
+    "branch_name",
+    "store_name",
+    "outlet_name",
+    "location_name",
+)
+
+
+def _norm_header(name: str) -> str:
+    """Fold a header to letters+digits only: 'Site Name' / 'SITE_NAME' -> 'sitename'."""
+
+    return "".join(ch for ch in str(name).lower() if ch.isalnum())
+
+
+def _find_site_name_column(columns) -> Optional[str]:
+    """The frame's branch-name column, whatever the partner spelled it, or None.
+
+    Resolved ONCE per file and the real column name handed back, so the row loop
+    can do a plain ``r.get(col)``. Folding 111,654 headers inside the loop would
+    cost more than the rest of the parse put together.
+    """
+
+    folded = {}
+    for c in columns:
+        # First spelling wins, so a duplicate header cannot silently take over.
+        folded.setdefault(_norm_header(c), c)
+    for candidate in _SITE_NAME_COLUMNS:
+        hit = folded.get(_norm_header(candidate))
+        if hit is not None:
+            return hit
+    return None
+
+
 def parse_inventory(path: str, report: Optional[Dict] = None) -> List[Tuple]:
     """Parse balance_stock into inventory tuples (deduped on article+site)."""
 
@@ -248,6 +289,9 @@ def parse_inventory(path: str, report: Optional[Dict] = None) -> List[Tuple]:
     # The count is returned to the caller either way, because the real defect
     # was the silence, not the choice — a duplicate means the partner's export
     # disagrees with itself, and somebody should see that.
+    # Resolved once, outside the loop — see _find_site_name_column.
+    site_name_col = _find_site_name_column(df.columns)
+
     by_key: "OrderedDict[Tuple[str, str], Tuple]" = OrderedDict()
     duplicates = 0
     for _, r in df.iterrows():
@@ -268,7 +312,12 @@ def parse_inventory(path: str, report: Optional[Dict] = None) -> List[Tuple]:
                 price = None
         except (TypeError, ValueError):
             price = None
-        by_key[key] = (code, site, None, qty, price, "MMK")
+        # site_name was hardcoded None here. No CityCare balance export has ever
+        # carried a branch name, so this is None today either way and 0 of
+        # 111,654 loaded rows have one — but pinning it to None meant a partner
+        # who starts sending names would be ignored forever.
+        name = _clean(r.get(site_name_col)) if site_name_col else None
+        by_key[key] = (code, site, name, qty, price, "MMK")
 
     if report is not None:
         report.update({
@@ -276,6 +325,13 @@ def parse_inventory(path: str, report: Optional[Dict] = None) -> List[Tuple]:
             "rows_in_file": int(len(df)),
             "rows_parsed": len(by_key),
             "duplicates": duplicates,
+            # Which header we read branch names from, or None for "the file has
+            # none". Reported for the same reason the catalog side reports
+            # `columns_matched`: without it, "the partner has not sent names
+            # yet" and "the partner sent names and we ignored them" look
+            # identical from the outside — both are 53 branches with no name.
+            "site_name_column": site_name_col,
+            "named_sites": len({r[1] for r in by_key.values() if r[2]}),
         })
     if duplicates:
         # WARNING, not debug: the partner's export contradicts itself, and the
@@ -285,7 +341,141 @@ def parse_inventory(path: str, report: Optional[Dict] = None) -> List[Tuple]:
             "LAST value for each. %d rows in file, %d loaded.",
             duplicates, Path(path).name, len(df), len(by_key),
         )
+    if site_name_col:
+        # Worth a line: this has never happened, and the first time it does is
+        # the moment the branch registry stops showing 53 bare codes.
+        logger.info(
+            "inventory parse: reading branch names from column %r in %s",
+            site_name_col, Path(path).name,
+        )
     return list(by_key.values())
+
+
+# ---- the branch registry ---------------------------------------------------
+
+
+def _file_site_codes(records: List[Tuple]) -> Dict[str, Optional[str]]:
+    """``{site_code: site_name}`` for every branch this inventory file named.
+
+    Built from the parsed records rather than re-reading the frame, so it is
+    exactly the set of branches whose stock we are about to load — the registry
+    and ``inventory`` can never disagree about which branches the file held.
+    """
+
+    codes: Dict[str, Optional[str]] = {}
+    for r in records:
+        site, name = r[1], r[2]
+        if not site:
+            continue
+        # A later named row supersedes an earlier nameless one; a later nameless
+        # row does not erase a name we already read from this same file.
+        codes[site] = name or codes.get(site)
+    return codes
+
+
+async def _sync_store_registry(records: List[Tuple]) -> Optional[Dict]:
+    """Tell ``app.stores`` which branches this inventory file contained.
+
+    **Inventory only, and deliberately not a shared post-load hook.**
+    ``sync_from_file`` flags every known branch ABSENT from the mapping it is
+    handed. A catalog file has no site codes at all, so calling this from a
+    common "after any load" path would hand it an empty mapping and stamp all 53
+    branches as missing on every catalog upload — every morning. Keeping the
+    call on the inventory path makes that impossible rather than merely
+    unlikely, and the empty-mapping guard below covers the rest.
+
+    Never raises. A registry that failed to update is a stale console; an
+    inventory load that failed *because* the registry was down is a pharmacy
+    with no stock figures at all. Same rule as ``ingest_events.record`` and
+    ``history.record_turn`` — and the same trade-off, because the warning in the
+    log is the only sign, and the absent "new branches" line in the file's
+    history is the only sign an operator gets.
+    """
+
+    codes = _file_site_codes(records)
+    if not codes:
+        # Unreachable today (parse_inventory drops rows with no site_code, and a
+        # record-less file returns before this is called), which is exactly why
+        # it is here: the failure it prevents is silent and estate-wide.
+        logger.warning("registry sync skipped: the file named no branches")
+        return None
+
+    try:
+        from app.stores import sync_from_file
+
+        return await sync_from_file(codes)
+    except Exception:  # noqa: BLE001 - the stock load outranks its own registry
+        logger.warning("could not sync the branch registry", exc_info=True)
+        return None
+
+
+async def _ensure_store_registry() -> None:
+    """Create + seed the registry, BEFORE the truncate. The order is the point.
+
+    ``ensure_stores_table`` seeds itself from whatever ``inventory`` currently
+    holds. Run it *after* the truncate-and-reload and it seeds from the file we
+    just loaded, so a genuinely new branch is already a known row by the time
+    ``sync_from_file`` looks — ``new`` comes back empty forever and the operator
+    is never told about a branch that just appeared. Run it first and it seeds
+    from the previous snapshot, which is the "what we knew before this file"
+    the comparison needs.
+
+    Cheap and idempotent, so an old database that has never seen the registry
+    gets one on its next stock load. Non-fatal for the same reason as the sync.
+    """
+
+    try:
+        from app.stores import ensure_stores_table
+
+        await ensure_stores_table()
+    except Exception:  # noqa: BLE001
+        logger.warning("could not ensure the branch registry table", exc_info=True)
+
+
+def _branch_count(n: int) -> str:
+    return "1 branch" if n == 1 else f"{n:,} branches"
+
+
+def _some_codes(codes: List[str], limit: int = 5) -> str:
+    """Name a few branches, not all of them — a first load has 53."""
+
+    shown = sorted(codes)[:limit]
+    rest = len(codes) - len(shown)
+    return ", ".join(shown) + (f" and {rest:,} more" if rest > 0 else "")
+
+
+def _registry_notes(sync: Optional[Dict]) -> List[str]:
+    """What the branch registry learned, said to a pharmacy operator.
+
+    These are rendered VERBATIM in the file's history (``watcher._checked_line``
+    appends every note), so they follow the same voice as the rest of it:
+    "branches", not "stores rows"; what it means for the operator, not what the
+    SQL did. A branch nobody has seen before turning up in the morning file is
+    the single most useful thing this load can tell somebody.
+    """
+
+    if not sync:
+        return []
+
+    out: List[str] = []
+    new = list(sync.get("new") or [])
+    if new:
+        out.append(
+            f"{_branch_count(len(new))} sent stock for the first time: "
+            f"{_some_codes(new)}."
+        )
+    missing = list(sync.get("missing") or [])
+    if missing:
+        # Decision 2 of the 1.7.0 contract, in the operator's words: a branch
+        # dropped from an export is flagged, never hidden. Saying so here is
+        # what stops "it vanished from the file" being read as "it closed".
+        is_are = "is" if len(missing) == 1 else "are"
+        out.append(
+            f"{_branch_count(len(missing))} we have seen before {is_are} not in "
+            f"this file: {_some_codes(missing)}. Still switched on — nothing was "
+            f"hidden from customers."
+        )
+    return out
 
 
 # ---- loading ---------------------------------------------------------------
@@ -418,6 +608,10 @@ async def ingest_inventory(path: str, report: Optional[Dict] = None) -> int:
             Path(path).name,
         )
         return 0
+    # Before the truncate: the seed reads `inventory`, and after the reload that
+    # is the new file, not what we knew before it. See _ensure_store_registry.
+    await _ensure_store_registry()
+
     pool = await get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -425,6 +619,24 @@ async def ingest_inventory(path: str, report: Optional[Dict] = None) -> int:
             await conn.copy_records_to_table(
                 "inventory", records=records, columns=_INVENTORY_FIELDS
             )
+
+    # Straight after the stock rows commit, and therefore BEFORE refresh_views()
+    # in every caller (the watcher refreshes in its batch tail;
+    # reload_from_data_dir refreshes after this returns). That order is chosen,
+    # not incidental. The materialized views are derived and best-effort — a
+    # crash between the two leaves them stale for one refresh, which the next
+    # ingest or admin action fixes. The registry is not derived from anything:
+    # inventory is truncate-and-reload, so if the process dies before the sync,
+    # a branch that arrived in this file has stock rows and NO registry row, and
+    # every consumer that filters through the registry cannot see its stock.
+    # Refreshing first would buy a prettier summary at the cost of a branch that
+    # is invisible to customers until the next file lands.
+    sync = await _sync_store_registry(records)
+    if report is not None:
+        # The operator-facing sentence is built by the caller that owns a
+        # history to write it into; this just carries the facts up.
+        report["registry"] = sync
+
     await backfill_catalog_stubs()
     return len(records)
 
@@ -636,6 +848,13 @@ async def ingest_file(
         # real guard is inside ingest_inventory, which is what the UNVALIDATED
         # callers reach.
         n = await ingest_inventory(path, report=parse_report)
+        # A new branch is a fact about the FILE, so it belongs in that file's
+        # history. `notes` is the seam the watcher already renders verbatim
+        # (`_checked_line` appends every warning and note), and it is documented
+        # for precisely this: a neutral observation about the data that is not a
+        # reason to reject anything. Nothing outside this module changes.
+        for line in _registry_notes(parse_report.get("registry")):
+            report.note(line)
         return {"file": Path(path).name, "kind": "inventory", "rows": n,
                 "duplicates": int(parse_report.get("duplicates") or 0),
                 "report": parse_report,

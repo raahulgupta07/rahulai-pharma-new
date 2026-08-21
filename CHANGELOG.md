@@ -8,6 +8,37 @@ Format: `## <version> — <YYYY-MM-DD>`, then any of `### Fixed`, `### Added`,
 `### Changed`, `### Security`. `app/release_notes.py` parses exactly that, and
 the admin console renders it, so a heading it does not recognise is dropped.
 
+## 1.7.0 — 2026-08-21
+
+### Added
+
+- Branches now have their own page entry that stays put. Until now a branch
+  existed only while it appeared in the daily stock file, so a branch left out
+  of one export disappeared from the console and from every answer the
+  assistant gave. A branch you have seen once is now remembered, and a branch
+  missing from the latest file is flagged on the Branches page rather than
+  removed — nothing is hidden from customers because an export went wrong.
+- A branch can be hidden from customers. Use the menu at the end of its row on
+  the Branches page and give a short reason. A hidden branch is answered as
+  though it does not exist: it is never offered as a place that has a medicine,
+  and it cannot be given a website chat window. It stays on the Branches page
+  with its stock and the reason it was hidden, and you can switch it back on at
+  any time. Only a super admin can do this.
+- The Branches page shows what happened to each branch: newly arrived, hidden,
+  or missing from the latest file, and it can be filtered by any of those.
+- The stock file's history now says when a branch sent stock for the first
+  time, and when a branch we have seen before is absent from that file.
+
+### Changed
+
+- Hiding a branch removes its stock from company-wide totals as well, so the
+  figures on the console will fall by that branch's share on the day you hide
+  it. The confirmation says so, with that branch's actual numbers, before you
+  confirm.
+- Branch names are read from the stock file when it carries them, under any of
+  the usual spellings. No file we receive today has a name column, so branches
+  continue to show as codes until one does.
+
 ## 1.6.4 — 2026-08-21
 
 ### Security

@@ -4,6 +4,8 @@
 -- Idempotent: drops tables then recreates so a full reload is always clean.
 --   catalog   — one row per article (SKU master), incl. clinical fields
 --   inventory — stock + price per article per site (balance_stock export)
+--   stores    — the branch registry. ⚠️ NOT dropped: it accumulates and holds an
+--               admin's visibility decisions, which a data reload must not undo.
 -- NOTE: inventory has NO hard FK to catalog. The real balance_stock export
 -- references thousands of article_codes that are absent from the article
 -- export, so a strict FK would reject valid stock rows. Joins still work; an
@@ -82,6 +84,48 @@ CREATE TABLE drug_alias (
 COMMENT ON TABLE drug_alias IS 'Learned free-text -> article_code aliases (fast-path memory).';
 
 CREATE INDEX idx_drug_alias_article ON drug_alias (article_code);
+
+-- ----------------------------------------------------------------------------
+-- stores: the branch registry — which branches EXIST, and which are visible.
+--
+-- ⚠️ THE ONLY TABLE IN THIS FILE THAT IS NOT DROPPED AND RECREATED, and the
+-- exception is the whole point of it. Everything above is a daily snapshot:
+-- `inventory` is truncate-and-reload, so a branch dropped from one export used
+-- to vanish from the console and from every chat answer. This table accumulates
+-- instead — a branch, once seen, keeps existing — and it carries the admin's
+-- `status`, which is a human decision that no file may overwrite. A DROP here
+-- would discard every disabled branch on the next reload and un-hide all of
+-- them; `CREATE TABLE IF NOT EXISTS` is therefore load-bearing, not a habit.
+--
+-- Also shipped as migrations/0011_stores.sql for live databases, and applied at
+-- boot by `app.stores.ensure_stores_table()` — which additionally SEEDS this
+-- table from `inventory`. That seed is not a convenience: a filter written as
+-- `JOIN stores … AND status='active'` returns NOTHING against an empty
+-- registry, so an unpopulated table would make the product answer "no stock
+-- anywhere". See the migration for the full reasoning.
+--
+-- Defined AFTER inventory because the seed reads it. Nothing here has an FK to
+-- `inventory` — it has no unique site_code to point at, and a hard key would
+-- delete registry rows the moment a branch dropped out of one file, which is
+-- exactly the behaviour being fixed.
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS stores (
+    site_code          TEXT PRIMARY KEY,
+    site_name          TEXT,
+    status             TEXT NOT NULL DEFAULT 'active'
+                       CHECK (status IN ('active','disabled')),
+    first_seen         TIMESTAMPTZ DEFAULT now(),   -- NULL = predates the registry (seeded from
+                                      --   existing stock). NEVER read a NULL here as "today":
+                                      --   the console shows "New" for a date inside 7 days, so a
+                                      --   seed that stamped now() made 53 old branches look new
+    last_seen_in_file  TIMESTAMPTZ,   -- when a file last carried this branch
+    missing_since      TIMESTAMPTZ,   -- NULL = in the most recent file. A FLAG, never a hide
+    disabled_by        TEXT,          -- who hid it, and when. Cleared on re-enable, because
+    disabled_at        TIMESTAMPTZ,   --   they describe the CURRENT state, not a past one
+    note               TEXT
+);
+
+COMMENT ON TABLE stores IS 'Branch registry: which branches exist (accumulates) and which are visible to customers.';
 
 -- ----------------------------------------------------------------------------
 -- Indexes for common filter / lookup paths.

@@ -260,6 +260,23 @@ async def lifespan(_app: FastAPI):
             logger.info("loaded data on startup: %s", result)
     except Exception as exc:  # noqa: BLE001 - don't block startup on load
         logger.warning("startup data load skipped: %s", exc)
+    # The branch registry (0011). Placed HERE, immediately after the data load
+    # above and before anything that can serve a request: `ensure_stores_table`
+    # SEEDS itself from `inventory`, so it has to run once the inventory-bearing
+    # schema exists and is populated — on a fresh boot that population is
+    # `reload_from_data_dir()` a few lines up. Run it earlier and it creates an
+    # EMPTY registry, which is the one dangerous state this table has: a
+    # visibility filter against no rows hides every branch in the company. It
+    # re-seeds on every boot and only ever inserts codes it does not already
+    # hold, so a branch an admin disabled is never quietly re-enabled by a
+    # restart. (`app/stores.py` also reads the registry as "everything minus what
+    # is explicitly disabled", so an empty table still hides nothing.)
+    try:
+        from app.stores import ensure_stores_table
+
+        await ensure_stores_table()
+    except Exception as exc:  # noqa: BLE001 — same posture as every ensure_* here
+        logger.warning("stores registry init skipped: %s", exc)
     try:
         from app.admin import ensure_chat_logs, ensure_feedback
 

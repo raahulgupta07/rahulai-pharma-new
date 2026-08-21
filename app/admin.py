@@ -336,20 +336,104 @@ async def inventory(
 
 
 # ---- stores ----------------------------------------------------------------
+#
+# A branch's EXISTENCE now comes from the `stores` registry (app/stores.py),
+# which accumulates and never auto-deletes; its STOCK still comes from
+# `inventory`, which is truncate-and-reload from the daily file. Before the
+# registry, a branch dropped from one export vanished from this list, the embed
+# picker and every chat answer at once.
+#
+# ⚠️ **Absence from the registry must never hide a branch — only an explicit
+# disable may.** Every read below is therefore built from *everything the data
+# knows about, minus what is explicitly disabled*, never from *what the registry
+# lists as active*. The two differ only when the registry is incomplete, and
+# then they are the difference between hiding one branch somebody disabled and
+# hiding the entire company. Concretely, the shape to avoid is
+#
+#     JOIN stores s ON s.site_code = i.site_code AND s.status = 'active'
+#
+# which answers NOTHING when `stores` is empty. Agent A measured both against
+# the real 53-branch dev inventory with the registry emptied: that join returned
+# 0 branches, `stores.not_disabled_clause` / `active_codes()` still returned 53.
+# Neither appears here. On top of that, every call into `app.stores` below falls
+# back to the pre-registry `inventory` answer if it raises at all.
 
 
-@router.get("/stores")
-async def stores(scope: Optional[str] = Depends(caller_store_scope)) -> List[Dict]:
-    """Per-site summary from the materialized view (fast). Falls back to live.
+async def _registry_rows(scope: Optional[str] = None) -> Optional[List[Dict]]:
+    """Every registry row, with stock aggregates, or ``None`` if it cannot answer.
 
-    Scoped for the same reason as ``inventory`` above: unscoped, this listed
-    every branch's SKU count, unit count and stock VALUE to a branch-pinned
-    admin. It is an aggregate rather than per-row stock, but a competitor
-    branch's inventory value is exactly the kind of thing the store pin exists to
-    withhold.
+    An EMPTY result is folded into ``None`` so the caller falls back. That is
+    safe HERE and only here, because ``list_stores`` returns disabled rows too:
+    "every branch is disabled" is a 53-row answer, not an empty one, so an empty
+    result cannot be a deliberate operator decision being overridden. It can
+    only mean no data or a shape that stopped working. Today it means no data —
+    ``list_stores`` is a FULL OUTER JOIN against `inventory`, so it empties only
+    when both tables do, and then the fallback returns ``[]`` as well. The guard
+    costs one wasted query in a case that does not arise, and buys immunity to
+    that join shape ever changing.
 
-    Both the view and the live fallback are filtered, or the leak would reappear
-    the moment ``mv_store_summary`` is missing — the branch nobody tests.
+    **Do not copy this to a customer-facing filter.** Where an empty answer CAN
+    be an operator decision — :func:`_embeddable_codes` — falling back on empty
+    would silently re-enable every branch somebody disabled.
+
+    ``scope`` is passed straight through, so the store pin is matched by
+    ``tools._site_clause`` inside ``list_stores`` — the same SQL predicate as
+    every other scoped query, rather than a Python re-implementation of it here.
+    """
+
+    try:
+        from app import stores as stores_mod
+
+        rows = list(await stores_mod.list_stores(scope))
+    except Exception:  # noqa: BLE001 — module absent, table absent, DB blip
+        return None
+    return rows or None
+
+
+_STORE_TS_FIELDS = ("first_seen", "last_seen_in_file", "missing_since", "disabled_at")
+
+
+def _store_row(r: Dict) -> Dict:
+    """One registry row in the shape the console consumes.
+
+    Used by the two paths that do NOT come straight from ``list_stores`` — the
+    fallback, whose rows carry no registry fields, and the echo after a status
+    write, whose row carries no stock aggregates. Its job is to make those two
+    indistinguishable from a ``list_stores`` row: same keys, same types, every
+    field present, so the console never has to tell "absent" from "undefined".
+
+    ``skus``/``units``/``value`` keep the types they have always had (int, int,
+    float) so the existing page keeps working while the new one is built.
+
+    Timestamps are left as ``datetime`` rather than stringified here. That is
+    not laziness: ``list_stores`` rows are returned raw and serialised by
+    FastAPI, and an ``isoformat()`` on this path rendered the SAME field as
+    ``…05:46:04.471865+00:00`` from one endpoint and ``…05:46:04.471865Z`` from
+    the other. Two spellings of one instant is a parsing bug waiting on the
+    console side; let one encoder do it.
+    """
+
+    out = {
+        "site_code": r["site_code"],
+        "site_name": r.get("site_name"),
+        "status": r.get("status") or "active",
+        "skus": int(r.get("skus") or 0),
+        "units": int(r.get("units") or 0),
+        "value": float(r.get("value") or 0),
+        "disabled_by": r.get("disabled_by"),
+        "note": r.get("note"),
+    }
+    for f in _STORE_TS_FIELDS:
+        out[f] = r.get(f)
+    return out
+
+
+async def _stock_only_stores(scope: Optional[str]) -> List[Dict]:
+    """The pre-registry answer: a per-site aggregate over `inventory`.
+
+    Kept verbatim (view first, live aggregate second, both scope-filtered)
+    because it is the fallback the paragraph at the top of this section
+    describes, not dead code.
     """
 
     scope_sql = (" WHERE " + _site_clause("site_code", "$1")) if scope else ""
@@ -370,11 +454,283 @@ async def stores(scope: Optional[str] = Depends(caller_store_scope)) -> List[Dic
             + " GROUP BY site_code ORDER BY value DESC",
             *args,
         )
-    for r in rows:
-        r["units"] = int(r["units"] or 0)
-        r["value"] = float(r["value"] or 0)
-        r["skus"] = int(r["skus"] or 0)
+    return [_store_row(dict(r)) for r in rows]
+
+
+@router.get("/stores")
+async def stores(scope: Optional[str] = Depends(caller_store_scope)) -> List[Dict]:
+    """Every branch in the registry, with its stock summary. Falls back to live.
+
+    Registry-backed, so a branch with no rows in today's file is still listed —
+    with zeroes and a `missing_since` — instead of vanishing. Disabled branches
+    are returned too: this is the console's own branch list, and the page that
+    can re-enable a branch has to be able to see it.
+
+    Scoped for the same reason as ``inventory`` above: unscoped, this listed
+    every branch's SKU count, unit count and stock VALUE to a branch-pinned
+    admin. It is an aggregate rather than per-row stock, but a competitor
+    branch's inventory value is exactly the kind of thing the store pin exists to
+    withhold.
+
+    **Both the registry path and the live fallback are filtered**, or the leak
+    would reappear the moment the registry is unavailable — the branch nobody
+    tests. That was already true of the two pre-registry paths and stays true of
+    both paths here, and in both the matcher is ``tools._site_clause`` itself:
+    ``list_stores`` applies it to the coalesced site code, so the scope pin is
+    never re-implemented, only handed on.
+
+    ``list_stores`` rows are returned as they arrive. It aggregates live from
+    `inventory` rather than from `mv_store_summary` — deliberate, on agent A's
+    side: the MV carries no `site_name` and goes stale — and it has already
+    coerced skus/units to int and value to float, which is what keeps the
+    existing console page working through the migration.
+    """
+
+    rows = await _registry_rows(scope)
+    if rows is None:                      # registry raised -> pre-registry answer
+        return await _stock_only_stores(scope)
     return rows
+
+
+def _site_code_path(site_code: str) -> str:
+    """The `{site_code}` path segment, normalised ONCE for every branch route.
+
+    Every route under ``/stores/{site_code}/…`` takes its code through this
+    dependency, so all three see the identical string and cannot drift on what
+    counts as the same branch.
+
+    They had drifted. A trailing space — `20043-CCSJ%20`, one copy-paste away —
+    was accepted by ``/detail`` and ``/status`` and refused by ``/embed``, so the
+    panel could open a branch it then could not fetch embed code for, and the
+    refusal said "unknown store_id" about a branch visibly on screen. Nothing
+    resolved to the WRONG branch (the two answers were "this branch" and "no
+    branch", never "a different branch"), so it was the confusing shape rather
+    than the dangerous one — but three routes disagreeing about which branch a
+    request means is not a state to leave.
+
+    The split was not a missing trim in one place; it was a trim in the wrong
+    LAYER. ``stores.detail`` and ``stores.set_status`` each strip their own
+    argument, which is right for them — they are public functions with other
+    callers — but ``/embed`` reaches the registry through
+    ``_embeddable_codes()``, a Python ``set`` of raw codes tested with ``in``.
+    No amount of stripping inside `app.stores` can reach a set-membership test in
+    this file. It has to be normalised before either path is chosen, which means
+    here, at the HTTP boundary.
+
+    So this is deliberately NOT a fourth ``.strip()`` next to the other three. It
+    is the only one that runs before the routes diverge; the ones inside
+    `app.stores` stay as defence for its non-HTTP callers (the ingest sync) and
+    become no-ops for these three.
+
+    Whitespace at the EDGES only. `20043 CCSJ` still 404s everywhere: a space in
+    the middle is a different string, not the same code typed untidily.
+    """
+
+    return site_code.strip()
+
+
+class StoreStatusUpdate(BaseModel):
+    """Body of ``POST /admin/stores/{site_code}/status``."""
+
+    status: str
+    note: Optional[str] = None
+
+
+@router.post("/stores/{site_code}/status", dependencies=[Depends(require_super_admin)])
+async def store_set_status(
+    body: StoreStatusUpdate,
+    request: Request,
+    site_code: str = Depends(_site_code_path),
+) -> Dict:
+    """Hide a branch from customers, or bring it back. super_admin only.
+
+    ``disabled`` means *pretend this branch does not exist*: it is excluded from
+    chat answers, from customer-facing lists and from company-wide totals. It is
+    not "temporarily closed" and it is not a stock fact — which is exactly why it
+    is a deliberate, audited, super-admin-only act rather than something an
+    ingest can infer. A branch missing from the daily file is flagged, never
+    disabled.
+
+    Audit is recorded HERE, explicitly, for the same reason
+    ``sftp_keys_generate`` does it: ``activity._ROUTES`` has no entry for this
+    path, so the ``activity_audit`` middleware records route + status with an
+    empty ``detail`` and loses both the branch and the new status — and, because
+    an unlisted route captures no ``target``, the site code stays in the action
+    slug and every branch becomes its own action. Passing ``target=`` to
+    ``action_for`` keeps THIS row low-cardinality
+    (``admin.stores.status.create``); the middleware's bare companion row is
+    fixed on the other side by adding
+
+        ("POST", re.compile(r"^/admin/stores/(?P<target>[^/]+)/status$"),
+         ("keys", ("status", "note"))),
+
+    to ``_ROUTES``. That file belongs to another agent; the entry is reported,
+    not written. Nothing in the body is a secret, so the values are safe to keep.
+    """
+
+    from app import activity
+
+    try:
+        from app import stores as stores_mod
+    except Exception:  # noqa: BLE001 — registry module not deployed
+        raise HTTPException(status_code=503, detail="store registry unavailable")
+
+    actor_email, actor_role = _actor_identity(request)
+
+    try:
+        updated = await stores_mod.set_status(
+            site_code, body.status, actor_email=actor_email, note=body.note
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"unknown site_code {site_code!r}")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc) or "invalid status")
+
+    # ⚠️ **The cache is part of this contract.** Answers live in Redis under a key
+    # containing `data_version`, and the ONLY thing that invalidates them is a
+    # bump. Ingest bumps; a status change is not an ingest. Without this line the
+    # filters that hide a disabled branch apply to NEW queries only, while every
+    # cached answer keeps naming that branch, its stock and its address until the
+    # next file happens to land — up to a full day on a site that loads once a
+    # night. "Pretend it does not exist" cannot mean "for anyone who asks a
+    # question nobody asked yesterday".
+    #
+    # Both directions bump, and re-enabling is not the harmless one: the branch is
+    # back in the data while the cached answers are the ones written while it was
+    # hidden, so a returning branch stays invisible exactly as long.
+    #
+    # AFTER the write, never before — the same ordering `watcher.py` bumps LAST
+    # for. A bump while the row is still the old value lets a request in flight
+    # re-file the pre-change answer under the NEW version, where it looks fresh
+    # and survives a full TTL that no later bump can evict.
+    await cache.bump_data_version()
+
+    path = f"/admin/stores/{site_code}/status"
+    await activity.record_event(
+        activity.action_for("POST", path, target=site_code),
+        actor_email=actor_email,
+        actor_role=actor_role,
+        target=site_code,
+        method="POST",
+        path=path,
+        status=200,
+        detail={"site_code": site_code, "status": updated.get("status"), "note": body.note},
+    )
+
+    # `set_status` RETURNS the registry row alone — it does not join stock, so
+    # its `skus`/`units`/`value` would be absent and `_store_row` would fill them
+    # with zeroes. A console that patched its table from this response would show
+    # the branch it just disabled as holding no stock. Re-read through the same
+    # function the list uses so the row handed back is the same shape as the one
+    # being replaced; the registry row stands in only if the re-read misses.
+    try:
+        for row in await stores_mod.list_stores(updated["site_code"]):
+            if row["site_code"] == updated["site_code"]:
+                return _store_row(dict(row))
+    except Exception:  # noqa: BLE001 — the write succeeded; never fail on the echo
+        pass
+    return _store_row(dict(updated))
+
+
+async def _scope_permits(scope: Optional[str], site_code: str) -> bool:
+    """Would a caller pinned to ``scope`` be allowed to see ``site_code``?
+
+    ``None`` (the global view) permits everything; anything else is matched with
+    ``tools._site_clause`` — **the same predicate**, not a Python lookalike. A
+    store pin may be spelled as the full code, its numeric prefix or its alpha
+    suffix (`20043-CCSJ` / `20043` / `CCSJ`), and the two scoping bugs recorded in
+    CLAUDE.md were both a hand-written matcher disagreeing with that one. The
+    clause takes a column name, so the site code is handed to it AS a parameter
+    expression; no table is read, because there is no table to read — the
+    question is about two strings.
+
+    Every caller turns a ``False`` into the same 404 an unknown code gets. A 403
+    would be a working oracle for "this branch exists, you just cannot have it".
+    """
+
+    if scope is None:
+        return True
+    rows = await q(
+        "SELECT 1 WHERE " + _site_clause("$1::text", "$2::text"), site_code, scope
+    )
+    return bool(rows)
+
+
+@router.get("/stores/{site_code}/detail", dependencies=[Depends(require_super_admin)])
+async def store_detail(
+    site_code: str = Depends(_site_code_path),
+    scope: Optional[str] = Depends(caller_store_scope),
+) -> Dict:
+    """Everything the console knows about one branch, for the detail panel.
+
+    The body is entirely ``stores.detail``'s: stock profile, rank and share of
+    the estate, biggest holdings, conversation summary, recent questions, and the
+    audit trail for this branch **including refused attempts**. This endpoint
+    owns the boundary, not the content.
+
+    **Store scope, twice over, deliberately.** `require_super_admin` already
+    settles it — `caller_store_scope` returns ``None`` for a super_admin and a
+    plain admin never reaches the handler — so the check below is dead code
+    today. It is here because of what this route returns: `/stores` was leaking a
+    sibling branch's SKU count, unit count and stock VALUE, and `catalog_one` was
+    leaking its per-row stock. This route returns both of those AND the branch's
+    customer questions, which the conversations endpoints are scoped for on their
+    own. If this dependency is ever relaxed to `require_admin` — the obvious
+    "branch managers should see their own branch" change — the scope check is
+    what stops that from being the same leak a third time, and it fails to a 404
+    so it cannot be used to enumerate branches either.
+
+    An unknown code is a 404. So is a code outside the caller's scope: to a
+    scoped caller those are the same fact.
+    """
+
+    if not await _scope_permits(scope, site_code):
+        raise HTTPException(status_code=404, detail=f"unknown site_code {site_code!r}")
+
+    # Function-local, like every other import of `app.stores` in this file:
+    # `app.stores` and `app.tools` import each other, and this module imports
+    # `app.tools` at module scope.
+    try:
+        from app import stores as stores_mod
+    except Exception:  # noqa: BLE001 — registry module not deployed
+        raise HTTPException(status_code=503, detail="store registry unavailable")
+
+    fn = getattr(stores_mod, "detail", None)
+    if fn is None:                      # older registry build without the panel
+        raise HTTPException(status_code=503, detail="store registry unavailable")
+
+    try:
+        return await fn(site_code)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"unknown site_code {site_code!r}")
+
+
+# The panel's other half — the branch's embed snippet — is
+# `GET /stores/{site_code}/embed`, and it lives down in the embed section beside
+# the minting machinery it delegates to, because that is where its refusal rules
+# are written.
+
+
+def _actor_identity(request: Request) -> Tuple[Optional[str], Optional[str]]:
+    """``(email, role)`` off the bearer token, or ``(None, None)``.
+
+    The same four lines the sftp key routes carry inline. ``require_super_admin``
+    has already re-read this exact email's row from the ``users`` table and
+    proved it is an active, approved super_admin, so the claim is not being
+    trusted for authorisation — only for the `disabled_by` stamp and the audit
+    row.
+    """
+
+    from app import auth as authmod
+
+    try:
+        header = request.headers.get("authorization") or ""
+        if header.lower().startswith("bearer "):
+            claims = authmod.decode_token(header.split(" ", 1)[1])
+            return claims.get("email"), claims.get("role")
+    except Exception:  # noqa: BLE001 — an unreadable token is an anonymous actor
+        pass
+    return None, None
 
 
 @router.get("/data-freshness")
@@ -7528,13 +7884,59 @@ def _outlet_readme(req: "OutletSnippetRequest") -> str:
     )
 
 
+async def _embeddable_codes() -> set:
+    """The store codes a snippet or preview link may be minted for.
+
+    ``stores.active_codes()`` — which is built as *everything the data knows
+    about, minus what is explicitly disabled*, so an unregistered branch stays
+    embeddable and only a deliberate disable removes one. Both callers hand out a
+    PRE-SIGNED, store-locked artefact that outlives this request — a snippet
+    pasted onto a customer's site, or a link mailed to their developer — so a
+    disabled branch has to be refused at minting time; there is no later gate.
+
+    An EMPTY result is honoured, not overridden: `active_codes` unions the
+    registry with `inventory`, so it can only come back empty when every branch
+    is explicitly disabled (or there is no data at all), and that is an operator
+    decision rather than a broken registry.
+
+    ⚠️ **This is the one path in this section that FAILS CLOSED.** Every other
+    registry read here falls back to the raw `inventory` list when the registry
+    cannot answer, because the cost of being wrong is a list that shows a branch
+    it need not have — visible, and corrected on the next request. Minting is not
+    that. A snippet is pasted onto a customer's site and a preview link is mailed
+    to their developer; both outlive this request by months and **there is no
+    later gate** — nothing re-checks the branch's status when the widget loads.
+    Falling back to `inventory` here would mean a DB blip is enough to mint a
+    permanent, working embed for a branch somebody deliberately hid, and nobody
+    would ever learn it happened.
+
+    So: 503 rather than a guess. Disabling a branch is rare and deliberate;
+    refusing to mint for the seconds an outage lasts costs an operator one retry,
+    and it is the one place where guessing wrong does not self-correct.
+    """
+
+    try:
+        from app import stores as stores_mod
+
+        return await stores_mod.active_codes()
+    except Exception as exc:  # noqa: BLE001 — module absent, table absent, DB blip
+        raise HTTPException(
+            status_code=503,
+            detail="cannot confirm which branches are visible; refusing to mint "
+                   "an embed. Try again shortly.",
+        ) from exc
+
+
 async def _validate_outlet_request(req: "OutletSnippetRequest") -> None:
     if not await cache.is_valid_credential(req.embed_id, req.public_key):
         raise HTTPException(status_code=400, detail="embed_id / public_key are not a registered credential")
     if not re.match(r"^https?://[^/\s]+", req.base_url):
         raise HTTPException(status_code=400, detail="base_url must be a full http(s) origin")
-    codes = {r["site_code"] for r in await q("SELECT DISTINCT site_code FROM inventory")}
-    if req.store_id not in codes:
+    # A disabled branch is refused with the same 404 as a code that was never
+    # seen: to the customer-facing surface the two are the same fact — this
+    # branch does not exist — and a distinguishable response would tell anyone
+    # holding a credential which branches have been taken offline.
+    if req.store_id not in await _embeddable_codes():
         raise HTTPException(status_code=404, detail=f"unknown store_id {req.store_id!r}")
 
 
@@ -7626,18 +8028,53 @@ def _decode_preview_token(token: str) -> Optional[Dict[str, Any]]:
 
 @router.get("/embed/outlets", dependencies=[Depends(require_super_admin)])
 async def embed_outlets() -> List[Dict]:
-    """Every store that can be embedded, with SKU/unit counts for the picker."""
+    """Every store that can be embedded, with SKU/unit counts for the picker.
 
-    return await q(
-        """
-        SELECT site_code,
-               COUNT(*)        AS skus,
-               SUM(stock_qty)  AS units
-          FROM inventory
-         GROUP BY site_code
-         ORDER BY site_code
-        """
-    )
+    "Can be embedded" is a REGISTRY question, not a stock one. This used to
+    ``GROUP BY site_code FROM inventory``, which both hid an active branch whose
+    stock had not landed yet and offered a disabled branch — the one a customer
+    must never be pointed at. A snippet is pasted onto a customer's site and
+    left there for years, so this list is where a disabled branch has to stop.
+
+    An active branch with no stock rows is still offered, with zeroes. That is
+    the point of the registry: the branch exists, today's file just did not
+    mention it, and refusing to embed it would let a broken export take a live
+    branch off the air.
+
+    ⚠️ The filter is ``status != 'disabled'``, not ``status == 'active'``. Same
+    rule as ``stores.not_disabled_clause``: a branch is offered unless somebody
+    deliberately hid it, so a row the registry has no opinion about is offered
+    rather than silently dropped. See the note at the top of the stores section.
+
+    Registry raised -> the pre-registry list, for the reason recorded there: an
+    empty picker reads as "this product has no branches".
+    """
+
+    rows = await _registry_rows()
+    if rows is None:
+        return await q(
+            """
+            SELECT site_code,
+                   COUNT(*)        AS skus,
+                   SUM(stock_qty)  AS units
+              FROM inventory
+             GROUP BY site_code
+             ORDER BY site_code
+            """
+        )
+
+    out = [
+        {
+            "site_code": r["site_code"],
+            "site_name": r.get("site_name"),
+            "skus": int(r.get("skus") or 0),
+            "units": int(r.get("units") or 0),
+        }
+        for r in rows
+        if r.get("status") != "disabled"
+    ]
+    out.sort(key=lambda r: r["site_code"])
+    return out
 
 
 @router.post("/embed/snippet", dependencies=[Depends(require_super_admin)])
@@ -7658,6 +8095,107 @@ async def embed_snippet(req: OutletSnippetRequest) -> Dict:
         # Customer-facing HTML: the <script> in it must match snippet exactly.
         "demo_html": _demo_page(req, snippet, auto_open=False),
     }
+
+
+_DEV_EMBED_CREDENTIAL = ("web", "web")
+
+
+async def _default_embed_credential() -> Tuple[str, str]:
+    """The credential a snippet minted from the branch panel is signed for.
+
+    `/embed/snippet` takes the credential from the request because the Embed page
+    has a picker and an operator standing at it. The branch detail panel has
+    neither: it shows one branch's code as a fact about that branch, so the
+    choice has to be made here, once, rather than as a third copy of the
+    heuristic already spelled out in `GuidePanel.svelte` and `WidgetPanel.svelte`.
+
+    ``web``/``web`` is the dev-only pair; a snippet signed with it is rejected in
+    any deployment that has registered real credentials, so a real one wins
+    whenever one exists. Ties are broken by sorting so the same branch does not
+    hand out a snippet for a different tenant on the next page load — a customer
+    pasting two different snippets for one branch would have no way to tell which
+    of them was the one that works.
+
+    No credential at all is a 400 naming what to do about it, not a snippet with
+    a placeholder in it: `is_valid_credential` is dev-open (it accepts anything
+    while the credential hash is empty — see the note in CLAUDE.md), so a
+    placeholder would validate here and then 401 on the customer's site.
+    """
+
+    creds = await cache.list_credentials() or {}
+    real = sorted(
+        (eid, key) for eid, key in creds.items()
+        if (eid, key) != _DEV_EMBED_CREDENTIAL
+    )
+    if real:
+        return real[0]
+    if _DEV_EMBED_CREDENTIAL[0] in creds:
+        return _DEV_EMBED_CREDENTIAL
+    raise HTTPException(
+        status_code=400,
+        detail="no embed credential is registered; add one on the Tenants page "
+               "before handing a branch its website code",
+    )
+
+
+@router.get("/stores/{site_code}/embed", dependencies=[Depends(require_super_admin)])
+async def store_embed(
+    request: Request,
+    site_code: str = Depends(_site_code_path),
+    scope: Optional[str] = Depends(caller_store_scope),
+) -> Dict:
+    """The branch detail panel's "Website code" block, for one branch.
+
+    **This is not a second signing path.** It resolves the two things the panel
+    cannot supply — which credential, and this deployment's own origin — and then
+    calls :func:`embed_snippet` itself. Validation, the disabled-branch refusal
+    and `sign_user` are reached through that one function, so a snippet from here
+    is byte-identical to the one the Embed page produces for the same branch, and
+    a change to the refusal rules cannot apply to one caller and not the other.
+
+    Consequently **a disabled branch is refused with 404 — the same 404 an
+    unknown code gets** (`_validate_outlet_request`), and for the reason recorded
+    there: a distinguishable response would tell any console user which branches
+    have been taken offline. The mockup's disabled Copy button is the courtesy;
+    this is the enforcement. And it has to be enforced at minting, because a
+    snippet is pasted onto a customer's site and nothing re-checks the branch's
+    status when the widget later loads.
+
+    ``base_url`` is the serving request's own origin rather than anything the
+    caller sent — uvicorn runs with `--proxy-headers`, so behind TLS this is the
+    https origin the browser used, which is the whole reason that flag is
+    load-bearing (see CLAUDE.md).
+
+    GET, unlike its POST sibling, because the panel shows the code on open and
+    nothing here is a nonce: `sign_user` signs a stable per-store identity, so
+    two calls for one branch return the same bytes.
+
+    The response is `embed_snippet`'s, plus the three fields the panel would
+    otherwise have to fetch a credential list to learn (`embed_id`,
+    `public_key`, `base_url`) — enough to POST `/embed/preview-link` for the
+    Preview button without a second round trip. `public_key` is public by
+    construction: it is already inside the snippet body.
+    """
+
+    if not await _scope_permits(scope, site_code):
+        raise HTTPException(status_code=404, detail=f"unknown site_code {site_code!r}")
+
+    embed_id, public_key = await _default_embed_credential()
+    # No `title` and no `accent`: both default inside `_snippet_html` /
+    # `OutletSnippetRequest`, and the Embed page sends neither either. Passing a
+    # product name from here would be the branding trap in CLAUDE.md — a title
+    # baked into a customer's HTML that survives a rename.
+    req = OutletSnippetRequest(
+        store_id=site_code,
+        embed_id=embed_id,
+        public_key=public_key,
+        base_url=str(request.base_url),
+    )
+    out = await embed_snippet(req)
+    out["embed_id"] = embed_id
+    out["public_key"] = public_key
+    out["base_url"] = req.base_url
+    return out
 
 
 @router.post("/embed/preview-link", dependencies=[Depends(require_super_admin)])
@@ -7702,7 +8240,12 @@ async def embed_snippets_zip(req: OutletSnippetRequest = Body(...)) -> Any:
     if not re.match(r"^https?://[^/\s]+", req.base_url):
         raise HTTPException(status_code=400, detail="base_url must be a full http(s) origin")
 
-    codes = sorted({r["site_code"] for r in await q("SELECT DISTINCT site_code FROM inventory")})
+    # Same gate as `_validate_outlet_request`. This route builds a snippet for
+    # EVERY store without going through that function, so leaving it on
+    # `SELECT DISTINCT site_code FROM inventory` would have packed a working,
+    # pre-signed embed for a disabled branch into the very ZIP an operator hands
+    # to outlet developers — the one artefact nobody re-checks afterwards.
+    codes = sorted(await _embeddable_codes())
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(
