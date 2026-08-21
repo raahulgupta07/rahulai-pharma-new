@@ -27,7 +27,7 @@ from __future__ import annotations
 import os
 from typing import Dict
 
-VERSION = "1.6.2"
+VERSION = "1.6.3"
 
 # Injected by docker/Dockerfile via --build-arg. Absent in a local dev run.
 GIT_SHA = os.getenv("GIT_SHA", "dev")

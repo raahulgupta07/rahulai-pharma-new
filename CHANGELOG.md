@@ -8,6 +8,34 @@ Format: `## <version> — <YYYY-MM-DD>`, then any of `### Fixed`, `### Added`,
 `### Changed`, `### Security`. `app/release_notes.py` parses exactly that, and
 the admin console renders it, so a heading it does not recognise is dropped.
 
+## 1.6.3 — 2026-08-21
+
+### Added
+
+- Branch staff can now be given a console account that shows them only what
+  they need: Today, Chat and the knowledge graph. Everything else — the
+  catalog, branches, the data pipeline, people, settings, the security log —
+  is neither shown to them nor reachable by typing its address.
+
+### Changed
+
+- Chat history now belongs to the person, not the computer. On a shared branch
+  machine, signing in no longer shows you the questions the last person asked.
+  Anyone who had a conversation list before this release starts with an empty
+  one; nothing they asked was lost, and administrators can still read every
+  console conversation under Conversations.
+- New accounts are created as either a user or a super admin. The middle
+  "admin" role is no longer offered, because there is no one who should see
+  the console but not its settings. Existing admin accounts keep working
+  exactly as they did.
+
+### Security
+
+- A signed-in user with no admin rights is refused every administrative
+  address, including the ones that hand back the SFTP password, the directory
+  settings and the audit trail. An account that is waiting for approval, or
+  that has been switched off, is still refused everything regardless.
+
 ## 1.6.2 — 2026-08-21
 
 ### Added

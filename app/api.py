@@ -537,11 +537,65 @@ async def current_user(authorization: str = Header(default="")) -> Dict[str, Any
     return claims
 
 
-async def require_admin(authorization: str = Header(default="")) -> Dict[str, Any]:
-    """Gate /admin/* — a valid JWT whose account is admin, active AND approved.
+# ---- the three pages a plain `user` is allowed --------------------------------
+#
+# Everything under /admin/* is admin-only by default. A `user` is given exactly
+# three pages — Today, Chat and the knowledge graph — so these are the calls
+# those pages make, and nothing else.
+#
+# ⚠️ Matching is EXACT on (method, path). Never a prefix. `/admin/graph` must
+# not quietly admit a future `/admin/graph/rebuild`, and a prefix rule is how
+# that happens six months from now without anyone noticing. The METHOD is part
+# of the key for the same reason: `/admin/feedback` answers both GET (read every
+# thumbs-up in the system) and POST (leave one on your own answer). A `user`
+# gets the POST only.
+#
+# The one parameterised entry is a regex that cannot cross a slash — it opens
+# `/admin/catalog/<code>`, the product drawer the chat page shows when someone
+# clicks a product in an answer, without opening `/admin/catalog` itself, which
+# is the whole 5,292-row listing behind the Catalog page they do not get.
+_USER_ENDPOINTS: frozenset = frozenset({
+    # Today
+    ("GET", "/admin/analytics/summary"),
+    ("GET", "/admin/analytics/branch-stock"),
+    ("GET", "/admin/analytics/data-health"),
+    ("GET", "/admin/analytics/embeds"),
+    ("GET", "/admin/data-freshness"),
+    # Chat
+    ("GET", "/admin/stores"),
+    ("POST", "/admin/feedback"),
+    # Knowledge graph
+    ("GET", "/admin/graph"),
+    ("GET", "/admin/graph/overview"),
+    # The page says "click a medicine ... and open its details", so the detail
+    # panel is part of the page, not a separate privilege. Found by clicking it
+    # as a `user` and getting a 403 — the allowlist was written from the page's
+    # LOAD calls, and a page's load calls are not all of its calls.
+    ("GET", "/admin/graph/node"),
+})
+_USER_PATH_RE = _re.compile(r"^/admin/catalog/[^/]+$")
+
+
+def _user_may_reach(method: str, path: str) -> bool:
+    """Is this exact call one of the three pages a plain `user` is given?"""
+
+    if (method, path) in _USER_ENDPOINTS:
+        return True
+    return method == "GET" and bool(_USER_PATH_RE.match(path))
+
+
+async def require_admin(authorization: str = Header(default=""),
+                        request: Request = None) -> Dict[str, Any]:
+    """Gate /admin/* — a valid JWT whose account is active, approved, and either
+    an admin or a `user` making one of the calls its three pages need.
 
     Approval is re-checked against the DB on every call, not read from the token,
     so revoking approval takes effect immediately rather than at token expiry.
+
+    The `user` branch is deliberately the LAST check: an inactive or unapproved
+    account is refused before the allowlist is ever consulted, so the allowlist
+    can only ever widen what an otherwise-valid session may read — never who
+    counts as a valid session.
     """
 
     claims = await current_user(authorization)
@@ -551,6 +605,13 @@ async def require_admin(authorization: str = Header(default="")) -> Dict[str, An
     if not u.get("approved"):
         raise HTTPException(status_code=403, detail="account pending administrator approval")
     if u["role"] not in ("admin", "super_admin"):
+        # `request` is None only when this is called directly rather than as a
+        # FastAPI dependency (the auth tests do exactly that). With no path to
+        # check, the allowlist cannot apply, so a `user` is refused — the
+        # allowlist fails CLOSED rather than opening everything it cannot see.
+        if u["role"] == "user" and request is not None \
+                and _user_may_reach(request.method, request.url.path):
+            return claims
         raise HTTPException(status_code=403, detail="admin access required")
     return claims
 

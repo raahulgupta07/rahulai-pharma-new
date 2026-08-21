@@ -596,14 +596,61 @@
     { href: '/embed?tab=test', label: 'Test on a customer domain', icon: Code2, section: 'Assistant' }
   ];
 
+  // ---- what a plain `user` is given ----------------------------------------
+  //
+  // Three pages: Today, Chat and the knowledge graph. This list is the SAME
+  // decision the backend enforces in `_USER_ENDPOINTS` (app/api.py) — this half
+  // only decides what is DRAWN. Hiding a row here is not a permission; someone
+  // typing the URL still gets there, and the server is what refuses them. Keep
+  // the two in step: a page added here without its endpoints opened renders an
+  // empty screen full of 403s, which reads as broken rather than forbidden.
+  const USER_PAGES = ['/', '/chat', '/graph'];
+
+  let isPlainUser = $derived(me?.role === 'user');
+
+  const SECTIONS_ALL = SECTIONS;
+  // Sections whose every row a `user` may not see disappear entirely — an
+  // empty "Administration" heading is worse than no heading, because it tells
+  // someone a thing exists and then refuses to say what.
+  let visibleSections = $derived(
+    isPlainUser
+      ? SECTIONS_ALL.map((sec) => ({
+          ...sec,
+          items: sec.items.filter((i) => USER_PAGES.includes(i.href))
+        })).filter((sec) => sec.items.length)
+      : SECTIONS_ALL
+  );
+
   const ALL_PAGES = [
     ...SECTIONS.flatMap((s) => s.items.map((i) => ({ ...i, section: s.label || 'Overview' }))),
     ...OFF_RAIL
   ];
 
+  // What SEARCH offers. Breadcrumbs keep using the full ALL_PAGES — naming the
+  // page you are already on is not a permission — but search must follow the
+  // rail, or it hands a `user` a link straight into a 403.
+  let searchablePages = $derived(
+    isPlainUser ? ALL_PAGES.filter((p) => USER_PAGES.includes(p.href)) : ALL_PAGES
+  );
+
   // Path relative to the SvelteKit base (e.g. '/admin'), so route matching works
   // whether the app is served at root (dev) or under /admin (docker).
   let relPath = $derived($page.url.pathname.slice(base.length) || '/');
+
+  // A `user` who types a URL the rail does not show them lands on Today rather
+  // than on a page that renders its furniture and then fills with 403s. This is
+  // NOT the permission — the server refuses those calls whatever this does — it
+  // is what stops a forbidden page looking like a broken one.
+  //
+  // Gated on `meLoaded` on purpose: before /auth/me answers, `me` is null and
+  // `isPlainUser` is false, so acting early would redirect nobody; acting on a
+  // half-known identity is how an admin gets bounced off their own page on a
+  // slow network.
+  $effect(() => {
+    if (!meLoaded || !isPlainUser) return;
+    const here = relPath.split('?')[0];
+    if (!USER_PAGES.includes(here)) goto(base + '/', { replaceState: true });
+  });
 
   // Chat is the one screen that owns its whole viewport: it scrolls its thread
   // and docks its composer itself, so `main` gives it no padding and no scroll.
@@ -703,7 +750,7 @@
 
   let searchResults = $derived(
     searchQuery.trim()
-      ? ALL_PAGES.filter((p) => p.label.toLowerCase().includes(searchQuery.trim().toLowerCase()))
+      ? searchablePages.filter((p) => p.label.toLowerCase().includes(searchQuery.trim().toLowerCase()))
       : []
   );
 
@@ -1369,7 +1416,7 @@
       </a>
 
       <nav aria-label="Main" class="flex min-h-0 flex-1 flex-col gap-px overflow-y-auto px-3 pb-3">
-        {#each SECTIONS as section (section.label)}
+        {#each visibleSections as section (section.label)}
           <!-- The first group is the console's home and carries no heading: a
                one-row group under a label reads as a category with one thing in
                it rather than as the top of the rail. -->

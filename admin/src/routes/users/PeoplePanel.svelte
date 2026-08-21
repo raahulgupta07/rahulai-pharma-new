@@ -12,7 +12,34 @@
   let delTarget = $state(null);
   let delOpen = $state(false);
 
-  const ROLES = ['user', 'admin', 'super_admin'];
+  // `admin` is deliberately NOT offered when choosing a role.
+  //
+  // The decision (2026-08-21) is that an administrator is an administrator:
+  // there is no tier of person who should see the console but not its settings.
+  // Rather than dissolve the distinction in code — which would have meant
+  // rewriting 24 tests, four of which exist to stop an admin minting a
+  // super_admin or deleting accounts — the weaker role is simply no longer
+  // handed out. The backend still enforces the split, so the ceiling is intact
+  // and a mistake here cannot escalate anyone.
+  //
+  // Accounts that ALREADY hold `admin` keep working and still render their
+  // badge; this list only governs what can be newly chosen. If one is ever
+  // needed again, add it back here — no server change is required.
+  const ROLES = ['user', 'super_admin'];
+
+  /**
+   * The options for ONE row's role dropdown.
+   *
+   * A `<select>` whose `value` matches none of its options does not render
+   * blank — it renders the FIRST option. With `admin` dropped from ROLES, an
+   * account that still holds `admin` would therefore have displayed as "user":
+   * a demotion that never happened, shown as fact, on the page whose whole job
+   * is saying who can do what. So a row always offers its own current role,
+   * even one no longer handed out.
+   */
+  function rolesFor(u) {
+    return ROLES.includes(u.role) ? ROLES : [...ROLES, u.role];
+  }
 
   /**
    * A one-line, status-aware reason an ACTION failed, for a toast or the inline
@@ -375,7 +402,7 @@
                       aria-label={`Role for ${u.email}`}
                       title="Change role"
                     >
-                      {#each ROLES as r}
+                      {#each rolesFor(u) as r}
                         <option value={r}>{r}</option>
                       {/each}
                     </select>

@@ -98,7 +98,42 @@
     }
   }
 
-  const LS = 'citcare_chat_threads';
+  // ---- chat history is PER SIGNED-IN USER, not per browser -------------------
+  //
+  // These threads used to live under one key for the whole browser. On a shared
+  // branch machine that meant the next person to sign in opened the console and
+  // read the previous person's questions — which on a pharmacy system can be
+  // "what can I give a patient with X". Nobody had to do anything wrong for
+  // that to happen; it was the default.
+  //
+  // The key is derived from the token's `sub` (the user id, stable across an
+  // email change) rather than from `me`, so it is known synchronously at module
+  // load — before /auth/me answers — and there is no window where the page
+  // reads or writes the wrong person's history. Decoding the JWT here is not a
+  // security decision: it only picks a storage key, and the server never trusts
+  // any of it. A missing or unreadable token falls back to `anon`, which is its
+  // own bucket rather than everyone's shared one.
+  function threadOwner() {
+    try {
+      const raw = localStorage.getItem('auth_token');
+      if (!raw) return 'anon';
+      let b = raw.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+      b += '='.repeat((4 - (b.length % 4)) % 4); // base64url has no padding; atob needs it
+      const sub = JSON.parse(atob(b)).sub;
+      return sub ? String(sub) : 'anon';
+    } catch {
+      return 'anon';
+    }
+  }
+
+  const LS = `citcare_chat_threads:${threadOwner()}`;
+
+  // The pre-split key held ONE person's threads with no way to tell whose. It
+  // is removed rather than migrated: handing them to whoever signs in first is
+  // exactly the leak this fixes, and leaving them behind keeps someone's
+  // questions sitting in a shared browser. Admins can still see every console
+  // conversation server-side under Conversations.
+  if (typeof localStorage !== 'undefined') localStorage.removeItem('citcare_chat_threads');
   const LS_MODEL = 'citcare_chat_model';
   const LS_STORE = 'citcare_chat_store';
   const LS_LANG = 'citcare_chat_lang';
