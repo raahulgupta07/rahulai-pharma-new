@@ -110,26 +110,32 @@ class ValidationReport:
         return f"{self.file}: REJECTED — " + "; ".join(self.errors)
 
 
-def _read_frame(path: str, kind: str) -> pd.DataFrame:
+def _read_frame(path: str, kind: str, stats: Optional[Dict] = None) -> pd.DataFrame:
     """Load the sheet the same way the real parser will.
 
-    The catalog half DELEGATES to ``ingest.read_catalog_frame`` rather than
-    mirroring it — validating a differently-read frame would pass files the
-    loader then chokes on (or, as happened with CMHL's 2026-08-18 export,
-    reject one the loader could have read). The balance export has no banner
-    and is read straight.
+    BOTH halves now DELEGATE to the loader's reader rather than mirroring it —
+    validating a differently-read frame would pass files the loader then chokes
+    on (or, as happened with CMHL's 2026-08-18 export, reject one the loader
+    could have read).
+
+    ``stats`` is the report's own stats dict, handed down so the sheet the
+    reader chose is recorded even when the file is then REJECTED. That is the
+    case where it matters most: "missing required column(s) … Found: CityCare
+    Article Export" and "read sheet 'Summary' of 3" are the same incident, and
+    only together do they say what to do about it.
     """
 
-    is_csv = Path(path).suffix.lower() == ".csv"
     if kind == "catalog":
         # Delegated, not mirrored. This function used to hold its own copy of
         # the header logic under a comment telling the next person to keep the
         # two in step; they drifted anyway. One reader now.
         from app.ingest import read_catalog_frame
 
-        df = read_catalog_frame(path)
+        df = read_catalog_frame(path, stats)
     else:
-        df = pd.read_csv(path, encoding="utf-8-sig") if is_csv else pd.read_excel(path)
+        from app.ingest import read_inventory_frame
+
+        df = read_inventory_frame(path, stats)
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
@@ -276,9 +282,23 @@ def validate_file(path: str) -> ValidationReport:
     r.kind = kind
 
     try:
-        df = _read_frame(path, kind)
+        df = _read_frame(path, kind, r.stats)
     except Exception as exc:  # noqa: BLE001 - any parse failure is a rejection
         return r.fail(f"could not read the file: {exc}")
+
+    if r.stats.get("sheet_count", 1) > 1:
+        # A NOTE, not a warning: a workbook with several tabs is not a defect,
+        # and the file may well be perfectly correct. It is here because notes
+        # are rendered verbatim into the file's history (see
+        # `watcher._checked_line`), so the one person who can tell whether
+        # "Summary" or "Articles" was the right tab gets to read that we took
+        # the first one. A file that shrinks the table on top of this is already
+        # refused by check_shrink; this is what explains WHY it shrank.
+        r.note(
+            f"this workbook has {r.stats['sheet_count']} sheets "
+            f"({', '.join(r.stats.get('sheet_names', []))}) — read the first, "
+            f"'{r.stats.get('sheet_read')}'. Check that is the sheet you meant."
+        )
 
     if df.empty:
         return r.fail("the file contains no rows")

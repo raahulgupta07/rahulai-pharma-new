@@ -2,9 +2,12 @@
   import { onMount } from 'svelte';
   import { base as appBase } from '$app/paths';
   import { API_BASE } from '$lib/apiBase.js';
-  import { Copy, Check, ExternalLink, Globe, KeyRound, Store } from '@lucide/svelte';
+  import { Copy, Check, ExternalLink, Globe, KeyRound, Store, TriangleAlert } from '@lucide/svelte';
   import PageHeader from '$lib/PageHeader.svelte';
   import Badge from '$lib/Badge.svelte';
+  import ErrorState from '$lib/ErrorState.svelte';
+  import { getJSON } from '$lib/api.js';
+  import { defaultCredential, onlyDevCredential, PLACEHOLDER } from './credentials.js';
 
   // A living guide: it shows the operator's REAL backend URL + registered
   // credential + store count, so every snippet here is copy-paste-ready rather
@@ -13,26 +16,60 @@
 
   let base = $state(API_BASE);
   let creds = $state([]);
-  let outletCount = $state(0);
+  let credsLoading = $state(true);
+  let credsError = $state(null);
+  let outletCount = $state(null);
 
-  onMount(async () => {
+  onMount(() => {
     const saved = localStorage.getItem(PUBLIC_BASE_KEY);
     if (saved) base = saved;
-    try {
-      const r = await fetch(`${API_BASE}/admin/credentials`);
-      if (r.ok) creds = await r.json();
-    } catch {}
-    try {
-      const r = await fetch(`${API_BASE}/admin/embed/outlets`);
-      if (r.ok) outletCount = (await r.json()).length;
-    } catch {}
+    loadCreds();
+    loadOutlets();
   });
 
+  // Both loads go through `getJSON`, never a bare fetch, for two reasons that
+  // both bit this panel. It threw the status away in a `catch {}`, so a 401 or a
+  // 500 left `creds` empty and the page read as "no credentials are registered"
+  // — a statement about the deployment, made on no evidence. And the bearer
+  // token is attached by a `window.fetch` patch installed in `+layout.svelte`
+  // that may not be in place yet when an `onMount` call fires; `getJSON` at
+  // least turns that into a visible 401 instead of a silent empty page.
+  async function loadCreds() {
+    credsLoading = true;
+    credsError = null;
+    try {
+      const data = await getJSON('/admin/credentials');
+      creds = Array.isArray(data) ? data : [];
+    } catch (e) {
+      credsError = e;
+      creds = [];
+    } finally {
+      credsLoading = false;
+    }
+  }
+
+  async function loadOutlets() {
+    try {
+      const data = await getJSON('/admin/embed/outlets');
+      outletCount = Array.isArray(data) ? data.length : null;
+    } catch {
+      // The count is prose furniture here ("for N outlets you register one
+      // credential"), not a claim about the estate. Unknown stays `null` and
+      // renders as the letter N, which is what the sentence said before any
+      // load; a 0 there would read as "you have no branches".
+      outletCount = null;
+    }
+  }
+
+  // One rule, shared with WidgetPanel — see credentials.js. The dev pair is
+  // never silently emitted: with nothing else registered this falls to
+  // placeholders and the page says why.
   const cleanBase = $derived((base || '').trim().replace(/\/+$/, ''));
-  const realCred = $derived(creds.find((c) => !(c.embed_id === 'web' && c.public_key === 'web')) ?? null);
-  const embedId = $derived(realCred?.embed_id ?? creds[0]?.embed_id ?? 'YOUR_EMBED_ID');
-  const publicKey = $derived(realCred?.public_key ?? creds[0]?.public_key ?? 'YOUR_PUBLIC_KEY');
-  const onlyDevCred = $derived(creds.length > 0 && !realCred);
+  const cred = $derived(defaultCredential(creds));
+  const embedId = $derived(cred?.embed_id ?? PLACEHOLDER.embed_id);
+  const publicKey = $derived(cred?.public_key ?? PLACEHOLDER.public_key);
+  const onlyDevCred = $derived(onlyDevCredential(creds));
+  const noCreds = $derived(!credsLoading && !credsError && creds.length === 0);
 
   const publicSnippet = $derived(`<script src="${cleanBase}/api/embed/widget.js"
         data-embed-id="${embedId}"
@@ -174,12 +211,39 @@
     <p class="mb-3 text-body-sm leading-relaxed text-ink-2">
       No store scope — the widget answers across all stores. For a public catalog page.
     </p>
-    {@render codeblock('pub', publicSnippet)}
-    {#if onlyDevCred}
-      <p class="mt-2 text-meta text-warning">
-        Only the dev credential <span class="font-mono">web</span>/<span class="font-mono">web</span>
-        is registered — it is rejected in production. The operator must mint a real one.
-      </p>
+    <!-- The snippet is the one thing on this page built from a fetched value, so
+         it is the one thing that must not render as though the fetch succeeded.
+         A failure states the failure; it never falls through to the
+         placeholder snippet, which would read as "no credential is
+         registered". -->
+    {#if credsLoading}
+      <p class="text-body-sm text-ink-3">Loading credentials…</p>
+    {:else if credsError}
+      <ErrorState error={credsError} retry={loadCreds} what="embed credentials" />
+    {:else}
+      {@render codeblock('pub', publicSnippet)}
+      {#if onlyDevCred}
+        <p class="mt-2 flex items-start gap-1.5 text-meta text-warning">
+          <TriangleAlert size={14} class="mt-0.5 shrink-0" />
+          <span>
+            The only registered credential is the dev pair <span class="font-mono">web</span>/<span
+              class="font-mono">web</span
+            >, which is rejected in production — so the snippet above carries placeholders rather
+            than a pair that would 403 on a customer's site. The operator must mint a real one on
+            <a href={appBase + '/tenants'} class="text-accent hover:underline">Tenants</a>.
+          </span>
+        </p>
+      {:else if noCreds}
+        <p class="mt-2 flex items-start gap-1.5 text-meta text-warning">
+          <TriangleAlert size={14} class="mt-0.5 shrink-0" />
+          <span>
+            No embed credential is registered, so the snippet above carries placeholders. Credential
+            checks are fail-closed — mint one on
+            <a href={appBase + '/tenants'} class="text-accent hover:underline">Tenants</a> and copy
+            this snippet again.
+          </span>
+        </p>
+      {/if}
     {/if}
   {/snippet}
   {@render card('Method C — public widget (all stores)', outletC)}

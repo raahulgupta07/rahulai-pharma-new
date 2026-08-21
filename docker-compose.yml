@@ -94,8 +94,37 @@ services:
       context: .
       dockerfile: docker/Dockerfile
     command: ["python", "-m", "app.watcher"]
+    # The worker has no HTTP server, so this is a HEARTBEAT probe instead of a
+    # curl: the loop writes /tmp/ingest-worker.heartbeat after every pass it
+    # completes, and this fails once that file is stale. It was `disable: true`,
+    # which meant the one failure mode that actually happens here — the loop
+    # erroring on EVERY pass (drop folder unreadable, Postgres unreachable, bad
+    # credentials) — showed as `health=none` forever, because `watch()` catches
+    # everything and never exits, so `restart: unless-stopped` never fires
+    # either. Files pile up and stock goes stale with nothing going red.
+    #
+    # The command lives in app/watcher.py so the staleness rule has ONE
+    # definition. A `[0-9]`-and-`stat` one-liner here would have to re-derive
+    # the threshold from poll_seconds, which is operator-tunable at runtime, and
+    # would drift from the loop that writes the file.
+    #
+    # A paused worker (automatic loading switched off) stays GREEN — that is a
+    # deliberate operator setting, and a red light for it would train people to
+    # ignore the light. What is measured is the loop, not the ingest.
     healthcheck:
-      disable: true                  # worker has no HTTP server to probe
+      test: ["CMD", "python", "-m", "app.watcher", "--healthcheck"]
+      # The real tolerance is inside the heartbeat (3 missed passes at the
+      # interval the loop actually used, plus 5 minutes' slack because a large
+      # ingest legitimately blocks the loop for minutes). interval/retries only
+      # decide how often we ask and how many probe TIMEOUTS to forgive; 10s is
+      # ~15x the module's measured 0.66s import.
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      # A fresh container has no heartbeat until its first pass finishes, and
+      # the first pass waits on postgres+redis. Do not start counting failures
+      # before the loop has had a fair chance to complete one.
+      start_period: 120s
     env_file:
       - .env
     environment:

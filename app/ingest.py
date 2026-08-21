@@ -9,6 +9,9 @@ Two source files (matched by filename, case-insensitive; .xlsx or .csv):
 * **inventory** — "balance_stock*". Clean tabular export; ``price`` comes
   from ``weighted_cost_price``.
 
+Both xlsx readers take the workbook's FIRST sheet, and say so in the parse
+report when there is more than one — see ``_read_excel_sheet0``.
+
 Load strategy = "replace old, add new":
 * catalog   -> upsert/merge (add new articles, update existing).
 * inventory -> full replace (truncate + bulk COPY) — a fresh stock snapshot.
@@ -100,7 +103,71 @@ def _is_csv(path: str) -> bool:
     return Path(path).suffix.lower() == ".csv"
 
 
-def read_catalog_frame(path: str) -> "pd.DataFrame":
+def _read_excel_sheet0(
+    path: str, report: Optional[Dict] = None, **kwargs
+) -> "pd.DataFrame":
+    """Read the FIRST sheet of a workbook, explicitly, and say which one it was.
+
+    ``pd.read_excel(path)`` with no ``sheet_name`` reads sheet 0. That is the
+    behaviour we want and the behaviour we have always had — every CityCare
+    export is one sheet (``Article_Export``, ``balance_stock``) — but it was
+    written nowhere, so "we read the first sheet" was indistinguishable from
+    "nobody thought about sheets". ``sheet_name=0`` is the same read, said out
+    loud.
+
+    It is deliberately NOT a search for the sheet whose header matches. Consider
+    what each choice does to each shape of wrong workbook:
+
+    * First sheet a cover/summary — WRONG SHAPE. The column checks in
+      ``validation`` already refuse it by name ("missing required column(s)"),
+      so nothing loads and the operator is told which columns were found. A
+      search would instead pick a later sheet and load it, silently converting a
+      loud, correct rejection into a guess about which of N sheets the partner
+      meant. That is a worse trade in a file that REPLACES the world.
+    * First sheet a filtered subset or last month's export — RIGHT SHAPE, wrong
+      data. This is the case actually worth worrying about, and a header search
+      does nothing for it: the search matches sheet 0 and stops, exactly as the
+      default does. Only the shrink guard and a report an operator can read
+      catch it.
+
+    So the search would add risk on the first shape and buy nothing on the
+    second. ``read_catalog_frame``'s header-row fallback is not a precedent for
+    it: that one fires ONLY when the expected columns are absent, i.e. only when
+    the alternative is certain rejection, and it chooses between two positions
+    in one sheet rather than between N sheets of unknown provenance.
+
+    What is left is telling somebody. ``sheet_read`` / ``sheet_count`` /
+    ``sheet_names`` land in the parse report beside ``columns_matched``, for the
+    same reason those exist: "read sheet 'Summary' of 3" is a diagnosis, and
+    silence is not.
+    """
+
+    # One open, so a caller that reads twice (the catalog's banner fallback)
+    # pays for the workbook once and cannot see two different sheet lists.
+    with pd.ExcelFile(path) as xl:
+        names = [str(n) for n in xl.sheet_names]
+        df = pd.read_excel(xl, sheet_name=0, **kwargs)
+
+    # The catalog reader may call this twice for one file (row-0 header, then
+    # the banner offset). Same workbook, same sheet, one event to report.
+    repeat = report is not None and report.get("sheet_read") == (names[0] if names else None)
+    if report is not None and names:
+        report["sheet_read"] = names[0]
+        report["sheet_count"] = len(names)
+        if len(names) > 1:
+            # Only when there is a choice — a single-sheet workbook listing its
+            # one sheet is noise, and noise is what an operator learns to skip.
+            report["sheet_names"] = names
+    if len(names) > 1 and not repeat:
+        logger.warning(
+            "%s has %d sheets; read the FIRST one, %r (sheets: %s). If the data "
+            "is on another sheet, this load is from the wrong one.",
+            Path(path).name, len(names), names[0], ", ".join(repr(n) for n in names),
+        )
+    return df
+
+
+def read_catalog_frame(path: str, report: Optional[Dict] = None) -> "pd.DataFrame":
     """Read the article export, wherever its header row happens to be.
 
     ONE reader, used by both ``parse_catalog`` and ``validation._read_frame``.
@@ -130,10 +197,12 @@ def read_catalog_frame(path: str) -> "pd.DataFrame":
         except (ValueError, pd.errors.ParserError):
             df = pd.read_csv(path, skiprows=4, encoding="utf-8-sig")
     else:
-        df = pd.read_excel(path)
+        df = _read_excel_sheet0(path, report)
         df.columns = [str(c).strip() for c in df.columns]
         if not any(c in df.columns for c in _CATALOG_MAP):
-            df = pd.read_excel(path, skiprows=4)
+            # Same sheet, different header row — see _read_excel_sheet0 on why
+            # the fallback moves down the sheet and never across to another one.
+            df = _read_excel_sheet0(path, report, skiprows=4)
     df.columns = [str(c).strip() for c in df.columns]
     return df
 
@@ -149,7 +218,7 @@ def parse_catalog(path: str, report: Optional[Dict] = None) -> List[Dict]:
     nothing anywhere said so. The parse is unchanged; only the reporting is new.
     """
 
-    df = read_catalog_frame(path)
+    df = read_catalog_frame(path, report)
     matched = sorted(c for c in _CATALOG_MAP if c in df.columns)
     df = df.rename(columns=_CATALOG_MAP)
 
@@ -262,14 +331,29 @@ def _find_site_name_column(columns) -> Optional[str]:
     return None
 
 
-def parse_inventory(path: str, report: Optional[Dict] = None) -> List[Tuple]:
-    """Parse balance_stock into inventory tuples (deduped on article+site)."""
+def read_inventory_frame(path: str, report: Optional[Dict] = None) -> "pd.DataFrame":
+    """Read the balance export. ONE reader, for the reason read_catalog_frame is one.
+
+    The catalog side already learned this: ``validation`` held its own copy of
+    the header logic under a comment saying it had to mirror the loader, and the
+    two drifted anyway. The balance halves were a copy each as well — the only
+    thing keeping them in step was that both were the same single line. Sheet
+    reporting would have made them two different lines, so they are one function
+    instead. No banner here: the balance export's header is row 0.
+    """
 
     if _is_csv(path):
         df = pd.read_csv(path, encoding="utf-8-sig")
     else:
-        df = pd.read_excel(path)
+        df = _read_excel_sheet0(path, report)
     df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+
+def parse_inventory(path: str, report: Optional[Dict] = None) -> List[Tuple]:
+    """Parse balance_stock into inventory tuples (deduped on article+site)."""
+
+    df = read_inventory_frame(path, report)
 
     # Keyed by (article, site) so a repeat overwrites: LAST occurrence wins.
     #

@@ -8,6 +8,36 @@ Format: `## <version> — <YYYY-MM-DD>`, then any of `### Fixed`, `### Added`,
 `### Changed`, `### Security`. `app/release_notes.py` parses exactly that, and
 the admin console renders it, so a heading it does not recognise is dropped.
 
+## 1.7.1 — 2026-08-21
+
+### Security
+
+- The reason a branch was hidden, and the name of the administrator who hid it,
+  are no longer shown to branch staff. Those notes are written on an
+  administrator-only screen and can say things like "licence suspended" or
+  "pharmacist under review", so they are now visible only to administrators.
+  Branch staff still see that a branch is hidden, which is the part they need.
+
+### Fixed
+
+- A page that cannot load its data now says so, instead of showing an empty
+  list. Conversations and the daily overview could both report "nothing here"
+  when the real answer was "something is broken" — which on the Conversations
+  page meant it appeared no one had asked anything at all.
+- The website code offered for a branch is now always signed with the real
+  credential. In one place it could be built with the development one, which
+  works here and then silently fails on the customer's own website.
+- The Embed page now shows an error if it cannot load, rather than looking as
+  though no credentials are set up.
+
+### Changed
+
+- If a stock or product spreadsheet contains more than one sheet, the load now
+  records which sheet was read and warns that it may be the wrong one. Only the
+  first sheet is ever read, as before.
+- The stock loader now reports its own health, so a loader that has stopped
+  working is visible instead of appearing to run normally while files pile up.
+
 ## 1.7.0 — 2026-08-21
 
 ### Added

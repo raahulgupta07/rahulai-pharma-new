@@ -7,6 +7,7 @@
   import Badge from '$lib/Badge.svelte';
   import ErrorState from '$lib/ErrorState.svelte';
   import { getJSON } from '$lib/api.js';
+  import { defaultCredential, isDevCredential, onlyDevCredential, PLACEHOLDER } from './credentials.js';
 
   // The admin SPA is served BY the backend, so API_BASE is whatever origin the
   // operator happens to be browsing (often http://localhost:8091). A snippet is
@@ -41,8 +42,12 @@
       // expired token rather than as a stopped backend.
       const data = await getJSON('/admin/credentials');
       creds = Array.isArray(data) ? data : [];
-      if (creds.length && !creds.some((c) => c.embed_id === selected)) {
-        selected = creds[0].embed_id;
+      if (!creds.some((c) => c.embed_id === selected)) {
+        // NOT creds[0] — that is Redis hash order, and it can be the dev pair.
+        // `defaultCredential` is the one rule this page and the Guide share; it
+        // returns null rather than defaulting to a credential that 401s on a
+        // customer's site, and the page then says so instead of emitting one.
+        selected = defaultCredential(creds)?.embed_id ?? '';
       }
     } catch (e) {
       credsError = e;
@@ -64,13 +69,16 @@
   const cred = $derived(creds.find((c) => c.embed_id === selected) ?? null);
   const hasCred = $derived(cred !== null);
   // The dev credential is auto-seeded only in development (config-gated) and does
-  // NOT exist in a production deployment — a snippet carrying it 403s there.
-  const isDevCred = $derived(cred?.embed_id === 'web' && cred?.public_key === 'web');
+  // NOT exist in a production deployment — a snippet carrying it 403s there. It
+  // is still selectable by an explicit click, for testing against this stack;
+  // what it may never be is the selection nobody made.
+  const isDevCred = $derived(isDevCredential(cred));
+  const onlyDev = $derived(onlyDevCredential(creds));
 
   // With no registered credential there is nothing real to emit. Placeholders are
   // shouted, never a plausible-looking 'web'/'web' that would 403 in production.
-  const embedId = $derived(cred?.embed_id ?? 'YOUR_EMBED_ID');
-  const publicKey = $derived(cred?.public_key ?? 'YOUR_PUBLIC_KEY');
+  const embedId = $derived(cred?.embed_id ?? PLACEHOLDER.embed_id);
+  const publicKey = $derived(cred?.public_key ?? PLACEHOLDER.public_key);
 
   const widgetSnippet = $derived(`<script src="${cleanBase}/api/embed/widget.js"
   data-embed-id="${embedId}"
@@ -354,7 +362,8 @@ $signature = hash_hmac('sha256', $payload, $SECRET_KEY);
     </a>
   {:else}
     <p class="mb-3 text-body-sm text-ink-2">
-      Snippets below are filled with the real credential you pick. Manage the list on
+      {#if hasCred}Snippets below are filled with the real credential you pick.{:else}Pick a
+        credential to fill the snippets below.{/if} Manage the list on
       <a href={appBase + '/tenants'} class="text-accent hover:underline">Tenants</a>.
     </p>
     <div class="flex flex-wrap items-center gap-2">
@@ -370,6 +379,26 @@ $signature = hash_hmac('sha256', $payload, $SECRET_KEY);
         </button>
       {/each}
     </div>
+    <!-- Nothing is selected because the only thing on offer is the dev pair.
+         Saying that is the whole point: this page's previous default was
+         `creds[0]`, so it would have selected `web`/`web` here and emitted a
+         snippet that works against this stack and 401s on the site it was
+         copied onto. -->
+    {#if onlyDev && !hasCred}
+      <p class="mt-3 flex items-start gap-1.5 text-meta text-warning">
+        <TriangleAlert size={14} class="mt-0.5 shrink-0" />
+        <span>
+          The only registered credential is the development pair
+          <span class="font-mono">web</span> / <span class="font-mono">web</span>, so
+          <span class="font-medium">none is selected</span> and the snippets below carry
+          placeholders. That pair is not seeded in production: a snippet carrying it gets
+          <span class="font-mono">403 invalid embed credentials</span> on a customer's site.
+          <a href={appBase + '/tenants'} class="text-accent hover:underline">Mint a real one on
+            Tenants</a>, or click <span class="font-mono">web</span> above to sign a snippet for
+          testing against this deployment only.
+        </span>
+      </p>
+    {/if}
     {#if isDevCred}
       <p class="mt-3 flex items-start gap-1.5 text-meta text-warning">
         <TriangleAlert size={14} class="mt-0.5 shrink-0" />

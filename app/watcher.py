@@ -17,10 +17,13 @@ endpoint); ``watch`` loops forever (the ingest-worker service).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
+import sys
 import time
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 from app import ingest_events as ev
 from app.cache import (
@@ -35,6 +38,124 @@ from app.db import close_pool
 from app.ingest import FileRejected, detect_kind, ingest_file
 
 logger = logging.getLogger("pharmacy.watcher")
+
+
+# ---- heartbeat ------------------------------------------------------------
+#
+# ``watch`` catches every exception and continues, which is right — one bad file
+# must never stop the watcher. The cost is that a PERMANENT failure (drop folder
+# gone, Postgres unreachable, credentials wrong) logs "scan error" every poll
+# forever while the container looks fine: there was no healthcheck, and
+# ``restart: unless-stopped`` never fires because the process has not exited.
+# Files pile up in the drop folder and stock goes stale with nothing going red.
+#
+# So the loop leaves a heartbeat after every pass it completes, and the
+# container's healthcheck (``python -m app.watcher --healthcheck``) fails once
+# that file is older than the loop's own cadence allows.
+#
+# NOT in the drop folder. The watcher globs that directory for uploads and a
+# partner can write to it over SFTP; a health signal must not share a namespace
+# with untrusted input, and must not be something an SFTP client can forge or
+# delete. The container filesystem is the right home — the probe runs inside the
+# same container, and a fresh container legitimately starts with no heartbeat
+# until its first pass completes (that is what ``start_period`` is for).
+HEARTBEAT_PATH = Path(
+    os.environ.get("INGEST_HEARTBEAT_FILE", "/tmp/ingest-worker.heartbeat")
+)
+
+# How many missed passes before the heartbeat is called stale. ``poll_seconds``
+# is operator-tunable at runtime (5..3600), so a FIXED threshold is wrong at
+# either end: 45s is nothing at a 3600s cadence, and an hour is forever at 15s.
+# The loop therefore writes the interval it actually used INTO the heartbeat,
+# and the probe derives the threshold from that.
+_HEARTBEAT_MISSES = 3
+
+# Slack on top of the missed passes, because a pass is not instant. A real
+# ingest — validate, replace, re-stub, refresh views, embed, rebuild edges —
+# blocks the loop for minutes on a full catalog, and no heartbeat is written
+# while it runs. The threshold has to exceed the longest LEGITIMATE quiet
+# period, not the longest poll gap, or the one file that matters most turns the
+# worker red while it is doing exactly its job.
+_HEARTBEAT_GRACE_SECONDS = 300
+
+
+def _write_heartbeat(interval: int, state: str) -> None:
+    """Record that the loop completed a pass. Never raises.
+
+    ``state`` is "running" (a pass that scanned) or "paused" (automatic loading
+    is off). BOTH are healthy: the thing being measured is the loop, not the
+    ingest. An operator switches loading off deliberately, and a red
+    healthcheck for a deliberate setting is a false alarm that teaches people to
+    ignore the light. The state is written down anyway so whoever reads the file
+    can tell "nothing to do" from "told not to".
+
+    A failure to write is logged and swallowed — the loop must not die over its
+    own instrumentation. It does not go unnoticed either: an unwritable
+    heartbeat simply ages out and the container turns red, which is the correct
+    reading of a worker that cannot write to its own filesystem.
+    """
+
+    payload = {
+        "ts": time.time(),
+        "interval_seconds": int(interval),
+        "state": state,
+        "pid": os.getpid(),
+    }
+    tmp = HEARTBEAT_PATH.with_name(HEARTBEAT_PATH.name + ".tmp")
+    try:
+        HEARTBEAT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(payload))
+        # Atomic: the probe never reads a half-written file and calls it corrupt.
+        os.replace(tmp, HEARTBEAT_PATH)
+    except Exception:  # noqa: BLE001 - instrumentation must not stop the watcher
+        logger.warning("could not write heartbeat %s", HEARTBEAT_PATH, exc_info=True)
+
+
+def _heartbeat_status(now: Optional[float] = None) -> Tuple[bool, str]:
+    """(healthy, one-line reason) from the heartbeat file. Never raises."""
+
+    now = time.time() if now is None else now
+    try:
+        raw = HEARTBEAT_PATH.read_text()
+    except FileNotFoundError:
+        return False, (
+            f"no heartbeat at {HEARTBEAT_PATH} — the watch loop has not completed "
+            "a single pass since this container started"
+        )
+    except Exception as exc:  # noqa: BLE001
+        return False, f"heartbeat {HEARTBEAT_PATH} unreadable: {exc}"
+
+    try:
+        beat = json.loads(raw)
+        ts = float(beat["ts"])
+        interval = int(beat.get("interval_seconds") or 0)
+        state = str(beat.get("state") or "unknown")
+    except Exception as exc:  # noqa: BLE001
+        return False, f"heartbeat {HEARTBEAT_PATH} is not readable JSON: {exc}"
+
+    limit = _HEARTBEAT_MISSES * max(interval, 1) + _HEARTBEAT_GRACE_SECONDS
+    age = now - ts
+    if age > limit:
+        return False, (
+            f"last successful pass {age:.0f}s ago (state={state}, "
+            f"poll={interval}s, allowed {limit:.0f}s) — the watch loop is "
+            "erroring every pass or has stopped"
+        )
+    return True, f"last pass {age:.0f}s ago (state={state}, poll={interval}s)"
+
+
+def healthcheck() -> int:
+    """Exit code for ``python -m app.watcher --healthcheck``: 0 healthy, 1 not.
+
+    Deliberately does no Redis or Postgres call. A probe that reaches out to
+    dependencies flaps with them and reports the WORKER as broken when
+    something else is; this answers exactly one question — is the loop still
+    getting all the way round?
+    """
+
+    ok, reason = _heartbeat_status()
+    print(("ok: " if ok else "STALE: ") + reason)
+    return 0 if ok else 1
 
 
 def _dirs() -> Dict[str, Path]:
@@ -330,12 +451,20 @@ async def watch() -> None:
     loading off pauses this loop, leaving files to accumulate in the drop folder
     until an operator loads them from the console. Both take effect on the next
     iteration, with no restart.
+
+    Every pass that finishes without throwing writes the heartbeat the
+    container's healthcheck reads — including a pass that found no files (that
+    is a healthy pass; there was simply nothing to do) and a pass that was
+    paused. A pass that threw writes nothing, so a permanent failure ages the
+    heartbeat out and the container goes red instead of logging "scan error"
+    into the void forever.
     """
 
     sizes: Dict[str, int] = {}
     paused = False
     logger.info("watcher started; polling %s", get_settings().incoming_dir)
     while True:
+        state = None
         try:
             if await get_ingest_enabled():
                 if paused:
@@ -344,16 +473,35 @@ async def watch() -> None:
                 summary = await scan_once(stable_only=True, _sizes=sizes)
                 if summary["processed"] or summary["failed"]:
                     logger.info("scan: %s", summary)
-            elif not paused:
-                # Say it once, not every poll — this can sit off for days.
-                logger.info("automatic loading is off; files will wait in the drop folder")
-                paused = True
+                state = "running"
+            else:
+                if not paused:
+                    # Say it once, not every poll — this can sit off for days.
+                    logger.info(
+                        "automatic loading is off; files will wait in the drop folder"
+                    )
+                    paused = True
+                state = "paused"
         except Exception:  # noqa: BLE001 - keep the loop alive
             logger.exception("scan error")
-        await asyncio.sleep(await get_poll_seconds())
+
+        # Read AFTER the pass, so the interval stamped into the heartbeat is the
+        # one the loop is about to sleep for — the probe's threshold then tracks
+        # a cadence change on the very next pass.
+        interval = await get_poll_seconds()
+        if state is not None:
+            _write_heartbeat(interval, state)
+        await asyncio.sleep(interval)
 
 
 def main() -> None:
+    # The healthcheck runs as the same module so the staleness rule has ONE
+    # definition. A `test:` line in compose that re-implemented the arithmetic
+    # would drift from the loop that writes the file, and the drift would only
+    # show as a light that is wrong in one direction.
+    if "--healthcheck" in sys.argv[1:]:
+        raise SystemExit(healthcheck())
+
     logging.basicConfig(
         level=get_settings().log_level,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",

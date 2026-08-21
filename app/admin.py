@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import asyncpg
 import jwt
 from fastapi import (
     APIRouter,
@@ -38,6 +39,40 @@ from app.db import counts, execute, q
 from app.tools import _site_clause
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+# ---- "not created yet" is ONE error, not every error ------------------------
+#
+# This codebase applies schema at BOOT, so a first-boot console legitimately
+# queries relations that do not exist yet: `chat_logs` is created by the DDL in
+# `app.activity`, and `mv_article_summary` only after the first ingest. Those
+# reads must answer an empty list quietly rather than 500 an operator on a fresh
+# install.
+#
+# The tempting way to write that is `except Exception: return []`, and it is
+# wrong: it also swallows a syntax error, a dropped column, a pool failure and a
+# timeout, and hands every one of them back as "there is no data". On an AUDIT
+# surface (`/admin/conversations`) that is not a degraded answer, it is a false
+# statement — "no conversations took place" instead of "I could not answer" —
+# and the console's ErrorState never renders, so nobody is told to look.
+# Demonstrated by renaming the relation out from under the running code: both
+# endpoints answered 200 with zero rows and looked healthy.
+#
+# So catch exactly the missing-relation condition and let everything else
+# propagate to FastAPI as a 500. asyncpg raises `UndefinedTableError` for a
+# missing table AND for a missing materialized view (both are `relation ... does
+# not exist`, SQLSTATE 42P01); `UndefinedObjectError` covers a missing type or
+# other object referenced by the same first-boot query. Narrow on purpose — do
+# not widen this to `Exception`.
+#
+# `app.stores.ensure_stores_table` is the other shape of the same decision: it
+# pre-checks with `to_regclass` where it must not let the error abort a larger
+# block. Where a plain read is all that is at stake, catching the one exception
+# is cheaper (no extra round trip) and has no check-then-act window.
+_MISSING_RELATION = (
+    asyncpg.exceptions.UndefinedTableError,
+    asyncpg.exceptions.UndefinedObjectError,
+)
 
 
 def _int_or_none(v) -> Optional[int]:
@@ -884,7 +919,10 @@ async def overview(limit: int = 10) -> List[Dict]:
                  FROM mv_article_summary ORDER BY total_stock DESC LIMIT $1""",
             limit,
         )
-    except Exception:
+    except _MISSING_RELATION:
+        # The view is built by the first ingest, so a database that has never
+        # been loaded genuinely has no top articles. Anything else is a broken
+        # query and must reach the caller as a 500 — see `_MISSING_RELATION`.
         return []
     for r in rows:
         # NULL is UNKNOWN, not zero: `or 0` here would report a drug nobody has
@@ -975,7 +1013,12 @@ async def conversations(
                  LIMIT ${len(params)-1} OFFSET ${len(params)}""",
             *params,
         )
-    except Exception:  # table not created yet
+    except _MISSING_RELATION:
+        # `chat_logs` is created by the boot DDL, so a console opened during a
+        # fresh install has genuinely had no conversations. Every other failure
+        # propagates: this is the audit surface, and "no conversations took
+        # place" is a materially worse answer than "I could not answer".
+        # See `_MISSING_RELATION` — do not widen this back to `Exception`.
         return []
 
 
