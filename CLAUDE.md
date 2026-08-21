@@ -14,6 +14,41 @@ SvelteKit admin SPA ("Aurora" UI) is served at `/admin`.
   Flash variants, A/B picker). Override with `OPENROUTER_MODEL` env.
 - **Embeddings:** `google/gemini-embedding-2` (3072-dim, pgvector, exact scan).
 
+## Status (2026-08-21) — 1.7.0 in production
+
+Production runs **1.7.0 / `b431093`** at `https://citycareagent.citygpt.xyz`
+(the old `citypharma.citygpt.xyz` is dead — nginx-proxy-manager host 9 was
+renamed, and no code ever hardcoded the name). Local source `:8091` and the
+baked preview `:8092` are both 1.7.0. 1,313 tests pass.
+
+**Today, in order:** 1.6.3 branch-user console -> 1.6.4 SFTP key-only + the port
+fix -> 1.7.0 branch registry. Rollback notes for each are on the box in
+`/opt/backups/ROLLBACK-*.txt`.
+
+### 1.7.0 — the branch registry
+
+A branch used to exist only while it appeared in the daily file, which is
+truncate-and-reload — so a branch dropped from one export vanished from the
+console, the embed picker and every answer. Existence now comes from a `stores`
+registry that accumulates; stock still comes from the file. Missing-from-file is
+FLAGGED, never hidden. A super_admin can hide a branch (two-step confirm, the
+second step types the branch code); hidden means absent from answers, lists,
+totals and embed minting. Clicking a branch opens a detail panel: stock, rank,
+holdings, conversations, questions, embed code, and the audit trail INCLUDING
+refused attempts.
+
+Built by five parallel agents on disjoint files. Four things they caught that
+would otherwise have shipped are written up below as landmines — read them
+before touching `app/stores.py`, `app/tools.py` or `app/activity.py`.
+
+### The SFTP partner handoff is LIVE (2026-08-21)
+
+Port 2223 is now open at the AWS security group and a partner (ACME Pharma,
+`103.81.115.131`) authenticates successfully. Two keys are registered:
+`acme-pharma` (theirs, private half never left their server) and `cmhl-sftp`
+(ours, emailed — revoke once they confirm uploads work). sshd is KEY-ONLY since
+1.6.4; `SFTP_PASSWORD` is still the `change-me` default and is inert.
+
 ## Status (2026-08-03)
 
 **Functionally complete + running locally.** Services up (api/postgres/redis/sftp/
@@ -363,6 +398,108 @@ setting has moved.
   (`demo_html`, the outlet ZIP's `index.html`); a widget that opens itself on every page load of a
   pharmacy's own site is a product defect, and defaulting on makes that the result of forgetting an
   argument. Only `/embed/preview` passes True. Note it REBUILDS the snippet and discards the one passed in.
+
+## ⚠️ The branch registry (1.7.0) — four ways it can empty the whole product
+
+Everything here was found by RUNNING it, and each one reads as correct in review.
+
+**1. Never filter with `JOIN stores … WHERE status='active'`.** Against an empty
+registry that returns NOTHING, so the assistant answers "no stock anywhere" —
+worse than the bug being fixed. Use `stores.not_disabled_clause(col)`, which is
+an EXCLUSION (`NOT EXISTS … status='disabled'`). Absence then hides nothing;
+only a deliberate disable removes a branch. Measured both ways on the real
+53-branch data: helper 53 visible, join 0.
+
+**2. That clause MUST take a TABLE-QUALIFIED column.** `stores` has its own
+`site_code`, so a bare name binds to the INNER scope, the predicate becomes
+`_s.site_code = _s.site_code`, and `NOT EXISTS` goes false for EVERY branch the
+moment one is disabled. With nothing disabled the two forms are indistinguishable
+— it survives every test until the first real use. Both the helper and
+`tools._visible_site_clause` now raise on a bare name.
+
+**3. `first_seen` is NULL for branches that predate the registry, on purpose.**
+Seeding `now()` made all 53 read as "New" for a week and left the Active filter
+empty. A branch that existed before the registry has an UNKNOWN first-seen date.
+Do not backfill it.
+
+**4. Hiding a branch MUST bump `data_version`.** Only ingest bumps it otherwise,
+so the filter would apply to new queries while cached answers kept naming the
+hidden branch — up to a day. `store_set_status` bumps AFTER the write, both
+directions.
+
+Also: `app.stores` and `app.tools` import each other. Both imports are
+FUNCTION-LOCAL and must stay that way. Measured: one side at module scope is
+fine, BOTH together fail at startup with `cannot import name … partially
+initialized module`. The danger is that the first move appears to work.
+
+## ⚠️ `activity.action_for` compares the RAW path against a STRIPPED target
+
+`match_route` strips whitespace from the captured target; `action_for` walks the
+raw path. If they are compared literally, `/admin/stores/20043-CCSJ%20/status`
+leaves the branch code IN the action slug — one unique action per branch, and
+`stores.detail`'s fallback then renders that raw slug to a console user. Both
+sides strip now. This was introduced BY the fix for whitespace audit targets, an
+hour after that fix, and found by an agent reading the audit trail on screen.
+
+## ⚠️ A successful status change writes TWO audit rows
+
+The endpoint records one explicitly (so the branch and new status survive) and
+the `activity_audit` middleware records a companion. `stores.detail` dedupes on
+action + actor + status + `detail.status` + `detail.note` within 5s. Do NOT
+filter the middleware row out at the query instead: a REFUSED attempt produces
+only that row, and refusals are the most interesting entries on the panel.
+
+## ⚠️ SFTP: three routes, one branch code, and the trim that must happen once
+
+`/admin/stores/{code}/detail`, `/embed` and `/status` all take the same code.
+`stores.detail` and `set_status` strip it in Python; `_embeddable_codes` is a
+set-membership test that never reaches them. They disagreed until a single
+`_site_code_path` dependency normalised the code at the HTTP boundary. Trim once,
+at the edge — not per route.
+
+## ⚠️ A pytest run that prints no failures and no PASS COUNT ran ZERO tests
+
+Seen 2026-08-21 while two agents ran the suite at once:
+
+    -- Docs: https://docs.pytest.org/...
+    12 warnings in 34.29s
+
+No red, plausible duration, and **not one test executed**. The other run held all
+15 Redis DBs, so `tests/conftest.py` raised `ConftestImportFailure: every Redis
+DB in [1..15] is claimed by another pytest run` in all 8 xdist workers, and
+`tail` cut the "no tests ran" line above the fold. 34s is also too fast for this
+suite, which is the other tell.
+
+**Grep for `[0-9]+ passed`. Never accept the absence of the word "failed" as a
+pass.** `TEST_REDIS_DB=<n>` is the override when two runs must overlap.
+
+## ⚠️ A canary must put its distinctive token FIRST
+
+`_event_summary` truncates an echoed note at `_ECHO_MAX = 40` chars. A canary of
+`CANARY2 pharmacist under review DETAIL-KX41` grepped for `DETAIL-KX41` returned
+ZERO — the token was past the cut while the note itself sat in the summary in
+plain sight. That read as "the events are clean" and would have shipped a
+verified-clean result on a live leak.
+
+Distinctive token at the START, and never let a grep count be the only evidence
+across a transform that can truncate, redact or reformat. Print the value.
+
+## ⚠️ `stores.detail(privileged=False)` covers the ROW, and not everything in it
+
+The row's `disabled_by`/`disabled_at`/`note` are popped, AND the events block is
+rendered actor-less and note-free — because `_event_summary` renders the note
+INTO its sentence, so projecting only the row re-served the same words
+underneath. Measured: with the row projected but events not, the payload still
+matched `licence suspended` twice, including a reason from a branch that had
+since been re-enabled. **The audit trail is durable, so relaxing that gate
+exposes every reason ever typed for a branch, not just the current one.**
+
+`questions` is deliberately NOT gated: it is the reason anyone would relax the
+gate, it is row-scoped, it names no operator, and the ANSWER is already withheld.
+
+Any new section that reads `base`, an `app_events` row, or anything an operator
+typed must decide what it says under `False`. The argument will not do it for
+you and nothing will fail if you skip it.
 
 ## Architecture
 

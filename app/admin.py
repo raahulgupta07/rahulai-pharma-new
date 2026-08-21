@@ -158,6 +158,42 @@ async def require_super_admin(authorization: str = Header(default="")) -> Dict:
     return user
 
 
+async def caller_is_super_admin(authorization: str = Header(default="")) -> bool:
+    """Is this caller a super_admin? A yes/no, where ``require_super_admin`` is a gate.
+
+    Same mechanism as ``caller_store_scope`` and ``require_super_admin`` —
+    decode the bearer, then read the ROLE off the caller's ``users`` row. Never
+    off the token: the whole reason those two re-read the database is that a
+    demotion has to take effect on the account's existing session, and a field
+    projection that trusted the JWT would keep handing an ex-super_admin the
+    operator notes until their token expired.
+
+    This exists because ``GET /stores`` is not a gate — it answers for a plain
+    ``user`` and for a super_admin, with DIFFERENT fields (see ``_store_row``).
+    ``require_super_admin`` cannot express that: it raises 403, which would take
+    the branch list away from the console roles that legitimately read it.
+
+    An unreadable token is a rejected caller here exactly as it is there, rather
+    than a quiet ``False``. ``require_admin`` has already authenticated this same
+    token at the router level, so there is no legitimate way to arrive with a bad
+    one, and "not a super_admin" is the wrong description of "not authenticated".
+    """
+
+    from app import auth as authmod
+
+    if not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="missing bearer token")
+    try:
+        claims = authmod.decode_token(authorization.split(" ", 1)[1])
+    except Exception:  # noqa: BLE001 — any decode failure is a rejected caller
+        raise HTTPException(status_code=401, detail="invalid or expired session")
+
+    user = await authmod.get_by_email(claims.get("email", ""))
+    if not user:
+        raise HTTPException(status_code=401, detail="account not found")
+    return user["role"] == "super_admin"
+
+
 # ---- catalog ---------------------------------------------------------------
 
 
@@ -390,11 +426,48 @@ async def _registry_rows(scope: Optional[str] = None) -> Optional[List[Dict]]:
     return rows or None
 
 
-_STORE_TS_FIELDS = ("first_seen", "last_seen_in_file", "missing_since", "disabled_at")
+_STORE_TS_FIELDS = ("first_seen", "last_seen_in_file", "missing_since")
+
+# The three fields that describe WHO hid a branch and WHY. `note` is free text an
+# operator types into a super_admin-only dialog ("licence suspended", "pharmacist
+# under review"); `disabled_by` is that operator's email address.
+_STORE_PRIVILEGED_FIELDS = ("disabled_by", "disabled_at", "note")
 
 
-def _store_row(r: Dict) -> Dict:
-    """One registry row in the shape the console consumes.
+def _store_row(r: Dict, *, privileged: bool) -> Dict:
+    """One registry row in the shape the console consumes, projected for the caller.
+
+    Every path that answers ``GET /stores`` — the registry list, the live
+    fallback, and the echo after a status write — goes through here, so the
+    projection cannot be applied to one and forgotten on another. It is the only
+    place that decides which fields leave this endpoint.
+
+    ``privileged`` is the caller being a **super_admin**, and it gates
+    ``_STORE_PRIVILEGED_FIELDS`` — nothing else. Everything a console user needs
+    to read the branch list stays unconditional: the code, the name, the stock
+    aggregates, the ``status`` the Disabled chip is drawn from, and the three
+    timestamps ``routes/stores/status.js`` derives the other three states from
+    (``first_seen`` for New, ``missing_since`` for "not in the latest file",
+    ``last_seen_in_file`` for the row's sub-line). Dropping any of those would
+    silently collapse the four-state chips into two.
+
+    **Why super_admin and not "any admin".** Hiding a branch is a super_admin
+    feature end to end: the two-step dialog, ``POST /stores/{code}/status`` and
+    the ``/detail`` panel that shows the audit trail are all behind
+    ``require_super_admin``. A plain ``admin`` can neither hide a branch, nor
+    un-hide it, nor read the trail — so the operator's stated reason is not
+    something they can act on, and "licence suspended" or "pending fraud
+    investigation" about a named pharmacy is exactly the sentence whose audience
+    should be the smallest one that keeps the feature working. The person typing
+    it has no way to know who else can read it back, so the default has to be the
+    narrow one. A plain admin's row still says the branch is disabled; the
+    console already renders ``hidden by an admin`` when ``disabled_by`` is
+    absent, so the page degrades to the fact without the accusation.
+
+    The three fields are OMITTED rather than nulled. A ``null`` note is a real
+    state — a branch hidden without a reason — and sending one to say "you may
+    not see this" would put "hidden by an admin, no reason given" on screen for
+    a branch that has a reason.
 
     Used by the two paths that do NOT come straight from ``list_stores`` — the
     fallback, whose rows carry no registry fields, and the echo after a status
@@ -420,15 +493,16 @@ def _store_row(r: Dict) -> Dict:
         "skus": int(r.get("skus") or 0),
         "units": int(r.get("units") or 0),
         "value": float(r.get("value") or 0),
-        "disabled_by": r.get("disabled_by"),
-        "note": r.get("note"),
     }
     for f in _STORE_TS_FIELDS:
         out[f] = r.get(f)
+    if privileged:
+        for f in _STORE_PRIVILEGED_FIELDS:
+            out[f] = r.get(f)
     return out
 
 
-async def _stock_only_stores(scope: Optional[str]) -> List[Dict]:
+async def _stock_only_stores(scope: Optional[str], *, privileged: bool) -> List[Dict]:
     """The pre-registry answer: a per-site aggregate over `inventory`.
 
     Kept verbatim (view first, live aggregate second, both scope-filtered)
@@ -454,11 +528,14 @@ async def _stock_only_stores(scope: Optional[str]) -> List[Dict]:
             + " GROUP BY site_code ORDER BY value DESC",
             *args,
         )
-    return [_store_row(dict(r)) for r in rows]
+    return [_store_row(dict(r), privileged=privileged) for r in rows]
 
 
 @router.get("/stores")
-async def stores(scope: Optional[str] = Depends(caller_store_scope)) -> List[Dict]:
+async def stores(
+    scope: Optional[str] = Depends(caller_store_scope),
+    privileged: bool = Depends(caller_is_super_admin),
+) -> List[Dict]:
     """Every branch in the registry, with its stock summary. Falls back to live.
 
     Registry-backed, so a branch with no rows in today's file is still listed —
@@ -479,7 +556,21 @@ async def stores(scope: Optional[str] = Depends(caller_store_scope)) -> List[Dic
     ``list_stores`` applies it to the coalesced site code, so the scope pin is
     never re-implemented, only handed on.
 
-    ``list_stores`` rows are returned as they arrive. It aggregates live from
+    Field-projected by role as well as row-filtered by scope, and the two are
+    independent questions. ``scope`` decides WHICH branches this caller may see;
+    ``privileged`` decides which COLUMNS of them. An unpinned ``user`` account —
+    the norm, since pinning is newer than the console roles — has a ``None``
+    scope and therefore every branch, so the scope pin is no defence at all here
+    and never was; the projection is. See ``_store_row`` for what moves and why
+    the line is drawn at super_admin.
+
+    ``list_stores`` rows now go through ``_store_row`` rather than being returned
+    as they arrive, so this path and the two below cannot drift on what a branch
+    row contains. That costs the raw rows nothing: ``_store_row`` copies the
+    timestamps through untouched, exactly so that one encoder still renders them
+    and the two spellings of one instant recorded in its docstring stay fixed.
+
+    It aggregates live from
     `inventory` rather than from `mv_store_summary` — deliberate, on agent A's
     side: the MV carries no `site_name` and goes stale — and it has already
     coerced skus/units to int and value to float, which is what keeps the
@@ -488,8 +579,8 @@ async def stores(scope: Optional[str] = Depends(caller_store_scope)) -> List[Dic
 
     rows = await _registry_rows(scope)
     if rows is None:                      # registry raised -> pre-registry answer
-        return await _stock_only_stores(scope)
-    return rows
+        return await _stock_only_stores(scope, privileged=privileged)
+    return [_store_row(dict(r), privileged=privileged) for r in rows]
 
 
 def _site_code_path(site_code: str) -> str:
@@ -623,13 +714,19 @@ async def store_set_status(
     # the branch it just disabled as holding no stock. Re-read through the same
     # function the list uses so the row handed back is the same shape as the one
     # being replaced; the registry row stands in only if the re-read misses.
+    #
+    # The echo is projected like the list is, and here the flag is a CONSTANT:
+    # this route is `require_super_admin`-only (see the decorator), so the only
+    # caller that can reach this line is one that may read `disabled_by` and the
+    # note it just wrote. Deriving it from the caller again would suggest some
+    # other role can get here.
     try:
         for row in await stores_mod.list_stores(updated["site_code"]):
             if row["site_code"] == updated["site_code"]:
-                return _store_row(dict(row))
+                return _store_row(dict(row), privileged=True)
     except Exception:  # noqa: BLE001 — the write succeeded; never fail on the echo
         pass
-    return _store_row(dict(updated))
+    return _store_row(dict(updated), privileged=True)
 
 
 async def _scope_permits(scope: Optional[str], site_code: str) -> bool:
@@ -699,8 +796,17 @@ async def store_detail(
     if fn is None:                      # older registry build without the panel
         raise HTTPException(status_code=503, detail="store registry unavailable")
 
+    # `privileged=True` as a CONSTANT, exactly like the status echo above and for
+    # the same reason: `require_super_admin` on the decorator means the only
+    # caller who can reach this line may read `disabled_by` and the note. Deriving
+    # it from the caller here would suggest another role can arrive.
+    #
+    # It is passed explicitly rather than left to a default because `stores.detail`
+    # deliberately has no default (see its docstring): if the gate above is ever
+    # relaxed to `require_admin`, this line is where the question gets answered,
+    # and it should be visible at the call site rather than inherited.
     try:
-        return await fn(site_code)
+        return await fn(site_code, privileged=True)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown site_code {site_code!r}")
 

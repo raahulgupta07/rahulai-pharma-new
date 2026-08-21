@@ -596,8 +596,26 @@ def _detail_dict(raw: Any) -> Dict[str, Any]:
     return {}
 
 
-def _event_summary(action: str, status: Optional[int], detail: Dict[str, Any]) -> str:
+def _event_summary(
+    action: str, status: Optional[int], detail: Dict[str, Any], *, with_note: bool
+) -> str:
     """The sentence a pharmacy manager reads for one audit row.
+
+    ⚠️ **``with_note`` is the audit trail's half of the field projection, and it
+    is required for the same reason ``detail``'s ``privileged`` is.** The
+    operator's free-text reason is stored on the EVENT as well as on the branch,
+    so taking ``note`` off the row and leaving this function alone re-serves the
+    identical sentence one section further down the same payload — measured:
+    ``hid it — “licence suspended…”`` under a row with no ``note`` key at all.
+    Worse than the field it was meant to hide, because the trail is durable:
+    the row carries only the CURRENT reason, while the events carry every reason
+    ever typed for that branch.
+
+    ``False`` selects the note-free forms that already existed for the case where
+    a row carries no note — "hid it", "switched it back on", "changed whether it
+    is shown". Nothing else is suppressed: WHAT happened, WHETHER it took effect
+    and the HTTP status are all still said, because a reader who may know a
+    branch is hidden may know when and how it became hidden.
 
     ⚠️ **Every clause here has to be carried by the row itself.** The row knows
     the action, the HTTP status and the status/note that were sent; it does not
@@ -650,7 +668,7 @@ def _event_summary(action: str, status: Optional[int], detail: Dict[str, Any]) -
             # A 200 whose detail lost the status. Rare, and the honest reading is
             # "something about visibility changed", not a coin flip on which way.
             done = "changed whether it is shown"
-        return f"{done} — “{note}”" if note else done
+        return f"{done} — “{note}”" if (note and with_note) else done
 
     # Everything below did NOT take effect.
     if wanted == DISABLED:
@@ -740,12 +758,61 @@ def _dedupe_events(rows: List[Dict]) -> List[Dict]:
     return kept
 
 
-async def detail(site_code: str) -> Dict:
+#: Who hid a branch, when, and the reason they typed. See ``detail``'s
+#: ``privileged`` argument and ``admin._STORE_PRIVILEGED_FIELDS`` — the two lists
+#: are the same three fields and must stay that way.
+_PRIVILEGED_FIELDS = ("disabled_by", "disabled_at", "note")
+
+
+async def detail(site_code: str, *, privileged: bool) -> Dict:
     """Everything the console shows for one branch. Raises KeyError if unknown.
 
     Returns the keys a ``GET /admin/stores`` row already carries, plus the panel's
     own sections: ``rank``/``of_branches``/``pct_of_value``, ``negatives``,
     ``avg_price``, ``top_holdings``, ``chats``, ``questions``, ``events``.
+
+    ⚠️ **``privileged`` is REQUIRED and keyword-only, and that is the whole
+    point of it.** It gates ``_PRIVILEGED_FIELDS`` — ``disabled_by``,
+    ``disabled_at`` and the operator's free-text ``note`` ("licence suspended",
+    "pharmacist under review"), which arrive on ``base`` because this function
+    builds its answer out of a :func:`list_stores` row.
+
+    Today the only route here is ``require_super_admin``, so every caller passes
+    ``True`` and nothing changes. It exists for the change the endpoint's own
+    docstring names — relaxing that gate to ``require_admin`` so branch managers
+    can open their own branch. ``admin._scope_permits`` guards which ROWS such a
+    caller may read; it says nothing about COLUMNS, so that relaxation would
+    republish the reason a pharmacy was hidden on a second surface, hours after
+    it was taken off the first.
+
+    **What ``privileged=False`` covers, exactly.** Two places, because the reason
+    is stored twice:
+
+    * the three fields above, popped off the branch row; and
+    * the ``events`` trail — ``actor`` omitted, and ``_event_summary`` called
+      with ``with_note=False`` so the sentence keeps its verb and loses the
+      quotation.
+
+    ⚠️ **The second one was NOT covered by the first, and the gap was invisible
+    from the call site.** With only the fields projected, a payload carrying no
+    ``note`` key still said ``hid it — “licence suspended…”`` in its events, and
+    said it about EVERY hide in that branch's history rather than only the
+    current one, because the trail is durable where the row is not. So the true
+    statement about this argument is not "forgetting it is a ``TypeError``" — it
+    is that forgetting is a ``TypeError`` **and passing ``False`` was itself a
+    leak until the events block was projected too.** If you add a section to this
+    function that reads ``base``, an ``app_events`` row or anything an operator
+    typed, it is your job to decide what it says under ``False``; the argument
+    does not do it for you, and nothing here will fail if you skip it.
+
+    **``questions`` is deliberately NOT gated.** It is customer question text for
+    one branch, and it is the plausible REASON someone relaxes the gate — a
+    branch manager reading what their own customers ask is the feature, not a
+    side effect. It is also already scoped by ``admin._scope_permits`` to the
+    branch the caller may read, it names no operator, and :func:`detail` already
+    refuses to carry the ANSWER (see the warning below) which is where the
+    genuinely sensitive half of a conversation lives. Gating it would leave a
+    relaxed caller with a panel that has no reason to exist.
 
     **Existence is defined exactly as the branch list defines it** — registry row
     OR stock — so a branch the console lists can always be opened, and a branch it
@@ -803,6 +870,17 @@ async def detail(site_code: str) -> Dict:
     base = next((dict(r) for r in estate if r["site_code"] == code), None)
     if base is None:
         raise KeyError(code)
+
+    # Projected HERE, on the row itself, before anything else reads it — not on
+    # the way out. Everything below adds keys to `base`, so a filter applied at
+    # the `return` would be one more place to keep in step with a growing dict.
+    # Popped rather than nulled, for the reason `admin._store_row` records: a
+    # null note is a real state (hidden without a reason), and sending one to
+    # mean "you may not see this" would put "no reason given" on screen for a
+    # branch that has one.
+    if not privileged:
+        for f in _PRIVILEGED_FIELDS:
+            base.pop(f, None)
 
     value = float(base.get("value") or 0)
     total_value = sum(float(r.get("value") or 0) for r in estate)
@@ -956,14 +1034,27 @@ async def detail(site_code: str) -> Dict:
         for r in question_rows
     ]
 
+    # ⚠️ The trail is projected too, and this is not belt-and-braces — it was a
+    # second copy of the same secret. `actor_email` is the operator's address and
+    # `_event_summary` renders their note into its sentence, so a payload with
+    # the three top-level fields removed still said who hid the branch and why,
+    # about every hide in its history rather than only the current one.
+    #
+    # `actor` is DROPPED rather than nulled — same rule as the fields above: a
+    # null actor is a real state (a row whose token could not be read), and
+    # sending one to mean "you may not see this" would put an anonymous act on
+    # screen where a named one belongs. `status` and `at` stay: a reader who may
+    # know a branch is hidden may know when it happened and whether it took
+    # effect. They just do not get the operator's name or the operator's words.
     base["events"] = [
         {
             "action": r["action"],
-            "actor": r["actor_email"],
+            **({"actor": r["actor_email"]} if privileged else {}),
             "status": int(r["status"]) if r["status"] is not None else None,
             "at": _iso(r["ts"]),
             "summary": _event_summary(
-                r["action"], r["status"], _detail_dict(r.get("detail"))
+                r["action"], r["status"], _detail_dict(r.get("detail")),
+                with_note=privileged,
             ),
         }
         for r in _dedupe_events([dict(r) for r in event_rows])[:_EVENT_KEEP]
